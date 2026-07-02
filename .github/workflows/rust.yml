@@ -1,0 +1,39 @@
+name: Rust agent
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  agent-rs:
+    name: agent-rs build + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      # btleplug's Linux (BlueZ/D-Bus) backend needs libdbus headers to compile.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('agent-rs/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Test
+        run: cargo test --verbose

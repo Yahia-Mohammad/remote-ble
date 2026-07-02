@@ -1,0 +1,30 @@
+# XcodeGen spec — run `xcodegen generate` to produce RemoteBleClient.xcodeproj.
+# (Hand-writing a .pbxproj is error-prone; this YAML is the source of truth instead.)
+#
+# This project has no business logic of its own — the whole UI (RemoteBleApp) and the
+# scan/connect/GATT orchestration (RemoteBleController) live in :client-ui's commonMain (Compose
+# Multiplatform), on top of :client-sdk. This is purely the launcher shell every iOS Compose
+# Multiplatform app needs: an App/ContentView/ComposeView trio hosting ComposeUIViewController.
+name: RemoteBleClient
+options:
+  bundleIdPrefix: dev.warsha.ble.remoteble.iosclient
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+targets:
+  RemoteBleClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.ble.remoteble.iosclient
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      # Produced by `:client-ui:assembleRemoteBleClientReleaseXCFramework -PiosFramework`.
+      - framework: ../client-ui/build/XCFrameworks/release/RemoteBleClient.xcframework
+        embed: true

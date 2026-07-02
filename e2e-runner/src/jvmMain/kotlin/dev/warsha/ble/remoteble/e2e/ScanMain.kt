@@ -1,0 +1,89 @@
+@file:OptIn(ExperimentalApi::class, ExperimentalUuidApi::class)
+
+package dev.warsha.ble.remoteble.e2e
+
+import dev.warsha.ble.remoteble.client.DefaultAgentSession
+import dev.warsha.ble.remoteble.client.RemoteAdvertisement
+import dev.warsha.ble.remoteble.client.RemoteScanner
+import dev.warsha.ble.remoteble.client.TransportState
+import dev.warsha.ble.remoteble.client.WebSocketAgentTransport
+import dev.warsha.ble.remoteble.client.defaultWebSocketHttpClient
+import dev.warsha.ble.remoteble.protocol.CborProtocolCodec
+import com.juul.kable.ExperimentalApi
+import kotlin.system.exitProcess
+import kotlin.time.Duration.Companion.seconds
+import kotlin.uuid.ExperimentalUuidApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.delay
+
+/**
+ * Scan-only client: client SDK -> WebSocket -> agent -> radio. Lists every BLE
+ * advertisement the remote agent's radio sees for a fixed window, then exits.
+ *
+ * The client process has NO Bluetooth radio of its own — proving the proxied-scan
+ * path (e.g. an emulator scanning through the host Mac).
+ *
+ * Usage: java ... dev.warsha.ble.remoteble.e2e.ScanMainKt [ws-url] [seconds]
+ */
+fun main(args: Array<String>): Unit = runBlocking {
+    val url = args.getOrNull(0) ?: "ws://localhost:8080/agent"
+    val window = (args.getOrNull(1)?.toIntOrNull() ?: 15).seconds
+    val token = System.getenv("REMOTE_BLE_TOKEN")
+
+    println("== RemoteBle scan-only client ==")
+    println("agent : $url")
+    println("window: $window")
+    println()
+
+    val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    val http = defaultWebSocketHttpClient()
+    val session = DefaultAgentSession(
+        WebSocketAgentTransport(url, scope, http, authToken = token),
+        CborProtocolCodec(),
+        scope,
+    )
+
+    var found = 0
+    try {
+        print("• connecting transport ... ")
+        withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+        println("CONNECTED")
+
+        val seen = LinkedHashSet<String>()
+        println("• scanning (listing devices as they arrive):")
+        val job = RemoteScanner(session).advertisements
+            .onEach { adv: RemoteAdvertisement ->
+                val id = adv.identifier.toString()
+                if (seen.add(id)) {
+                    found++
+                    val name = adv.name ?: "(no name)"
+                    val uuids = if (adv.uuids.isEmpty()) "" else " uuids=${adv.uuids}"
+                    // Kable reports Int.MIN_VALUE when the advertisement carries no RSSI.
+                    val rssi = if (adv.rssi == Int.MIN_VALUE) "n/a" else adv.rssi.toString()
+                    println("    [%2d] %-28s rssi=%-5s id=%s%s".format(found, name, rssi, id, uuids))
+                }
+            }
+            .launchIn(scope)
+
+        delay(window)
+        job.cancel()
+        println()
+        println("------------------------------")
+        println("RESULT: $found unique device(s) seen via the remote agent.")
+    } catch (t: Throwable) {
+        println("FAIL: ${t.message}")
+    } finally {
+        http.close()
+        scope.cancel()
+    }
+
+    exitProcess(if (found > 0) 0 else 1)
+}

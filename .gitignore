@@ -1,0 +1,22 @@
+# Gradle / Rust build output
+.gradle/
+build/
+**/build/
+target/
+**/target/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+local.properties
+.kotlin/
+*.hprof
+
+# Claude Code local state
+.claude/
+
+# Kable, built from source here and published to mavenLocal (Maven Central doesn't yet
+# ship the JVM btleplug backend :agent needs) — see README.md, not part of this repo's history.
+/kable/

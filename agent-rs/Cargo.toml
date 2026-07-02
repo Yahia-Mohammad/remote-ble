@@ -1,0 +1,26 @@
+[package]
+name = "agent-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Warsha BLE Team"]
+description = "Native cross-platform RemoteBLE agent written in Rust"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+ciborium = "0.2"
+btleplug = "0.11"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+parking_lot = "0.12"
+http = "1.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+# `test-util` enables paused/virtual time (start_paused, time::advance) for the
+# registry's grace-timer tests; it is not part of tokio's "full" feature set.
+tokio = { version = "1.40", features = ["full", "test-util"] }

@@ -1,0 +1,57 @@
+[versions]
+kotlin = "2.4.0"
+coroutines = "1.11.0"
+serialization = "1.9.0"
+ktor = "3.5.0"
+koin = "4.2.1"
+jvm-toolchain = "17"
+
+# Android client target (Phase 7). AGP/compileSdk match the Kable fork so the
+# consumed klibs line up; minSdk >= Kable's own min (21).
+agp = "9.2.1"
+android-compile = "37"
+android-min = "24"
+
+# Pinned fork coordinates (published to mavenLocal when their phase is reached).
+# Kable derives its version from git; the untagged local fork publishes as "unspecified".
+kable = "unspecified"
+
+[libraries]
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-serialization-core = { module = "org.jetbrains.kotlinx:kotlinx-serialization-core", version.ref = "serialization" }
+kotlinx-serialization-cbor = { module = "org.jetbrains.kotlinx:kotlinx-serialization-cbor", version.ref = "serialization" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+
+# Ktor — WebSocket transport (Phase 3)
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-client-darwin = { module = "io.ktor:ktor-client-darwin", version.ref = "ktor" }
+ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
+ktor-server-websockets = { module = "io.ktor:ktor-server-websockets", version.ref = "ktor" }
+
+# Kable — the unified KMP BLE stack for both the agent (JVM/btleplug) and the client.
+# Consumed from mavenLocal (the local fork publishes as "unspecified").
+kable-core = { module = "com.juul.kable:kable-core", version.ref = "kable" }
+
+# Koin — composition-root DI (multiplatform; commonMain on the client, JVM on the agent).
+koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
+koin-test = { module = "io.insert-koin:koin-test", version.ref = "koin" }
+
+# JVM unit testing for the Android app module (kotlin-test mapped onto JUnit4, which AGP
+# runs for `src/test`). kotlin-test-junit transitively pulls kotlin-test and junit.
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+# AGP 9 dropped com.android.library compatibility with the Kotlin Multiplatform plugin;
+# multiplatform modules use the dedicated KMP library plugin instead.
+android-kmp-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+# The Android emulator client (:android-client) is a plain Android app, not a KMP module.
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

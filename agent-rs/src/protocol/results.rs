@@ -242,4 +242,20 @@ impl OpResult {
     pub fn err(error: AgentError) -> Self {
         OpResult::Err { error }
     }
+
+    /// Reply for a backend op that returns no payload (connect, write, observe…).
+    pub fn from_unit(result: Result<(), AgentError>) -> Self {
+        match result {
+            Ok(()) => OpResult::ok(None),
+            Err(e) => OpResult::err(e),
+        }
+    }
+
+    /// Reply for a backend op that returns a payload (discover, read, mtu…).
+    pub fn from_payload(result: Result<ResultPayload, AgentError>) -> Self {
+        match result {
+            Ok(payload) => OpResult::ok(Some(payload)),
+            Err(e) => OpResult::err(e),
+        }
+    }
 }

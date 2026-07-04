@@ -9,7 +9,10 @@ plugins {
     alias(libs.plugins.android.application) apply false
 }
 
+// Coordinates come from the tracked root gradle.properties (GROUP / VERSION_NAME) — the same
+// keys the vanniktech maven-publish plugin reads, so the published POM and the Gradle project
+// stay in lockstep. Bump VERSION_NAME to cut a release.
 allprojects {
-    group = "dev.warsha.ble.remoteble"
-    version = "0.1.0-SNAPSHOT"
+    group = providers.gradleProperty("GROUP").get()
+    version = providers.gradleProperty("VERSION_NAME").get()
 }

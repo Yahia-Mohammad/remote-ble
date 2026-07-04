@@ -10,13 +10,13 @@ The module is organized as the four layers described in
 [the architecture overview](README.md#the-clients-three-layers). This document walks
 them bottom-up.
 
-Source root: [`client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client)
+Source root: [`client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client)
 
 ---
 
 ## Layer 1 — Transport (`AgentTransport`)
 
-[`AgentTransport.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/AgentTransport.kt)
+[`AgentTransport.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/AgentTransport.kt)
 
 One bidirectional, message-oriented, **BLE-agnostic** link to one agent at an opaque
 endpoint.
@@ -42,7 +42,7 @@ transport a drop-in replacement.
 
 ### `WebSocketAgentTransport`
 
-[`WebSocketAgentTransport.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/WebSocketAgentTransport.kt) —
+[`WebSocketAgentTransport.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/WebSocketAgentTransport.kt) —
 the production Layer-1 impl over a Ktor WebSocket. One protocol frame = one binary
 WS message.
 
@@ -85,7 +85,7 @@ provides a default via an `expect`/`actual` (next section).
 
 ### `defaultWebSocketHttpClient()` — per-platform engine
 
-[`WebSocketClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/WebSocketClient.kt)
+[`WebSocketClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.kt)
 (expect) with one `actual` per target:
 
 ```kotlin
@@ -94,9 +94,9 @@ expect fun defaultWebSocketHttpClient(): HttpClient   // commonMain
 
 | Target | Engine | File |
 |---|---|---|
-| JVM | CIO | [`WebSocketClient.jvm.kt`](../client-sdk/src/jvmMain/kotlin/dev/warsha/ble/remoteble/client/WebSocketClient.jvm.kt) |
-| Android | OkHttp | [`WebSocketClient.android.kt`](../client-sdk/src/androidMain/kotlin/dev/warsha/ble/remoteble/client/WebSocketClient.android.kt) |
-| iOS | Darwin (NSURLSession) | [`WebSocketClient.ios.kt`](../client-sdk/src/iosMain/kotlin/dev/warsha/ble/remoteble/client/WebSocketClient.ios.kt) |
+| JVM | CIO | [`WebSocketClient.jvm.kt`](../client-sdk/src/jvmMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.jvm.kt) |
+| Android | OkHttp | [`WebSocketClient.android.kt`](../client-sdk/src/androidMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.android.kt) |
+| iOS | Darwin (NSURLSession) | [`WebSocketClient.ios.kt`](../client-sdk/src/iosMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.ios.kt) |
 
 This is a convenience only — the transport accepts any `HttpClient { install(WebSockets) }`,
 so an app needing proxy/TLS-pinning/timeout config builds its own and hands it in.
@@ -105,7 +105,7 @@ so an app needing proxy/TLS-pinning/timeout config builds its own and hands it i
 
 ## Layer 2 — Session (`AgentSession`)
 
-[`AgentSession.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/AgentSession.kt)
+[`AgentSession.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/AgentSession.kt)
 
 Turns the byte pipe into a request/response + event API.
 
@@ -236,7 +236,7 @@ non-Kable callers and by tests; the Kable adapters are thin wrappers over them.
 
 ### `RemoteGattClient`
 
-[`RemoteGattClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteGattClient.kt) —
+[`RemoteGattClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteGattClient.kt) —
 drives one device's ops over a session.
 
 ```kotlin
@@ -283,7 +283,7 @@ Key properties:
 
 ### `RemoteScanSource`
 
-[`RemoteScanSource.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteScanSource.kt) —
+[`RemoteScanSource.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteScanSource.kt) —
 the same channel-flow pattern for scanning.
 
 ```kotlin
@@ -297,7 +297,7 @@ filtered to that id, and issues a best-effort `ScanStop` on cancel.
 
 ### `RemoteTimeouts`
 
-[`RemoteGattClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteGattClient.kt) —
+[`RemoteGattClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteGattClient.kt) —
 per-op-class deadlines, tuned for the *relayed* worst case rather than localhost.
 
 ```kotlin
@@ -319,7 +319,7 @@ These implement Kable's interfaces so app code is identical local vs remote.
 
 ### `RemotePeripheral`
 
-[`RemotePeripheral.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemotePeripheral.kt) —
+[`RemotePeripheral.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemotePeripheral.kt) —
 a Kable `Peripheral` backed by an agent. App code written against `Peripheral` cannot
 tell it from a local one.
 
@@ -367,8 +367,8 @@ via `deviceHandleToIdentifier` (see below) — it isn't needed to operate the pe
 
 ### `RemoteScanner` and `RemoteAdvertisement`
 
-[`RemoteScanner.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteScanner.kt) /
-[`RemoteAdvertisement.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteAdvertisement.kt)
+[`RemoteScanner.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteScanner.kt) /
+[`RemoteAdvertisement.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteAdvertisement.kt)
 
 ```kotlin
 class RemoteScanner(session: AgentSession, filters: List<ScanFilter> = emptyList())
@@ -389,7 +389,7 @@ doesn't model (`txPower`, `isConnectable`, aggregate `manufacturerData`) are `nu
 
 Both `RemoteAdvertisement.identifier` and `RemotePeripheral.identifier` go through an
 internal `expect fun deviceHandleToIdentifier(value: String): Identifier`
-([`RemoteIdentifier.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteIdentifier.kt)),
+([`RemoteIdentifier.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteIdentifier.kt)),
 **not** Kable's `String.toIdentifier()`. The agent mints handles as macOS CoreBluetooth
 **UUID** strings, but Kable's Android `Identifier` is a MAC address and its `toIdentifier()`
 throws `"MAC Address has invalid format"` for a UUID — which crashed Android clients the
@@ -400,7 +400,7 @@ only — remote ops key off `DeviceHandle`. Guarded by `RemoteAdvertisementIdent
 
 ### `peripheralFor` and `RemotePeripheralFactory` — the decision point
 
-[`RemotePeripheralFactory.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemotePeripheralFactory.kt) —
+[`RemotePeripheralFactory.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemotePeripheralFactory.kt) —
 **the one place the local-vs-remote choice lives.**
 
 ```kotlin
@@ -429,7 +429,7 @@ scopes deterministic (guarded by `KableAdapterTest.factoryThreadsInjectedDispatc
 
 ### `DispatcherProvider` — the dispatcher seam
 
-[`DispatcherProvider.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/DispatcherProvider.kt) —
+[`DispatcherProvider.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/DispatcherProvider.kt) —
 a one-member seam (`val default: CoroutineDispatcher`) so the SDK's own scopes can run on an
 injected dispatcher in tests instead of `Dispatchers.Default`. Only `default` is modelled: the
 library has no UI and does no blocking I/O of its own, and `Dispatchers.IO` doesn't exist in
@@ -438,11 +438,11 @@ library has no UI and does no blocking I/O of its own, and `Dispatchers.IO` does
 
 ### UUID + discovery mapping helpers
 
-- [`KableUuid.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/KableUuid.kt) —
+- [`KableUuid.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/KableUuid.kt) —
   `parseBleUuid(value)` expands 16-/32-bit Bluetooth SIG short forms (e.g. `"180d"`)
   to their 128-bit canonical form using the Bluetooth base UUID, then parses to a
   Kotlin `Uuid`.
-- [`RemoteDiscovered.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteDiscovered.kt) —
+- [`RemoteDiscovered.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteDiscovered.kt) —
   builds Kable's `DiscoveredService`/`DiscoveredCharacteristic`/`DiscoveredDescriptor`
   tree from the agent's `List<ServiceNode>`, mapping `CharNode.properties` into a
   Kable `Characteristic.Properties` bitmask, so `peripheral.services` navigates
@@ -479,7 +479,7 @@ receives.
 
 Every class above takes its collaborators as constructor parameters, so manual wiring
 (as shown) always works and is what the tests use. For apps that already run Koin,
-[`client/di/ClientModule.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/di/ClientModule.kt)
+[`client/di/ClientModule.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/di/ClientModule.kt)
 offers `remoteBleClientModule(config)` — a `commonMain` module (so it compiles for every
 target) that binds the same constructors:
 

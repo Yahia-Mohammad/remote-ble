@@ -1,0 +1,69 @@
+name: Bug report
+description: Report something that isn't working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! Please fill in the details below so it can be
+        reproduced. For **security** issues, do not use this form — see
+        [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, and a code snippet if relevant.
+      placeholder: |
+        1. Construct a RemotePeripheral via peripheralFor(...)
+        2. connect()
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: client-platform
+    attributes:
+      label: Client platform
+      description: Where the client SDK is running.
+      options:
+        - JVM
+        - Android
+        - iOS
+        - Not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      description: Which agent implementation the client is talking to.
+      options:
+        - Kotlin JVM agent (:agent)
+        - Rust agent (agent-rs)
+        - Android phone agent (android-agent)
+        - iOS phone agent (ios-agent)
+        - Not applicable / unsure
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: RemoteBLE version + Kable version (`com.juul.kable:kable-core`).
+      placeholder: "RemoteBLE 0.7.0, Kable 0.43.1"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Agent/client logs, stack traces. Switch the codec to JSON for readable frames if helpful.
+      render: shell
+    validations:
+      required: false

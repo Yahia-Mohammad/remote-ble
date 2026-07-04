@@ -2,6 +2,10 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.kmp.library)
+    // Maven Central (Central Portal) publishing. Configured entirely by the POM_* /
+    // SONATYPE_HOST / RELEASE_SIGNING_ENABLED properties in gradle.properties + this
+    // module's gradle.properties; auto-wires the KMP + per-target publications.
+    alias(libs.plugins.vanniktech.maven.publish)
 }
 
 kotlin {
@@ -13,7 +17,7 @@ kotlin {
     jvm()
     // AGP 9 KMP library DSL (replaces androidTarget {} + the top-level android {} block).
     android {
-        namespace = "dev.warsha.ble.remoteble.protocol"
+        namespace = "dev.warsha.remoteble.protocol"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
     }

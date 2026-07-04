@@ -16,19 +16,21 @@ assumes you can build the repo (`./gradlew build`) and have read nothing else.
 ## Part 1 — Run an agent
 
 The agent is the process next to the Bluetooth device that owns the real radio. The
-reference agent runs on the JVM over Kable's native (`btleplug`) backend; on macOS that's
-CoreBluetooth under the hood:
+reference agent (`:agent`) targets the JVM, Android, and iOS; this tutorial uses the JVM
+target, which runs over Kable's native (`btleplug`) backend — on macOS that's
+CoreBluetooth under the hood (see [below](#or-a-phone-as-the-agent) for the Android/iOS
+apps):
 
 ```sh
 agent/run-agent.sh 8080
-# → Remote BLE agent listening on ws://0.0.0.0:8080/agent (no auth, shared peripherals, Kable engine on Mac OS X)
+# → RemoteBLE agent listening on ws://0.0.0.0:8080/agent (no auth, shared peripherals, Kable engine on Mac OS X)
 # → Status dashboard: http://localhost:8080/
 ```
 
 > Use `agent/run-agent.sh`, **not** `./gradlew :agent:jvmRun` — a bare JVM is killed by macOS
 > TCC the instant it touches CoreBluetooth (it has no `NSBluetoothAlwaysUsageDescription`). The
 > script wraps the agent in a signed `.app` and launches it via LaunchServices. See
-> [agent.md](agent.md#the-runnable-agent--main).
+> [agent.md](agent.md#the-runnable-agent-jvm--main).
 
 macOS will prompt for Bluetooth permission on the first run — grant it.
 
@@ -62,6 +64,23 @@ yet serve the status dashboard or the optional capability extensions. Its wire f
 pinned to the Kotlin contract by cross-language interop tests (see
 [build-and-testing.md](build-and-testing.md#the-native-rust-agent-agent-rs-tests)).
 
+### Or: a phone as the agent
+
+`:agent` also targets Android and iOS directly — same server, same wire contract, a
+Compose Multiplatform status UI instead of a terminal. `./gradlew :android-agent:installDebug`
+(or the `ios-agent/` Xcode project on a physical iPhone) installs an app that hosts the
+agent on the phone's own radio. Grant the Bluetooth permission it requests, tap **Start**, and
+point a client at the `ws://<phone-ip>:8080/agent` the screen shows (the app resolves the LAN IP
+for you). Because the phone listens on the open Wi-Fi in cleartext, the mobile agent is **always
+token-protected**: type an auth token or let it auto-generate one — it's shown next to the address,
+and the client passes it as `WebSocketAgentTransport.authToken`. iOS can't keep the agent running
+backgrounded (no equivalent of Android's foreground service — see
+[agent.md](agent.md#android--ios-a-phone-as-the-agent)), so keep that app open.
+
+> The Android/iOS agent apps are **dev/test tools**, not shipping builds — they serve over
+> cleartext `ws://` (the iOS launcher carries a blanket App Transport Security exception). Run
+> them on a trusted network.
+
 ---
 
 ## Part 2 — Connect a client
@@ -70,8 +89,8 @@ A client needs three things: a **transport** (the link to the agent), a **codec*
 (CBOR), and a **session** (the request/response + event layer) built on them.
 
 ```kotlin
-import dev.warsha.ble.remoteble.client.*
-import dev.warsha.ble.remoteble.protocol.CborProtocolCodec
+import dev.warsha.remoteble.client.*
+import dev.warsha.remoteble.protocol.CborProtocolCodec
 import kotlinx.coroutines.*
 
 val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -194,8 +213,8 @@ A real radio disconnect flips `peripheral.state` to `State.Disconnected` and cle
 it failed:
 
 ```kotlin
-import dev.warsha.ble.remoteble.protocol.AgentException
-import dev.warsha.ble.remoteble.protocol.ErrorKind
+import dev.warsha.remoteble.protocol.AgentException
+import dev.warsha.remoteble.protocol.ErrorKind
 
 try {
     peripheral.write(characteristic, payload, WriteType.WithResponse)
@@ -259,8 +278,9 @@ val transport = WebSocketAgentTransport(url, scope, httpClient)
 - **One agent** in v1 — there's no multi-agent registry yet. Multiple clients *can* share
   one agent, but each peripheral is owned by one client at a time (a second client's connect
   to an owned peripheral fails with `PERIPHERAL_BUSY`; switchable per peripheral, default block).
-- The reference **agent runs on macOS**; the client builds for JVM (tests), Android,
-  and iOS.
+- The reference **agent runs on macOS/Linux (JVM), Android, and iOS**; the client builds
+  for JVM (tests), Android, and iOS. iOS can't run the agent backgrounded — see
+  [agent.md](agent.md#android--ios-a-phone-as-the-agent).
 
 ---
 

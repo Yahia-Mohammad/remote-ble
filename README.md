@@ -1,6 +1,7 @@
-# Remote BLE Transport
+# RemoteBLE
 
 [![Build](https://github.com/Yahia-Mohammad/remote-ble/actions/workflows/build.yml/badge.svg)](https://github.com/Yahia-Mohammad/remote-ble/actions/workflows/build.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/dev.warsha.remoteble/client-sdk?label=Maven%20Central)](https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A "remote mode" for a Kotlin Multiplatform BLE stack: client app code written against
@@ -8,34 +9,71 @@ A "remote mode" for a Kotlin Multiplatform BLE stack: client app code written ag
 peripheral is physically local or driven by a remote **agent** over an IP link
 (WebSocket). Not affiliated with JUUL Labs or the Kable project.
 
+Inspired by [ESPHome's Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy/),
+which pioneered relaying the full BLE/GATT surface over IP behind the host BLE library's own
+interface (Bleak + Home Assistant there, Kable here) — RemoteBLE applies the same idea to
+Kotlin Multiplatform and OS-class hosts for development, testing, and CI. Independent and
+not affiliated with the ESPHome or Home Assistant projects.
+
+## Installation
+
+The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client-sdk`
+(Kotlin Multiplatform: JVM, Android, iOS). It pulls `:protocol` and Kable transitively.
+
+```kotlin
+// build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
+dependencies {
+    implementation("dev.warsha.remoteble:client-sdk:0.7.0")
+}
+```
+
+**iOS** is covered by the same coordinate: it's a Kotlin Multiplatform publication, so an
+iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) resolves the
+`iosArm64`/`iosSimulatorArm64`/`iosX64` klibs from Central automatically. There is no separate
+Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
+
+The **agent** is run from source (`agent/run-agent.sh`, the `agent-rs` binary, or the phone
+apps), not consumed as a dependency — see [Running the agent](#running-the-agent-live-macos).
+
+## Use cases
+
+- **Test Kable BLE apps in the Android emulator / iOS simulator** — neither has a Bluetooth radio,
+  so point the app at an agent on a machine that does and scan/connect/read/write/observe as if local.
+- **Run BLE integration tests in CI** — a headless job (or self-hosted runner) with no radio drives
+  real hardware on a lab machine; `:e2e-runner` is built for exactly this.
+- **Access remote BLE hardware** — drive a device beside another machine (a lab rig, a Raspberry Pi)
+  from your laptop or CI over the network.
+- **Share one BLE device across a team** — the agent leases a peripheral to one client at a time
+  (exclusive by default, switchable to shared), so several people can use a scarce device without colliding.
+- **Add remote access to an existing local BLE system** — local-vs-remote is a factory choice
+  (`peripheralFor(mode, …)`), so Kable code gains it with essentially no rewrite.
+
+## Features
+
+- **Minimal changes for Kable apps** — remote is a construction choice, not an app-code change (proven by `KableAdapterTest`).
+- **Multiplatform** — client on JVM/Android/iOS; agents on macOS/Linux (JVM *or* native Rust), Android, and iOS.
+- **Lightweight agent** — one self-bootstrapping script to run; the Rust agent is a single native binary, and phones run it from an app.
+- **Full GATT surface over the wire** — scan, connect, discover, read, write, observe (notify), descriptors, MTU, pairing, connection priority, connection slots, batched scan.
+- **Multi-client with peripheral ownership** — one agent serves many clients; peripherals are leased (exclusive by default, per-device shared/exclusive toggle) and ownership resumes across brief reconnects.
+- **Resilient by design** — reconcile-on-reconnect (auto-replays connections / subscriptions / scans), per-op-class timeouts, and WebSocket liveness pings.
+- **Transport-agnostic** — the transport seam is a plain byte pipe; WebSocket today, raw TCP or a cloud relay drop in without touching the session or BLE layers.
+- **Two agents, one wire contract** — a Kotlin/Kable and a native Rust/`btleplug` agent, both speaking the same versioned, capability-negotiated **CBOR** protocol (JSON for debugging), interop-tested.
+- **Optional bearer-token auth** at the handshake, plus a live status dashboard (native Compose UI on the phone agents).
+
 ## How it works
 
 In **remote** mode, `RemotePeripheral`/`RemoteScanner` implement Kable's own `Peripheral`/
 `Scanner` interfaces, but forward every call over an IP link to an **agent** process near the
 physical device, which drives the real radio and streams results/events back:
 
-```
-   ┌──────────────────────────┐                       ┌───────────────────────────┐
-   │      Client process       │     IP link           │       Agent process       │
-   │  (phone / laptop / CI)    │   (WebSocket/CBOR)    │   (near the BLE device)   │
-   │                           │                       │                           │
-   │  app code                 │                       │                           │
-   │    │ uses                 │                       │                           │
-   │    ▼                      │   Command  ───────▶   │   BleAgent ──▶ BleBackend │
-   │  Kable Peripheral         │                       │                  │        │
-   │   = RemotePeripheral      │   ◀───────  Reply     │                  ▼        │
-   │    │                      │   ◀───────  Event     │            real radio     │
-   │    ▼                      │                       │          (CoreBluetooth,  │
-   │  AgentSession             │                       │           Android BLE…)   │
-   │    │                      │                       │                  │        │
-   │    ▼                      │                       │                  ▼        │
-   │  AgentTransport ──────────┼───────────────────────┼──▶ AgentWebSocketServer   │
-   └──────────────────────────┘                       └────────────────┬──────────┘
-                                                                  physical BLE
-                                                                        │
-                                                                   ┌────▼────┐
-                                                                   │ device  │
-                                                                   └─────────┘
+```mermaid
+flowchart LR
+    Client["Client process · phone / laptop / CI<br/>———————<br/>app code<br/>↓<br/>Kable Peripheral<br/>(= RemotePeripheral / RemoteScanner)<br/>↓<br/>AgentSession<br/>↓<br/>AgentTransport"]
+    Agent["Agent process · near the BLE device<br/>———————<br/>AgentWebSocketServer<br/>↓<br/>BleAgent<br/>↓<br/>BleBackend<br/>↓<br/>real radio<br/>(CoreBluetooth · Android BLE · btleplug)"]
+    Dev(["BLE<br/>device"])
+    Client -->|"Command<br/>(WebSocket / CBOR)"| Agent
+    Agent -->|"Reply / Event"| Client
+    Agent --> Dev
 ```
 
 In **local** mode it's the box on the left minus the IP link — ordinary Kable, talking to the
@@ -55,19 +93,19 @@ architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 |---|---|---|
 | `:protocol` | The wire contract (`Frame`/`Op`/`OpResult`/`AgentEvent`) + CBOR/JSON codec | kotlinx-serialization only — **no BLE/network**. Targets: JVM + Android + iOS |
 | `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, coroutines, Kable. Targets: JVM (tests) + Android + iOS |
-| `:agent` | Remote Bluetooth agent (JVM) + live status dashboard. Run via `agent/run-agent.sh` | `:protocol`, coroutines, Ktor server, Kable (JVM target) |
+| `:agent` | Remote Bluetooth agent (Kotlin) + live status dashboard + a Compose Multiplatform status UI (Android/iOS). Run via `agent/run-agent.sh` (JVM) or the `android-agent`/`ios-agent` apps | `:protocol`, coroutines, Ktor server, Kable, Compose Multiplatform. Targets: JVM + Android + iOS |
 | `agent-rs` | Native cross-platform Bluetooth agent (Rust 2024). Run via the self-bootstrapping `run-agent-rs.sh` | tokio, tokio-tungstenite, btleplug, serde/ciborium. Targets: macOS + Linux |
 | `:e2e-runner` | Live E2E runner (`jvmRun`) + radio-less scan smoke test (`scanRun`) | `:client-sdk` (JVM). See [README](e2e-runner/README.md) |
 | `:client-ui` | The central demo's UI (`RemoteBleApp`: `ScanScreen`/`DeviceScreen`) + orchestration (`RemoteBleController`) — Compose Multiplatform, shared by `:android-client` and `ios-client/` | `:client-sdk`. Targets: Android (library) + iOS |
 | `:android-client` | Thin Android app shell around `:client-ui`: scans through the host agent over `ws://10.0.2.2:8080/agent` (no radio, `INTERNET` only) | `:client-ui` |
 | `ios-client/` | Thin, logic-free XcodeGen launcher shell for `:client-ui`'s iOS target (standalone Xcode project, **not** a Gradle module) | `:client-ui`'s exported `RemoteBleClient.xcframework`. See [README](ios-client/README.md) |
+| `:android-agent` | Thin Android app shell around `:agent`'s androidTarget: runs the real agent (BLE central + WebSocket server + dashboard) on the phone's own radio, in a foreground service | `:agent` |
+| `ios-agent/` | Thin, logic-free XcodeGen launcher shell for `:agent`'s iOS target (standalone Xcode project, **not** a Gradle module) | `:agent`'s exported `RemoteBleAgent.xcframework`. See [README](ios-agent/README.md) |
 
-> **You'll need a test peripheral to try the full connect/read/write/observe path.** Any GATT
-> peripheral works for exercising `:android-client` — e.g. a Heart Rate / Battery Service
-> advertiser for the demo UI, or your own test app exposing custom UUIDs for exercising the raw
-> op-set (reads/writes/notify/pairing/forced errors). See
-> [`docs/phase7-bringup.md`](docs/phase7-bringup.md) for a scripted live bring-up procedure against
-> a real radio.
+> **You'll need a test peripheral for the full connect/read/write/observe path.** Any GATT
+> peripheral works — a Heart Rate / Battery advertiser for the demo UI, or your own app with custom
+> UUIDs for the raw op-set. See [`docs/phase7-bringup.md`](docs/phase7-bringup.md) for a scripted
+> live bring-up.
 
 ## Pinned versions
 
@@ -79,7 +117,7 @@ architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 | Gradle | 9.5.1 (wrapper) |
 | Android Gradle Plugin | 9.2.1 (compileSdk 37, minSdk 24) |
 | JDK toolchain | 17 |
-| Kable | `com.juul.kable:kable-core`, built from source — powers **both** the client SDK and the JVM agent's radio engine |
+| Kable | `com.juul.kable:kable-core:0.43.1` (Maven Central) — powers **both** the client SDK and the JVM agent's radio engine (the JVM `btleplug` backend ships in this release) |
 
 Wire format: **CBOR** over the transport; a JSON codec is available for debugging.
 
@@ -90,58 +128,16 @@ Wire format: **CBOR** over the transport; a JSON codec is available for debuggin
 ./gradlew build                      # all modules + targets (JVM/Android/iOS klibs)
 ```
 
-`build` compiles every target but runs the unit suite on the **JVM** only. iOS test
-*binaries* are skipped because linking them needs a full Xcode simulator toolchain
-(`xcode-select` pointed at `Xcode.app`, not the Command Line Tools) — the library klibs
-still compile, so the Android/iOS targets are verified. A bumped `org.gradle.jvmargs`
-(in `gradle.properties`) gives the daemon the Metaspace the multiplatform + AGP + Native
-build needs. Android builds resolve the SDK from `local.properties` (`sdk.dir`).
+`build` compiles every target but runs the unit suite on the **JVM** only — iOS test *binaries*
+need a full Xcode toolchain, though the library klibs still compile so all targets are verified.
+`gradle.properties` bumps the daemon heap for the multiplatform/AGP/Native build; Android resolves
+the SDK from `local.properties` (`sdk.dir`).
 
 ```sh
 # Needs a Mac with Xcode — builds the framework ios-client/ embeds:
 sudo xcode-select -s /Applications/Xcode.app
 ./gradlew :client-ui:assembleRemoteBleClientReleaseXCFramework -PiosFramework
 ```
-
-## Building Kable from source (mavenLocal)
-
-This project needs [Kable](https://github.com/JuulLabs/kable) built from source and
-published to `mavenLocal()` — **not** because it's forked or modified (it's plain
-upstream `JuulLabs/kable`, unchanged), but because Maven Central's published
-`com.juul.kable:kable-core` (currently `0.37.1`) doesn't yet include the JVM/desktop
-`btleplug` backend this project's `:agent` runs on (merged upstream in
-[kable#901](https://github.com/JuulLabs/kable/pull/901), not yet released). Once Kable
-ships a release with that backend, this step — and the `mavenLocal()` entry in
-[`settings.gradle.kts`](settings.gradle.kts) — can go away in favor of Maven Central.
-
-```sh
-# Clone plain upstream Kable next to this repo.
-git clone https://github.com/JuulLabs/kable.git ../kable
-cd ../kable
-
-# Needs Rust (rustup) for the kable-btleplug-ffi JVM backend;
-# -PRELEASE_SIGNING_ENABLED=false skips signing for local publish.
-# Publishes as version "unspecified" (an untagged checkout derives no version) —
-# this project's Kable dependency is pinned to that same "unspecified" version.
-PATH="$HOME/.cargo/bin:$PATH" ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew \
-  :kable-btleplug-ffi:publishToMavenLocal \
-  :kable-core:publishKotlinMultiplatformPublicationToMavenLocal \
-  :kable-core:publishJvmPublicationToMavenLocal \
-  -PRELEASE_SIGNING_ENABLED=false
-
-# Kable Android + iOS variants — needed for :client-sdk / :client-ui / :android-client /
-# ios-client. Apple klibs require a macOS host; no Rust FFI (Apple uses CoreBluetooth,
-# Android the platform BLE), but ANDROID_HOME is still needed to configure the androidTarget.
-PATH="$HOME/.cargo/bin:$PATH" ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew \
-  :kable-core:publishAndroidPublicationToMavenLocal \
-  :kable-core:publishIosArm64PublicationToMavenLocal \
-  :kable-core:publishIosSimulatorArm64PublicationToMavenLocal \
-  :kable-core:publishIosX64PublicationToMavenLocal \
-  -PRELEASE_SIGNING_ENABLED=false
-```
-
-`mavenLocal()` is listed first in `settings.gradle.kts` so the local build wins. Kable is
-Apache 2.0 licensed, same as this project.
 
 ## Running the agent (live, macOS)
 
@@ -152,15 +148,13 @@ agent/run-agent.sh 8080                       # ws://0.0.0.0:8080/agent, real Co
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 ```
 
-**Use the script, not `./gradlew :agent:jvmRun`.** A bare JVM process is killed with
-`SIGABRT` the instant it touches CoreBluetooth: macOS TCC requires the running
-process's main bundle to declare `NSBluetoothAlwaysUsageDescription`, and the request
-is only honored for apps launched via LaunchServices. The script compiles a tiny JNI
-launcher (`agent/macos-launcher/launcher.c` + a Swift menu bar UI in `MenuBar.swift`),
-wraps it in a signed `RemoteBleAgent.app` carrying that key, and starts it with `open`,
-then streams the agent log (Ctrl-C stops the agent). On first run macOS prompts once
-for Bluetooth permission. A menu bar status item (🟢/🟡) shows at a glance whether the
-agent is running, with a dropdown of recent activity and a link to the dashboard.
+<a id="macos-tcc"></a>
+**Use the script, not `./gradlew :agent:jvmRun`.** A bare JVM is `SIGABRT`-ed the instant it
+touches CoreBluetooth — macOS TCC only grants Bluetooth to a signed `.app` bundle that declares
+`NSBluetoothAlwaysUsageDescription` and is launched via LaunchServices. The script wraps a tiny JNI
+launcher (`agent/macos-launcher/`) in such a bundle, `open`s it, and streams the log (Ctrl-C stops
+it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows status with recent
+activity and a dashboard link.
 
 Point a client `WebSocketAgentTransport` at `ws://<host>:8080/agent`. When
 `REMOTE_BLE_TOKEN` is set, a client without the matching token is rejected at the
@@ -181,24 +175,47 @@ agent-rs/run-agent-rs.sh 8080
 REMOTE_BLE_TOKEN=secret agent-rs/run-agent-rs.sh 8080
 ```
 
-On **macOS** specifically, the script also does one more thing a plain `cargo run` can't: a bare
-`cargo run --bin agent-rs` aborts with **SIGABRT**, because macOS TCC kills any process that
-touches CoreBluetooth without an `NSBluetoothAlwaysUsageDescription` in its main bundle, honored
-only when launched via LaunchServices (same root cause as the JVM agent's `:agent:jvmRun`). So on
-macOS the script wraps the compiled binary in a signed `RemoteBleAgentRs.app` carrying that key
-and launches it with `open`; on Linux there's no such dance — it just builds and runs the binary
-directly, talking to BlueZ over D-Bus.
+On **macOS** the script wraps the binary in a signed `RemoteBleAgentRs.app` and `open`s it (the
+same TCC/`SIGABRT` reason as the [JVM agent above](#macos-tcc)); the first launch prompts once for
+Bluetooth — approve it, and re-run if the first scan is empty. On **Linux** it just builds and runs
+the binary directly, talking to BlueZ over D-Bus. Either way it streams the log; Ctrl-C stops it.
 
-The first launch on macOS shows a one-time "RemoteBleAgentRs would like to use Bluetooth"
-prompt — approve it (re-run if the first scan comes back empty). The script streams
-the agent log; Ctrl-C stops the app.
+### Running the agent on a phone (Android / iOS)
+
+`:agent` also targets Android and iOS — same radio/protocol/server logic
+(`EngineBleBackend` drives Kable's native Android BLE / CoreBluetooth backends there, no
+`btleplug`), a Compose Multiplatform status UI in place of a terminal, and a persistent
+notification (Android) instead of a log stream.
+
+```sh
+# Android — a real device or emulator with Google APIs; grant the Bluetooth prompt.
+./gradlew :android-agent:installDebug
+
+# iOS — needs a Mac with Xcode, and a physical iPhone (the Simulator has no real radio):
+sudo xcode-select -s /Applications/Xcode.app
+./gradlew :agent:assembleRemoteBleAgentReleaseXCFramework -PiosFramework
+cd ios-agent && xcodegen generate && open RemoteBleAgent.xcodeproj
+```
+
+Tap **Start** in the app; a laptop on the same network can then point a client (or
+`:e2e-runner:scanRun`) at `ws://<phone-ip>:8080/agent`, same as the macOS agent.
+
+> **Android** keeps running backgrounded via a foreground service (`AgentService`) — the
+> app requests `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` on first launch. **iOS has no
+> equivalent**: it does not support a backgrounded, listening TCP server, so the agent is
+> only reachable while the app is open and the screen is unlocked. The app disables the
+> screen's auto-lock while running and shows an on-screen reminder, since there's no way
+> around this short of the user leaving the phone open — see
+> [`ios-agent/README.md`](ios-agent/README.md).
 
 ### Status dashboard
 
 The agent serves a live, mobile-friendly status page at `http://<host>:8080/` (same
-port as the WebSocket endpoint). It shows connected RemoteBLE clients, connected
-hardware, and a rolling activity log, polling `GET /api/state` (JSON) once a second.
-It's read-only and never touches the radio. See `AgentMonitor` / `Dashboard.kt`.
+port as the WebSocket endpoint) on every target, including the phone agents above. It
+shows connected RemoteBLE clients, connected hardware, and a rolling activity log,
+polling `GET /api/state` (JSON) once a second. It's read-only and never touches the
+radio. See `AgentMonitor` / `Dashboard.kt`. On Android/iOS the same data also drives a
+native Compose UI in the app itself — see [`docs/agent.md`](docs/agent.md#android--ios-a-phone-as-the-agent).
 
 ### Scan-only smoke test (no hardware peripheral needed)
 
@@ -216,28 +233,18 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 Proven end-to-end, on real radios and in tests: app logic written purely against Kable's
 `Peripheral`/`Scanner` API runs unchanged against a `RemotePeripheral` talking to an agent
 over WebSocket — connect, discover, read, write, observe (notify), scan, and reconnect.
+(Capabilities are listed under [Features](#features) above.)
 
-Highlights:
-- **Protocol** — a versioned, capability-negotiated wire contract (CBOR, JSON for
-  debugging) covering the full GATT surface plus descriptors, pairing, connection
-  priority, connection slots, and batched scan results. See
-  [`docs/protocol.md`](docs/protocol.md).
-- **Resilience** — reconcile-on-reconnect (auto-replays connections/subscriptions/scans
-  after a transport reconnect), per-op-class timeouts, negotiated MTU surfaced through
-  Kable's API, bearer-token auth at the handshake.
-- **Two agents, one wire contract** — a JVM agent (Kable's `btleplug` backend) and a
-  native Rust agent (`agent-rs`, direct `btleplug`), cross-language interop tested
-  against the same CBOR contract.
-- **Reference apps** — an Android client (`:android-client` + shared `:client-ui`) and an
-  iOS launcher (`ios-client/`), both driving the same Compose Multiplatform UI over a
-  remote agent, no local radio required.
+The reference apps show both sides: an Android client (`:android-client`) and an iOS launcher
+(`ios-client/`) drive the shared `:client-ui` over a remote agent with no local radio, while
+`:android-agent`/`ios-agent/` run the real agent on a phone's own radio with a native status UI.
 
-> **Deployment targets:** macOS and Linux (including Raspberry Pi) — not iOS/Android radios. The
-> agent isn't bare-metal/microcontroller firmware: `btleplug` needs a real OS Bluetooth stack
-> underneath it (CoreBluetooth on macOS, BlueZ/D-Bus on Linux), so it targets a Pi-class Linux
-> host, not an ESP32 or similar. The `pairing`/`conn.priority` capabilities are engine-gated and
-> ship advertised only on a backend that supports them; Kable's `btleplug` backend does not, so
-> the reference agent advertises neither.
+> **Deployment targets:** the agent runs on macOS and Linux (incl. Raspberry Pi) via the
+> JVM/`btleplug` backend, and on Android and iOS via Kable's native backends — but not bare-metal
+> firmware (`btleplug` needs a real OS Bluetooth stack, so a Pi-class host, not an ESP32). iOS
+> can't run the agent backgrounded, and `pairing`/`conn.priority` are engine-gated — `btleplug`
+> supports neither, so the reference agent advertises neither. See
+> [`docs/agent.md`](docs/agent.md#android--ios-a-phone-as-the-agent) for the platform caveats.
 
 ## License
 

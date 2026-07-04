@@ -7,7 +7,7 @@
 # Multiplatform app needs: an App/ContentView/ComposeView trio hosting ComposeUIViewController.
 name: RemoteBleClient
 options:
-  bundleIdPrefix: dev.warsha.ble.remoteble.iosclient
+  bundleIdPrefix: dev.warsha.remoteble.iosclient
   deploymentTarget:
     iOS: "15.0"
 settings:
@@ -21,7 +21,7 @@ targets:
       - path: Sources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.ble.remoteble.iosclient
+        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosclient
         INFOPLIST_FILE: Info.plist
         TARGETED_DEVICE_FAMILY: "1"
     dependencies:

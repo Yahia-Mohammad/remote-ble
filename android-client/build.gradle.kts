@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.warsha.ble.remoteble.androidclient"
+    namespace = "dev.warsha.remoteble.androidclient"
     compileSdk = libs.versions.android.compile.get().toInt()
 
     defaultConfig {
-        applicationId = "dev.warsha.ble.remoteble.androidclient"
+        applicationId = "dev.warsha.remoteble.androidclient"
         minSdk = libs.versions.android.min.get().toInt()
         targetSdk = libs.versions.android.compile.get().toInt()
         versionCode = 1

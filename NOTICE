@@ -7,3 +7,9 @@ This project is an independent, unaffiliated extension for Kable
 (https://github.com/JuulLabs/kable), a Kotlin Multiplatform Bluetooth Low Energy library by
 JUUL Labs, Inc. Kable is used as a dependency, unmodified, and is itself licensed under the
 Apache License, Version 2.0. This project is not endorsed by or affiliated with JUUL Labs.
+
+The architecture is inspired by ESPHome's Bluetooth Proxy
+(https://esphome.io/components/bluetooth_proxy/), which established the pattern of relaying the
+BLE/GATT surface over IP behind the host BLE library's own interface for Home Assistant. No
+ESPHome or Home Assistant code is used; the inspiration is architectural. This project is not
+endorsed by or affiliated with the ESPHome or Home Assistant projects.

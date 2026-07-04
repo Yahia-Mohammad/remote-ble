@@ -11,7 +11,7 @@ kotlin {
     jvm {
         @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
         mainRun {
-            mainClass.set("dev.warsha.ble.remoteble.e2e.MainKt")
+            mainClass.set("dev.warsha.remoteble.e2e.MainKt")
         }
     }
 
@@ -36,5 +36,5 @@ tasks.register<JavaExec>("scanRun") {
     val jvmJar = tasks.named("jvmJar")
     dependsOn(jvmJar)
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
-    mainClass.set("dev.warsha.ble.remoteble.e2e.ScanMainKt")
+    mainClass.set("dev.warsha.remoteble.e2e.ScanMainKt")
 }

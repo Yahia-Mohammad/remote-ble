@@ -14,9 +14,15 @@ local.properties
 .kotlin/
 *.hprof
 
+# Generated Xcode projects — the committed project.yml (XcodeGen) is the source of truth;
+# run `xcodegen generate` to (re)produce these.
+*.xcodeproj/
+
 # Claude Code local state
 .claude/
 
-# Kable, built from source here and published to mavenLocal (Maven Central doesn't yet
-# ship the JVM btleplug backend :agent needs) — see README.md, not part of this repo's history.
-/kable/
+# Local code-walkthrough / onboarding notes (not part of the published docs)
+walkthrough_docs/
+
+# Local AI-chatbot context briefs (not part of the published docs)
+ai-context/

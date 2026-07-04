@@ -1,0 +1,44 @@
+name: Release
+
+# Cut a release by pushing a version tag (e.g. `git tag v0.7.0 && git push origin v0.7.0`).
+# VERSION_NAME in gradle.properties is the source of truth for the artifact version; the tag
+# should match it. Only :protocol + :client-sdk carry the publish plugin, so only they publish.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  maven-central:
+    name: Publish to Maven Central
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-release-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
+
+      # Publishes :protocol + :client-sdk (KMP publication + JVM/Android/iOS per-target ones)
+      # to the Central Portal and releases the deployment. Signing + credentials come from
+      # encrypted secrets (never in the tree). Config cache is disabled for the publish tasks.
+      - name: Publish + release to Maven Central
+        run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --stacktrace
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}

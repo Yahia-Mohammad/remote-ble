@@ -188,7 +188,7 @@ app: peripheral.write(characteristic, data, WriteType.WithResponse)
 
 A `WRITE_FAILED` surfaces as `AgentException` but does **not** poison the session —
 the next request proceeds normally (proven by
-[`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/ErrorPathTest.kt)).
+[`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/ErrorPathTest.kt)).
 On the real backend the write is best-effort (no write-complete callback), so `Ok`
 means "handed to the radio," not "acknowledged by the peer."
 
@@ -289,7 +289,7 @@ Why it works:
 Contrast — a device that was **explicitly disconnected** is *not* replayed: `Disconnect`
 removed it (and its subscriptions) from the replay set, so a later reconnect leaves it
 dark. (Proven by `disconnectedDeviceIsNotReplayedOnReconnect` in
-[`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/WebSocketEndToEndTest.kt).)
+[`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt).)
 
 If the agent had stayed alive (a brief network blip), the replayed `Connect` is
 idempotent — the BLE link survived, so the agent replies `Ok` without re-emitting

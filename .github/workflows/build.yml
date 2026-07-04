@@ -6,13 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  # Kable's JVM `btleplug` backend (used by :agent) isn't published to Maven Central yet
-  # (see README.md#building-kable-from-source-mavenlocal), so every job builds it from plain
-  # upstream JuulLabs/kable first, pinned for reproducibility. Bump when picking up new Kable
-  # changes.
-  KABLE_REF: 7b10a6dd6ffb39175a4dd926f3d46aa1ccd40f1b
-
 jobs:
   jvm-android:
     name: JVM build + test, Android klibs
@@ -26,52 +19,20 @@ jobs:
           java-version: "17"
           distribution: temurin
 
-      # btleplug's Linux (BlueZ/D-Bus) backend, used by kable-btleplug-ffi, needs libdbus
-      # headers to compile.
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Checkout Kable
-        uses: actions/checkout@v4
-        with:
-          repository: JuulLabs/kable
-          ref: ${{ env.KABLE_REF }}
-          path: kable-src
-
-      - name: Cache Gradle + Cargo
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-jvm-android-${{ env.KABLE_REF }}-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
-
-      - name: Publish Kable (JVM) to mavenLocal
-        working-directory: kable-src
-        run: |
-          ./gradlew \
-            :kable-btleplug-ffi:publishToMavenLocal \
-            :kable-core:publishKotlinMultiplatformPublicationToMavenLocal \
-            :kable-core:publishJvmPublicationToMavenLocal \
-            -PRELEASE_SIGNING_ENABLED=false
-
-      - name: Publish Kable (Android) to mavenLocal
-        working-directory: kable-src
-        run: |
-          ./gradlew \
-            :kable-core:publishAndroidPublicationToMavenLocal \
-            -PRELEASE_SIGNING_ENABLED=false
+          key: ${{ runner.os }}-jvm-android-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
 
       # Compiles every host-buildable target (JVM + Android; iOS is skipped automatically on a
       # non-macOS host — see the separate ios-klibs job) and runs the JVM unit test suite.
+      # Kable (incl. the JVM btleplug backend) resolves from Maven Central — no source build.
       - name: Build + test
         run: ./gradlew build
 
@@ -87,35 +48,22 @@ jobs:
           java-version: "17"
           distribution: temurin
 
-      - name: Checkout Kable
-        uses: actions/checkout@v4
-        with:
-          repository: JuulLabs/kable
-          ref: ${{ env.KABLE_REF }}
-          path: kable-src
-
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-ios-${{ env.KABLE_REF }}-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
+          key: ${{ runner.os }}-ios-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
 
-      - name: Publish Kable (iOS) to mavenLocal
-        working-directory: kable-src
-        run: |
-          ./gradlew \
-            :kable-core:publishIosArm64PublicationToMavenLocal \
-            :kable-core:publishIosSimulatorArm64PublicationToMavenLocal \
-            :kable-core:publishIosX64PublicationToMavenLocal \
-            -PRELEASE_SIGNING_ENABLED=false
-
-      # Verifies the iOS klibs compile (:protocol, :client-sdk, :client-ui). Does not link or run
-      # iOS test binaries — see docs/build-and-testing.md#the-ios-test-caveat.
+      # Verifies the iOS klibs compile (:protocol, :client-sdk, :client-ui, :agent). Does not
+      # link or run iOS test binaries — see docs/build-and-testing.md#the-ios-test-caveat.
+      # :agent (like :client-ui) has no iosX64() target — Compose Multiplatform 1.11.1 doesn't
+      # publish for the Intel Simulator — so only iosArm64/iosSimulatorArm64 apply to it.
       - name: Compile iOS klibs
         run: |
           ./gradlew \
             :protocol:compileKotlinIosArm64 :protocol:compileKotlinIosX64 :protocol:compileKotlinIosSimulatorArm64 \
             :client-sdk:compileKotlinIosArm64 :client-sdk:compileKotlinIosX64 :client-sdk:compileKotlinIosSimulatorArm64 \
-            :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosX64 :client-ui:compileKotlinIosSimulatorArm64
+            :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosX64 :client-ui:compileKotlinIosSimulatorArm64 \
+            :agent:compileKotlinIosArm64 :agent:compileKotlinIosSimulatorArm64

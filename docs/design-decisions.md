@@ -24,6 +24,19 @@ Consequences that ripple through the whole codebase:
   `UnsupportedOperationException` rather than not existing. (Descriptor I/O *was* such a
   gap; it is now modelled behind the `descriptors` capability.)
 
+### Prior art: ESPHome's Bluetooth Proxy
+
+This "swap the implementation behind the host BLE library" idea is not original to RemoteBLE —
+it's the architecture [ESPHome's Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy/)
+established for Home Assistant, where a remote proxy is presented to app code as an ordinary
+[Bleak](https://github.com/hbldh/bleak) client. RemoteBLE does the same behind Kable, and lands
+independently on several of the same refinements (connection slots, batched raw advertisements,
+handshake feature negotiation). The designs diverge on target and purpose: ESPHome relays over its
+Home Assistant native API (protobuf) from a **bare-metal ESP32** for home automation; RemoteBLE uses
+its own CBOR/WebSocket protocol from **OS-class hosts** (macOS/Linux/Android/iOS) for development,
+testing, and CI, and can't run on an ESP32. Credit where due — the core substitution move is
+theirs. Full feature-by-feature comparison in [prior-art.md](prior-art.md).
+
 ## Narrow seams everywhere
 
 The system is a stack of small interfaces, each with a fake. This is deliberate and
@@ -197,6 +210,10 @@ exists for human-readable debugging; the session/transport are codec-agnostic so
 swapping is a one-liner. The CBOR experimental opt-in is kept off the public API so
 consumers don't inherit it.
 
+For the full CBOR-vs-Protobuf trade-off — including why the compactness ESPHome gets from
+Protobuf on an ESP32 doesn't pay off on RemoteBLE's real-OS hosts, and the `@CborLabel` lever
+that would narrow the gap if it ever mattered — see [prior-art.md](prior-art.md#part-b--cbor-vs-protobuf-and-why-cbor-here).
+
 ## Content-based equality on the wire types
 
 Every wire type holding a `ByteArray` is a hand-written `class` (not `data class`)
@@ -260,7 +277,7 @@ These are deliberate v1 cuts, each a clean extension:
 | `CharNode.properties` populated only on macOS engine | `EngineBleBackend.propertiesOf` | other engines exposing property bits |
 | Throughput coalescing not implemented | — | batch write-without-response bursts (needs hardware) |
 | One agent / one session | `DefaultAgentSession` | an `AgentRegistry` above the session |
-| Agent is JVM-only — no Android/iOS agent target (unlike `:protocol`/`:client-sdk`, which are genuinely multiplatform) | `agent/build.gradle.kts` declares `jvm()` only | a mobile central-role BLE engine (Kable Android/iOS) + a non-CIO server transport + handling each OS's background-BLE limits |
+| ~~Agent is JVM-only~~ — done: `:agent` now also targets Android/iOS (Kable's native Android BLE / CoreBluetooth backends, Ktor's native-target CIO server); see [agent.md](agent.md#android--ios-a-phone-as-the-agent). Remaining cut: iOS can't run the agent backgrounded (no listening TCP server while backgrounded on iOS) | `agent/build.gradle.kts` | a background-capable iOS transport would need a fundamentally different delivery mechanism (push-triggered wake, not a held-open server socket) |
 
 ## Pinned versions (and why pinned)
 
@@ -274,8 +291,7 @@ These are deliberate v1 cuts, each a clean extension:
 | AGP | 9.2.1 | matches Kable so consumed klibs line up; compileSdk 37, minSdk 24 |
 | JDK toolchain | 17 | |
 
-Kable is consumed **built from source, via mavenLocal** (it publishes as version
-`unspecified`); see [build-and-testing.md](build-and-testing.md#kable-built-from-source). It
-powers both the client SDK and the JVM agent's radio engine (`btleplug`). The AGP/compileSdk are
-pinned to match that Kable checkout specifically so the multiplatform klibs resolve cleanly
-against the consumer.
+Kable is a plain Maven Central dependency, `com.juul.kable:kable-core:0.43.1`; see
+[build-and-testing.md](build-and-testing.md#kable). It powers both the client SDK and the JVM
+agent's radio engine (`btleplug`) — `0.43.1` is the first release to ship that JVM backend
+([kable#901](https://github.com/JuulLabs/kable/pull/901)).

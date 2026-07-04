@@ -76,7 +76,7 @@ echo "==> Launching agent on ws://0.0.0.0:$PORT/agent (logs: $LOG)…"
 OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
   --env "AGENT_LIBJVM=$LIBJVM" --env "AGENT_CP=$CP")
 [ -n "${REMOTE_BLE_TOKEN:-}" ] && OPEN_ARGS+=(--env "REMOTE_BLE_TOKEN=$REMOTE_BLE_TOKEN")
-open "${OPEN_ARGS[@]}" --args dev/warsha/ble/remoteble/agent/MainKt "$PORT"
+open "${OPEN_ARGS[@]}" --args dev/warsha/remoteble/agent/MainKt "$PORT"
 
 MATCH="RemoteBleAgent.app/Contents/MacOS/agent-launcher"
 

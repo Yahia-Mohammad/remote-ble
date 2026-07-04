@@ -305,5 +305,5 @@ This spec is versioned `MAJOR.MINOR`.
   MUST ignore unknown additive types/fields rather than fail the connection.
 
 The reference implementation tracks the latest `1.x`. When in doubt, the wire types in
-[`:protocol`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol) are the source of
+[`:protocol`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol) are the source of
 truth for *shape*; this document is the source of truth for *behavior*.

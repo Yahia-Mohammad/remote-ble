@@ -1,6 +1,6 @@
-# Remote BLE — System Reference
+# RemoteBLE — System Reference
 
-This is the **implementation reference** for the Remote BLE transport: what each
+This is the **implementation reference** for the RemoteBLE transport: what each
 piece is, the public API surface, how the pieces fit, and *why* they are built the
 way they are. It documents the system as it actually exists in the tree, not as a
 plan.
@@ -19,8 +19,18 @@ For quickstart/build commands see [`../README.md`](../README.md).
 | [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
-| [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, building Kable from source & mavenLocal, Gradle quirks, the test suite & fakes |
+| [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
+| [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
+
+### Proposals (not yet shipped)
+
+Design proposals for features under consideration — documented for discussion, **not** part of
+the shipped system described above.
+
+| Proposal | Covers | Status |
+|---|---|---|
+| [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | Proposed |
 
 ---
 
@@ -57,7 +67,7 @@ IP link (WebSocket today). The app logic in between does not change.
                                                                    └─────────┘
 ```
 
-The promise, proven by [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/KableAdapterTest.kt):
+The promise, proven by [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt):
 a function written purely against Kable's `Peripheral` compiles and runs unchanged
 against a `RemotePeripheral` talking to an agent over a real WebSocket.
 
@@ -71,7 +81,7 @@ and swapped in isolation.
 |---|---|---|---|
 | [`:protocol`](../protocol) | The wire contract + CBOR/JSON codec. Pure data, **no BLE, no network**. | kotlinx-serialization only | JVM, Android, iOS |
 | [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters. | `:protocol`, coroutines, Ktor client, Kable | JVM (tests), Android, iOS |
-| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine. | `:protocol`, coroutines, Ktor server, Kable (JVM target) | JVM only |
+| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, + a Compose Multiplatform status UI on mobile. | `:protocol`, coroutines, Ktor server, Kable, Compose Multiplatform | JVM, Android, iOS |
 | [`agent-rs`](../agent-rs) | Native cross-platform Bluetooth agent. Standalone CLI agent, same CBOR wire contract (interop-tested). Run: `run-agent-rs.sh`. | tokio, tokio-tungstenite, btleplug, serde/ciborium | macOS, Linux |
 
 `:protocol` is the shared contract both sides compile against. `:client-sdk` and
@@ -123,11 +133,12 @@ Each layer depends only on the interface of the layer beneath it:
 - **Layer 3 (Kable adapters)** wraps Layer 2½ in Kable's `Peripheral` / `Scanner`
   interfaces so app code is identical local vs remote.
 
-The agent mirrors this: [`AgentWebSocketServer`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/AgentWebSocketServer.kt)
-is the network seam, [`BleAgent`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleAgent.kt)
-is the protocol op handler, and [`BleBackend`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleBackend.kt)
-is the radio seam (real [`EngineBleBackend`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/EngineBleBackend.kt)
-or a fake).
+The agent mirrors this: [`AgentWebSocketServer`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentWebSocketServer.kt)
+is the network seam, [`BleAgent`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)
+is the protocol op handler, and [`BleBackend`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleBackend.kt)
+is the radio seam (real [`EngineBleBackend`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt)
+or a fake) — all `commonMain`, shared unchanged across the agent's JVM/Android/iOS targets
+(see [agent.md](agent.md#android--ios-a-phone-as-the-agent)).
 
 ### The two state machines (do not conflate them)
 

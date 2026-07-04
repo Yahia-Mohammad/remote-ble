@@ -17,10 +17,10 @@ kotlin {
     // live in separate subprojects — see https://kotl.in/gradle/agp-new-kmp); this mirrors
     // :client-sdk's own androidLibrary + iOS split.
     android {
-        // Distinct from :android-client's own namespace (dev.warsha.ble.remoteble.androidclient) —
+        // Distinct from :android-client's own namespace (dev.warsha.remoteble.androidclient) —
         // AGP requires every module/library's namespace to be unique, even though this library's
-        // Kotlin sources keep the `dev.warsha.ble.remoteble.androidclient` package for continuity.
-        namespace = "dev.warsha.ble.remoteble.androidclient.ui"
+        // Kotlin sources keep the `dev.warsha.remoteble.androidclient` package for continuity.
+        namespace = "dev.warsha.remoteble.androidclient.ui"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
         // Runs commonTest (the pure GATT/hex/model unit tests) on the JVM via the Android Unit

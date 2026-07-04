@@ -1,6 +1,6 @@
 # Live bring-up runbook
 
-The end-to-end procedure for exercising the whole RemoteBle stack against a **real radio**, using
+The end-to-end procedure for exercising the whole RemoteBLE stack against a **real radio**, using
 a phone running a test peripheral app as the device under test — no discrete BLE hardware required.
 
 ```
@@ -39,9 +39,9 @@ Advertised local name: `RBTestPeripheral`.
 
 ## Prerequisites
 
-- Kable built from source and published to mavenLocal — see the root
-  [README](../README.md#building-kable-from-source-mavenlocal). Kable's JVM (`btleplug`) backend is
-  what gives the agent a real radio.
+- Nothing special to install for Kable — it resolves from Maven Central
+  (`com.juul.kable:kable-core:0.43.1`). Kable's JVM (`btleplug`) backend is what gives the agent a
+  real radio.
 - A test peripheral app: any GATT server (Android `BluetoothGattServer`, a dedicated peripheral SDK,
   or a debug build of your own app) that advertises the `TestProfile` service below and exposes
   simple debug controls — bump the readable value, push a notification, toggle a write error, force
@@ -115,7 +115,7 @@ hardware: app code written against Kable's `Peripheral` ran unchanged against a 
 
 ## What to shake out (EngineBleBackend)
 
-This is the first time [`EngineBleBackend`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/EngineBleBackend.kt)
+This is the first time [`EngineBleBackend`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt)
 meets a real radio. Watch for its known approximations (see
 [design-decisions.md](design-decisions.md)):
 

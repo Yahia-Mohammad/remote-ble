@@ -13,15 +13,20 @@ compile checks) and [`.github/workflows/rust.yml`](../.github/workflows/rust.yml
 |---|---|---|
 | [`:protocol`](../protocol/build.gradle.kts) | JVM, Android, iOS (arm64/x64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library` |
 | [`:client-sdk`](../client-sdk/build.gradle.kts) | JVM (tests), Android, iOS (arm64/x64/sim) | same |
-| [`:agent`](../agent/build.gradle.kts) | JVM only | `kotlin.multiplatform`, `kotlin.serialization` |
+| [`:agent`](../agent/build.gradle.kts) | JVM, Android, iOS (arm64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library`, Compose Multiplatform |
 | [`:e2e-runner`](../e2e-runner/build.gradle.kts) | JVM only | `kotlin.multiplatform` |
 | [`:android-client`](../android-client/build.gradle.kts) | Android app | `com.android.application` (AGP 9 built-in Kotlin — no separate kotlin-android) |
+| [`:android-agent`](../android-agent/build.gradle.kts) | Android app | same as `:android-client` |
 
 `:protocol` is pure `commonMain`, so its Android/iOS targets add **no source** — they
 just publish the klibs the client SDK consumes. `:client-sdk` keeps a `jvm()` target
-**only for fast tests** (the session/transport/adapters are BLE-agnostic and the agent
-is JVM-only); the shipping targets are Android + iOS. `:agent` is JVM because it runs on
-a host beside the device; its radio engine is Kable's JVM (`btleplug`) backend.
+**only for fast tests** (the session/transport/adapters are BLE-agnostic); the shipping
+targets are Android + iOS. `:agent` targets all three — JVM for a host beside the device
+(radio engine: Kable's JVM `btleplug` backend), Android/iOS for the phone itself as the
+agent (radio engine: Kable's own native Android BLE / CoreBluetooth backends, no
+`btleplug`). Its Compose UI + mobile entry points (`AgentRunner`, `AgentService`,
+`IosAgentEntry`) live in a `mobileMain` source set the `jvm()` target doesn't see — see
+[agent.md](agent.md#android--ios-a-phone-as-the-agent).
 
 Source layout for the two `expect`/`actual` pairs (`defaultWebSocketHttpClient()` — the Ktor
 engine; and `deviceHandleToIdentifier()` — the platform-safe handle→`Identifier` conversion
@@ -55,37 +60,22 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080              # …with bearer au
 ```
 
 > `agent/run-agent.sh` exists because a bare `:agent:jvmRun` is killed by macOS TCC on first
-> CoreBluetooth use — see [agent.md](agent.md#the-runnable-agent--main) for the full story.
+> CoreBluetooth use — see [agent.md](agent.md#the-runnable-agent-jvm--main) for the full story.
 
 `build` compiles **every** target (JVM/Android/iOS klibs) but runs the unit suite on
 the **JVM only** (see [the iOS-test caveat](#the-ios-test-caveat)).
 
-## Kable, built from source
+## Kable
 
-Kable is consumed via `mavenLocal()`, built from a plain checkout of upstream
-[`JuulLabs/kable`](https://github.com/JuulLabs/kable) — **not a fork**; no code is modified.
-`settings.gradle.kts` lists `mavenLocal()` first so the local build wins. This is needed because
-Maven Central's published `com.juul.kable:kable-core` (currently `0.37.1`) doesn't yet include the
-JVM/desktop `btleplug` backend that `:agent`'s radio engine runs on (merged upstream in
-[kable#901](https://github.com/JuulLabs/kable/pull/901), not yet released) — one BLE library across
-the whole stack, which is why the Blue-Falcon agent engine was retired in favor of it.
-
-| Dependency | Coordinates | Why built from source |
-|---|---|---|
-| Kable | `com.juul.kable:kable-core` version **`unspecified`** | an untagged checkout derives no version; consumed for `Peripheral`/`Scanner` (client) and the unreleased `btleplug` JVM backend (agent) |
-
-The full set published to mavenLocal:
-
-- Kable: `kable-core` + `kable-btleplug-ffi` — published for **JVM + Android
-  (debug/release) + iOS (arm64/x64/sim)** + metadata.
-
-The exact publish commands (and the toolchain quirks they need — Rust for Kable's
-JVM `kable-btleplug-ffi` backend, `ANDROID_HOME` for the configured `androidTarget`,
-`-PRELEASE_SIGNING_ENABLED=false`) are in the root [README](../README.md#building-kable-from-source-mavenlocal).
-Apple klibs require a macOS host but **no** Rust FFI (Apple uses CoreBluetooth,
-Android the platform BLE; the `btleplug` FFI is the JVM/desktop backend). Once Kable ships a
-release with the JVM backend, this step and the `mavenLocal()` entry go away in favor of Maven
-Central.
+Kable is a plain Maven Central dependency: `com.juul.kable:kable-core:0.43.1`, pinned in
+[`gradle/libs.versions.toml`](../gradle/libs.versions.toml). One BLE library across the whole
+stack — `Peripheral`/`Scanner` for the client, and for the agent's radio engine on every target
+(the JVM `btleplug` backend, Android's platform BLE, Apple's CoreBluetooth). `0.43.1` is the
+first release to ship the JVM `btleplug` backend (merged in
+[kable#901](https://github.com/JuulLabs/kable/pull/901)), so nothing has to be built from source
+and there is no `mavenLocal()` step — `./gradlew build` resolves everything from Central. The JVM
+`kable-btleplug-ffi` artifact ships prebuilt native libraries, so no Rust toolchain is needed to
+build this project.
 
 ## Build-environment notes (the non-obvious bits)
 
@@ -101,7 +91,11 @@ in the build so `./gradlew build` is reproducible:
    `android.useAndroidX=true`.
 3. **Daemon memory.** The multiplatform + AGP + Kotlin/Native build exhausts the
    default daemon Metaspace; `gradle.properties` bumps `org.gradle.jvmargs`
-   (`-Xmx3g -XX:MaxMetaspaceSize=1g`).
+   (`-Xmx3g -XX:MaxMetaspaceSize=1g`). It also sets `kotlin.native.jvmArgs=-Xmx6g`: the
+   Kotlin/Native compiler runs in its own JVM, and its default heap is too small for the
+   whole-program LTO devirtualization when linking the **release** iOS framework over this
+   dependency graph (Compose/Ktor/Kable) — without it the release
+   `assembleRemoteBleAgent…XCFramework` OOMs (Java heap space) in `DevirtualizationAnalysis`.
 4. **Android SDK location.** Resolved from `local.properties` (`sdk.dir`) — gitignored,
    machine-specific.
 
@@ -135,17 +129,17 @@ test-only `:client-sdk → :agent` dependency.
 
 | Module | Suite | Tests | What it proves |
 |---|---|---|---|
-| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/ble/remoteble/protocol/ProtocolCodecTest.kt) | 27 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events |
-| `:protocol` | [`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/ble/remoteble/protocol/RustAgentInteropTest.kt) | 8 | the **native Rust agent**'s exact CBOR output (definite-length, signed-byte arrays, `gattStatus`) decodes to the right Kotlin frames — cross-language wire compat |
-| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/ble/remoteble/agent/BleAgentTest.kt) | 18 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
-| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/ble/remoteble/agent/PeripheralRegistryTest.kt) | 6 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows |
-| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/ble/remoteble/agent/ConnectionWatcherTest.kt) | 2 | unsolicited-drop detection via `BleBackend.isConnected`: starts the release grace on a drop, leaves a live link alone |
-| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/SessionEndToEndTest.kt) | 14 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority round-trips, batched-scan flattening |
-| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/WebSocketEndToEndTest.kt) | 7 | full op set over a real WS, restart→reconnect, subscription replay, disconnect-not-replayed, auth accept/reject |
-| `:client-sdk` | [`BleAgentOverWebSocketTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/BleAgentOverWebSocketTest.kt) | 1 | the **production** agent handler over a real WS (stub radio) |
-| `:client-sdk` | [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/KableAdapterTest.kt) | 5 | app code vs Kable's `Peripheral` runs unchanged remotely; observe; scan+factory; negotiated-MTU; factory threads an injected `DispatcherProvider` into the peripheral scope |
-| `:client-sdk` | [`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/ErrorPathTest.kt) | 3 | write/read rejection surfaces + session stays usable; disconnect reflected in Kable state |
-| `:client-sdk` | [`RemoteAdvertisementIdentifierTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/ble/remoteble/client/RemoteAdvertisementIdentifierTest.kt) | 2 | reading a remote advertisement's `identifier` for a UUID handle doesn't throw (the Android MAC-validation crash) |
+| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt) | 27 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events |
+| `:protocol` | [`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt) | 8 | the **native Rust agent**'s exact CBOR output (definite-length, signed-byte arrays, `gattStatus`) decodes to the right Kotlin frames — cross-language wire compat |
+| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/BleAgentTest.kt) | 18 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
+| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PeripheralRegistryTest.kt) | 6 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows |
+| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/ConnectionWatcherTest.kt) | 2 | unsolicited-drop detection via `BleBackend.isConnected`: starts the release grace on a drop, leaves a live link alone |
+| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/SessionEndToEndTest.kt) | 14 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority round-trips, batched-scan flattening |
+| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt) | 7 | full op set over a real WS, restart→reconnect, subscription replay, disconnect-not-replayed, auth accept/reject |
+| `:client-sdk` | [`BleAgentOverWebSocketTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/BleAgentOverWebSocketTest.kt) | 1 | the **production** agent handler over a real WS (stub radio) |
+| `:client-sdk` | [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt) | 5 | app code vs Kable's `Peripheral` runs unchanged remotely; observe; scan+factory; negotiated-MTU; factory threads an injected `DispatcherProvider` into the peripheral scope |
+| `:client-sdk` | [`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/ErrorPathTest.kt) | 3 | write/read rejection surfaces + session stays usable; disconnect reflected in Kable state |
+| `:client-sdk` | [`RemoteAdvertisementIdentifierTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/RemoteAdvertisementIdentifierTest.kt) | 2 | reading a remote advertisement's `identifier` for a UUID handle doesn't throw (the Android MAC-validation crash) |
 
 ### The test doubles
 
@@ -153,10 +147,10 @@ The fakes are first-class — they're what made hardware-free development possib
 
 | Double | Stands in for | Notes |
 |---|---|---|
-| [`InMemoryTransport`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/InMemoryTransport.kt) | `AgentTransport` | two channel-joined endpoints in one process; `drop()` simulates an abrupt loss |
-| [`FakeAgent`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/FakeAgent.kt) | a whole agent | canned replies; periodic scan/notify; `replyDelay` to hold requests in-flight; `activeScanCount`/`activeNotifyCount` for teardown assertions |
-| [`FakeBleBackend`](../agent/src/commonTest/kotlin/dev/warsha/ble/remoteble/agent/FakeBleBackend.kt) | `BleBackend` (agent tests) | deterministic; `failConnectFor`, `characteristicNotFound`, records calls |
-| [`StubBleBackend`](../client-sdk/src/jvmTest/kotlin/dev/warsha/ble/remoteble/client/StubBleBackend.kt) | `BleBackend` (client E2E) | drives the **real** `BleAgent` from client tests; `failWrites`/`failReads` inject radio errors |
+| [`InMemoryTransport`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/InMemoryTransport.kt) | `AgentTransport` | two channel-joined endpoints in one process; `drop()` simulates an abrupt loss |
+| [`FakeAgent`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt) | a whole agent | canned replies; periodic scan/notify; `replyDelay` to hold requests in-flight; `activeScanCount`/`activeNotifyCount` for teardown assertions |
+| [`FakeBleBackend`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/FakeBleBackend.kt) | `BleBackend` (agent tests) | deterministic; `failConnectFor`, `characteristicNotFound`, records calls |
+| [`StubBleBackend`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/StubBleBackend.kt) | `BleBackend` (client E2E) | drives the **real** `BleAgent` from client tests; `failWrites`/`failReads` inject radio errors |
 | `BlackholeBackend` | `AgentBackend` | never replies — exercises client request timeouts |
 
 ### Notable testing techniques

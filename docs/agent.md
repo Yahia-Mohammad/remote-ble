@@ -3,11 +3,15 @@
 [← back to index](README.md)
 
 The agent is the process that owns the real Bluetooth radio and serves the protocol
-to clients over an IP link. This `:agent` module is the **JVM reference** (the radio
-engine is [Kable](https://github.com/JuulLabs/kable)'s JVM/`btleplug` backend — the same
-BLE library the client SDK is built on) and depends on `:protocol`, kotlinx-coroutines,
-the Ktor server, and Kable. Kable's `btleplug` backend is native Rust, so the engine
-itself is cross-platform (macOS / Linux / Raspberry Pi).
+to clients over an IP link. This `:agent` module is the **Kotlin reference**, and
+targets **JVM** (macOS / Linux / Raspberry Pi, via Kable's `btleplug` backend),
+**Android**, and **iOS** (via Kable's own native Android BLE / CoreBluetooth backends —
+no `btleplug` involved on those two) — depending on `:protocol`, kotlinx-coroutines, the
+Ktor server, and Kable. Almost all of the agent's logic (radio ops, the WebSocket
+server, the status dashboard, the Koin composition module) is `commonMain`: only the
+process **entry point** differs per platform — a blocking CLI `main()` on the JVM, a
+foreground `Service` + Compose UI on Android, and a Compose UI (with no background
+support — see [below](#android--ios-a-phone-as-the-agent)) on iOS.
 
 > There is also a **native Rust agent**, [`agent-rs`](../agent-rs), that speaks the exact
 > same CBOR wire contract (`btleplug` engine; macOS / Linux). It's a lightweight
@@ -22,7 +26,7 @@ because both ultimately reach the radio through the same low-level library:
 
 | Agent | Identity (`agentInfo`) | How it drives the radio |
 |---|---|---|
-| `:agent` (this module, JVM/Kotlin) | `kable/<os>` | **Kable** — its `Peripheral`/`Scanner` API. On the JVM, Kable's backend *happens to be* `btleplug` (native Rust, via `kable-btleplug-ffi`), but that is Kable's internal plumbing; the agent code only ever sees Kable. |
+| `:agent` (this module, Kotlin, targets JVM/Android/iOS) | `kable/<platform>` | **Kable** — its `Peripheral`/`Scanner` API. On the JVM, Kable's backend *happens to be* `btleplug` (native Rust, via `kable-btleplug-ffi`); on Android/iOS it's Kable's own native Android BLE / CoreBluetooth backends. Either way that's Kable's internal plumbing — the agent code (`EngineBleBackend`) only ever sees Kable's common `Peripheral`/`Scanner` API, unchanged across all three targets. |
 | `agent-rs` (native Rust) | `RemoteBle-Agent-RS <ver>` | **`btleplug` directly** (tokio + tokio-tungstenite + btleplug). |
 
 So `btleplug` is **shared plumbing reached two different ways**, not the name of an agent.
@@ -35,7 +39,7 @@ It mirrors the client's layering in reverse:
 ```
    network seam        AgentWebSocketServer   (Ktor CIO; binary WS message ⇄ frame; + dashboard)
         │  hands a byte link to ▼
-   backend seam        AgentBackend           (fun interface: serve(incoming, outgoing, scope, connectionId): Job)
+   backend seam        AgentBackend           (fun interface: serve(incoming, outgoing, scope, connectionId, clientKey): Job)
         │  the production impl ▼
    protocol handler    BleAgent               (decode Command → drive BleBackend → emit Reply/Event)
         │  radio seam ▼
@@ -48,23 +52,30 @@ Source: [`agent/src/`](../agent/src)
 
 | File | Role |
 |---|---|
-| [`AgentWebSocketServer.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/AgentWebSocketServer.kt) | Ktor server; `AgentBackend`; auth gate; client tracking; dashboard routes; `FakeAgentBackend`/`BlackholeBackend` |
-| [`BleAgentBackend.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/BleAgentBackend.kt) | Wires the real `BleAgent` over a `BleBackend` into the server |
-| [`BleAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleAgent.kt) | The protocol op handler |
-| [`AgentObserver.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/AgentObserver.kt) | Lifecycle hooks `BleAgent` reports (devices/scan/activity); no-op default |
-| [`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleBackend.kt) | The portable radio op surface |
-| [`EngineBleBackend.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/EngineBleBackend.kt) | Real backend over Kable's JVM (`btleplug`) `Peripheral`/`Scanner` |
-| [`ConnectionWatcher.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/ConnectionWatcher.kt) | Polls `BleBackend.isConnected` every tick, `BleBackend.checkLiveness` (active probe) every `livenessInterval`, to catch unsolicited drops and start the lease release grace |
-| [`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/FakeAgent.kt) | A canned, radio-free agent for client tests |
-| [`AgentMonitor.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/AgentMonitor.kt) | Thread-safe live state (clients/hardware/logs) + JSON snapshot for the dashboard |
-| [`Dashboard.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/Dashboard.kt) | The status dashboard HTML page + `/` and `/api/state` routes |
-| [`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/Main.kt) | The runnable macOS agent entrypoint (launched via `agent/run-agent.sh`) |
+| [`AgentWebSocketServer.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentWebSocketServer.kt) | Ktor server; `AgentBackend`; auth gate; client tracking; dashboard routes; `FakeAgentBackend`/`BlackholeBackend` |
+| [`BleAgentBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgentBackend.kt) | Wires the real `BleAgent` over a `BleBackend` into the server |
+| [`BleAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt) | The protocol op handler |
+| [`AgentObserver.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentObserver.kt) | Lifecycle hooks `BleAgent` reports (devices/scan/activity); no-op default |
+| [`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleBackend.kt) | The portable radio op surface |
+| [`EngineBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt) | Real backend over Kable's common `Peripheral`/`Scanner` API — one implementation for all three targets |
+| [`PeripheralByIdentifier.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralByIdentifier.kt) | `expect`/`actual` bridge for reconstructing a `Peripheral` from a bare identifier — see [below](#the-real-backend--enginebleblebackend) |
+| [`ConnectionWatcher.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ConnectionWatcher.kt) | Polls `BleBackend.isConnected` every tick, `BleBackend.checkLiveness` (active probe) every `livenessInterval`, to catch unsolicited drops and start the lease release grace |
+| [`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt) | A canned, radio-free agent for client tests |
+| [`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) | Thread-safe live state (clients/hardware/logs) + a `Snapshot` served as JSON (HTML dashboard) or read directly (Compose UI) |
+| [`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt) | The status dashboard HTML page + `/` and `/api/state` routes |
+| [`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/remoteble/agent/Main.kt) | The runnable JVM (macOS/Linux) agent entrypoint (launched via `agent/run-agent.sh`) |
+| [`AgentRunner.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/AgentRunner.kt) | The Android/iOS composition root — start/stop the same Koin graph interactively (see [below](#android--ios-a-phone-as-the-agent)) |
+| [`ui/AgentApp.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/ui/AgentApp.kt) | The Compose Multiplatform mirror of the HTML dashboard |
+| [`AgentService.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AgentService.kt) | Android foreground service keeping the process alive while backgrounded; observes `AgentRunner.running` and self-stops |
+| [`IosAgentEntry.kt`](../agent/src/iosMain/kotlin/dev/warsha/remoteble/agent/IosAgentEntry.kt) | iOS entry point (`IosAgentSession`): owns the runner + idle-timer observer; `dispose()` on view teardown |
+| `PlatformName` / `LanAddress` / `TokenStore` (`expect`/`actual`) | Per-platform bits the mobile UI needs: the host label (`agentInfo`), the LAN IPv4 for the `ws://` address, and auth-token persistence (Android DataStore / iOS `NSUserDefaults`) |
+| [`AndroidAgentContext.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AndroidAgentContext.kt) | Holds the application `Context` the Android `actual`s (LAN address, token store) need |
 
 ---
 
 ## The network seam — `AgentWebSocketServer`
 
-[`AgentWebSocketServer.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/AgentWebSocketServer.kt)
+[`AgentWebSocketServer.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentWebSocketServer.kt)
 
 Hosts an `AgentBackend` behind a Ktor (CIO) WebSocket endpoint. Each connection
 becomes one bidirectional byte link: binary WS messages in/out are exactly the
@@ -77,7 +88,10 @@ class AgentWebSocketServer(
     path: String = "/agent",
     backend: AgentBackend = FakeAgentBackend(),
     authToken: String? = null,
-    monitor: AgentMonitor? = null,   // optional: feeds the status dashboard
+    monitor: AgentMonitor? = null,          // optional: feeds the status dashboard
+    registry: PeripheralRegistry? = null,   // optional: powers the dashboard's exclusive/shared toggle
+    pingPeriod: Duration = 15.seconds,      // WebSocket keepalive: ping idle clients this often…
+    pongTimeout: Duration = 40.seconds,     // …and close the session if no pong arrives within this
 ) {
     fun start()
     fun stop(gracePeriodMillis: Long = 100, timeoutMillis: Long = 500)
@@ -85,12 +99,14 @@ class AgentWebSocketServer(
 ```
 
 Per connection, the `webSocket(path)` handler assigns a monotonic `connectionId`,
-registers the client with the `monitor` (remote address), then builds:
+derives a **stable `clientKey`** (the `CLIENT_ID_HEADER` the client sent, so ownership
+survives reconnects — falling back to the connection id, in which case that client never
+resumes), registers the client with the `monitor` (remote address), then builds:
 - `outgoing: suspend (ByteArray) -> Unit` = send a binary frame,
 - `incomingFrames: Flow<ByteArray>` = the WS binary messages,
 
-then calls `backend.serve(incomingFrames, outgoing, this, connectionId).join()` — keeping the
-socket open until the backend's main job finishes (which happens when the client
+then calls `backend.serve(incomingFrames, outgoing, this, connectionId, clientKey).join()` — keeping
+the socket open until the backend's main job finishes (which happens when the client
 disconnects and `incoming` closes); a `finally` unregisters the client from the monitor.
 When a `monitor` is supplied, `start()` also installs the dashboard routes (`/`,
 `/api/state`). (The `Application.monitor` Ktor property would shadow this constructor arg
@@ -100,13 +116,15 @@ inside the server lambda, so it's captured in a local first.)
 
 ```kotlin
 fun interface AgentBackend {
-    fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long): Job
+    fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job
 }
 ```
 
 `connectionId` is the server-assigned id for this client connection; the real backend
 threads it through to `BleAgent` so device activity can be attributed to a client in the
-dashboard.
+dashboard. `clientKey` is the client's **stable identity** (survives reconnects) — it keys
+peripheral ownership in the `PeripheralRegistry` so a returning client re-acquires its own
+leases (see [Peripheral ownership](#peripheral-ownership)).
 
 This is the same byte-level seam the client's `AgentTransport` mirrors. Three impls:
 
@@ -119,8 +137,13 @@ This is the same byte-level seam the client's `AgentTransport` mirrors. Three im
 ```kotlin
 class BleAgentBackend(
     backend: BleBackend,
+    lifecycleScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    registry: PeripheralRegistry =                  // shared cross-client ownership; warm-link
+        PeripheralRegistry(lifecycleScope, onRelease = { backend.disconnect(DeviceHandle(it)) }),  // teardown disconnects via the backend
     maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     observer: AgentObserver = AgentObserver.None,   // the AgentMonitor, in the runnable agent
+    capabilities: Set<String> = backend.capabilities + BleAgent.AGENT_CAPABILITIES,
+    agentInfo: String? = null,                      // identity in the handshake, e.g. "kable/<platform>"
 ) : AgentBackend
 ```
 
@@ -140,7 +163,7 @@ framework.
 
 ## The protocol handler — `BleAgent`
 
-[`BleAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleAgent.kt)
+[`BleAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)
 
 Decodes `Command` frames, drives a `BleBackend`, and emits `Reply`/`Event` frames
 over the opaque byte link. It is `commonMain` (no platform deps) so it drops straight
@@ -286,7 +309,7 @@ So a backend reports a precise failure by throwing `AgentException(AgentError(ki
 
 ## The radio seam — `BleBackend`
 
-[`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/BleBackend.kt)
+[`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleBackend.kt)
 
 The physical BLE operations, decoupled from the wire protocol. `BleAgent` maps ops
 onto this; the real impl drives Kable, tests use a deterministic fake.
@@ -319,11 +342,13 @@ is the backend's responsibility — it knows whether a call actually touched the
 
 ## The real backend — `EngineBleBackend`
 
-[`EngineBleBackend.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/EngineBleBackend.kt)
+[`EngineBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt)
 
-The production `BleBackend` over Kable's JVM (`btleplug`) stack — the same
-`Peripheral`/`Scanner` API the client SDK is built on, here used **server-side** to drive
-the host's real radio.
+The production `BleBackend` over Kable's **common** `Peripheral`/`Scanner` API — the same
+API the client SDK is built on, here used **server-side** to drive the host's real radio.
+It's `commonMain` and unchanged across targets: on the JVM Kable's backend is `btleplug`;
+on Android/iOS it's Kable's own native Android BLE / CoreBluetooth backends. Nothing in
+this file knows or cares which.
 
 ### Connection-oriented, not fire-and-forget
 
@@ -331,13 +356,31 @@ Kable's `Peripheral` is a long-lived, **connection-oriented** object: every op i
 `suspend` call that completes (or throws) when the radio finishes — there is no polling and
 no per-op timeout bookkeeping. The peripheral also owns its connection on its **own**
 `CoroutineScope` (a `SilentSupervisor`), so the link survives after the op coroutine that
-opened it returns. The backend keeps one `Peripheral` per `DeviceHandle` in a
-`ConcurrentHashMap` so subsequent ops resolve back to the same live connection:
+opened it returns. The backend keeps one `Peripheral` per `DeviceHandle` in a plain map
+guarded by an [atomicfu](https://github.com/Kotlin/kotlinx-atomicfu) lock (`java.util.
+concurrent.ConcurrentHashMap` has no Kotlin/Native equivalent) so subsequent ops resolve
+back to the same live connection:
 
 ```kotlin
-private val peripherals = ConcurrentHashMap<DeviceHandle, Peripheral>()
-private fun resolve(device) = peripherals.getOrPut(device) { Peripheral(device.value.toIdentifier()) }
+private val lock = SynchronizedObject()
+private val peripherals = mutableMapOf<DeviceHandle, Peripheral>()
+private fun resolve(device) = synchronized(lock) {
+    peripherals.getOrPut(device) { peripheralByIdentifier(device.value.toIdentifier()) }
+}
 ```
+
+`peripheralByIdentifier` is this module's own tiny `expect`/`actual`
+([`PeripheralByIdentifier.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralByIdentifier.kt)):
+Kable's only truly common (`expect`) factory is `Peripheral(advertisement: Advertisement, …)` —
+reconstructing one from nothing but a bare identifier (no live `Advertisement` in hand,
+since a `DeviceHandle` is just an opaque string round-tripped over the wire) is a
+plain, non-`expect` convenience each platform happens to add on its own: JVM reconnects by
+address via `btleplug`, Android via `BluetoothAdapter.getRemoteDevice`, iOS via
+`CentralManager.retrievePeripheral`. The three `actual`s just call each platform's own
+convenience, preserving the exact reconnect-by-handle-alone behavior the JVM agent always
+had. `resolve` also wraps `toIdentifier()` in a `try/catch`, mapping a **malformed handle**
+(hostile input over the wire — every op path funnels through here, including the non-`bleOp`
+`observe`) to a typed `UNKNOWN_DEVICE` error rather than letting a raw throwable escape.
 
 Every Kable call is funnelled through one small helper that maps failures to the protocol's
 `ErrorKind` **while letting `CancellationException` propagate** (so structured cancellation is
@@ -382,7 +425,9 @@ private suspend inline fun <T> bleOp(failure: ErrorKind, block: () -> T): T =
 - **`readDescriptor` / `writeDescriptor`** — same resolution against `DiscoveredDescriptor`
   (capability `descriptors`, advertised on every platform).
 - **`requestMtu`** — `btleplug` exposes no MTU-negotiation API, so the agent doesn't advertise
-  an MTU capability; this **echoes** the requested value so a probing client degrades cleanly.
+  an MTU capability; rather than **echo** the request (which would let a client believe a large
+  MTU was negotiated and then oversize its writes), it returns the **ATT default minimum, 23** —
+  the only value a client can safely size payloads against when nothing was actually negotiated.
 
 Helpers guard connected-only ops (`connectedPeripheral` → `NOT_CONNECTED`) and walk the
 discovered-service tree (`findCharacteristic` / `findDescriptor` → `CHARACTERISTIC_NOT_FOUND`).
@@ -399,7 +444,7 @@ discovered-service tree (`findCharacteristic` / `findDescriptor` → `CHARACTERI
 
 ## The canned backend — `FakeAgent`
 
-[`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/ble/remoteble/agent/FakeAgent.kt)
+[`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt)
 
 A complete agent with **no real radio** — it consumes `Command` frames and emits
 `Reply`/`Event` frames directly (it sits at the same `incoming`/`outgoing` seam as
@@ -425,9 +470,14 @@ transport-drop-fails-in-flight) and, under virtual time, to test the differentia
 
 ---
 
-## The runnable agent — `Main`
+## The runnable agent (JVM) — `Main`
 
-[`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/Main.kt)
+[`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/remoteble/agent/Main.kt)
+
+This is the JVM composition root only — a blocking CLI `main()` (env vars, a shutdown
+hook, `CountDownLatch(1).await()`) that doesn't map to Android/iOS lifecycles. Those two
+platforms have their own composition roots; see
+[Android / iOS: a phone as the agent](#android--ios-a-phone-as-the-agent).
 
 ```kotlin
 fun main(args: Array<String>) {
@@ -464,7 +514,7 @@ clients, `http://<host>:8080/` for the dashboard.
 
 The object graph (`AgentMonitor`, `EngineBleBackend` → `BleAgentBackend` →
 `AgentWebSocketServer`, plus `ConnectionWatcher`) is assembled by Koin in
-[`di/AgentModule.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/di/AgentModule.kt)
+[`di/AgentModule.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/di/AgentModule.kt)
 — the single `AgentMonitor` is shared as both the backend's `AgentObserver` and the server's
 dashboard source. The agent's classes keep their plain constructors — only this composition
 root touches a DI container, mirroring the optional `remoteBleClientModule` on the client side.
@@ -473,8 +523,8 @@ root touches a DI container, mirroring the optional `remoteBleClientModule` on t
 
 ## The status dashboard — `AgentMonitor` + `Dashboard`
 
-[`AgentMonitor.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/AgentMonitor.kt) ·
-[`Dashboard.kt`](../agent/src/jvmMain/kotlin/dev/warsha/ble/remoteble/agent/Dashboard.kt)
+[`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) ·
+[`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt)
 
 The agent serves a live, mobile-friendly status page from the same Ktor server:
 
@@ -483,13 +533,80 @@ The agent serves a live, mobile-friendly status page from the same Ktor server:
   hardware**, and a rolling **activity log**.
 - `GET /api/state` — a JSON snapshot from `AgentMonitor`.
 
-`AgentMonitor` is a thread-safe, in-memory store updated from two sides:
-`AgentWebSocketServer` reports client connect/disconnect (id + remote address); `BleAgent`
-reports device lifecycle and scan-seen names through the `AgentObserver` hooks. Hardware is
-labelled from scan results and attributed to the owning client; when a client's socket drops,
-its hardware is released. It is **read-only** — it never touches the radio. Wiring it is
-optional: construct `AgentWebSocketServer` without a `monitor` and the routes simply aren't
-installed.
+`AgentMonitor` is a thread-safe (atomicfu-locked, not JVM `synchronized`), in-memory store
+updated from two sides: `AgentWebSocketServer` reports client connect/disconnect (id +
+remote address); `BleAgent` reports device lifecycle and scan-seen names through the
+`AgentObserver` hooks. Hardware is labelled from scan results and attributed to the owning
+client; when a client's socket drops, its hardware is released. It is **read-only** — it
+never touches the radio. Wiring the HTML dashboard is optional: construct
+`AgentWebSocketServer` without a `monitor` and the routes simply aren't installed. Its
+`snapshot(leases, settings): Snapshot` is the same call both consumers use — `snapshotJson`
+just serializes it for `/api/state`; the Android/iOS Compose UI (below) calls it directly,
+no HTTP round-trip needed since it shares the process with the server.
+
+---
+
+## Android / iOS: a phone as the agent
+
+Everything above — `EngineBleBackend`, `AgentWebSocketServer`, `Dashboard`, `AgentMonitor`,
+`di/AgentModule` — is `commonMain` and identical on Android/iOS. What differs is the
+**composition root**, since neither platform has a JVM-style blocking `main()`:
+
+- [`AgentRunner`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/AgentRunner.kt)
+  (in `mobileMain`, a source set shared by `androidMain`/`iosMain` but not `jvmMain` — so the
+  desktop CLI's dependency graph never pulls in Compose Multiplatform) wraps the Koin graph in a
+  restartable `start(config)`/`stop()` pair over a **private** `KoinApplication` (not the
+  process-global `startKoin`, so it can't collide with any other Koin usage in the host app), and
+  exposes `monitor`/`registry`/`config`/a `running: StateFlow<Boolean>` for the UI. Because
+  `start`/`stop` and the UI's polling run on different threads (and `stop` can be driven from a
+  best-effort teardown on `Dispatchers.Default`), its mutable fields are guarded by the same
+  atomicfu lock `EngineBleBackend` uses, and `stop()` captures-and-clears the graph atomically so
+  two concurrent teardowns can't double-close it.
+- [`ui/AgentApp.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/ui/AgentApp.kt)
+  is a Compose Multiplatform mirror of the HTML dashboard — the same clients/ownership/log panels
+  (one `LazyColumn`, `safeDrawingPadding` so it clears the status bar/notch under edge-to-edge),
+  the exclusive/shared toggle calling `PeripheralRegistry.setExclusive` directly, and a start/stop
+  control — polling `AgentMonitor.snapshot(...)` every second, same cadence as the HTML page. Two
+  things the terminal agent gets for free but a phone must surface itself:
+  - **Reachable address.** The UI shows `ws://<lan-ip>:<port>/agent` (or a "no Wi-Fi" notice),
+    resolved per platform by the `lanIPv4Address()` `expect`/`actual` (Android: active-network
+    `LinkProperties`, falling back to `WifiManager`; iOS: a `getifaddrs` walk for `en0`; JVM:
+    `NetworkInterface`).
+  - **Auth token.** An editable field, enabled only while stopped, persisted across launches via
+    the `TokenStore` `expect`/`actual` (Android DataStore, iOS `NSUserDefaults`). If it's left
+    blank, a random token is generated on Start and shown next to the address — **the mobile agent
+    never runs token-free**, because unlike the CLI (typically firewalled to localhost, or given a
+    token via `REMOTE_BLE_TOKEN`) it listens on `0.0.0.0` over cleartext on a shared Wi-Fi.
+- **Android**: [`AgentService.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AgentService.kt)
+  is a foreground service (`connectedDevice` type) whose only job is the persistent notification
+  Android requires to keep the process alive backgrounded — it owns no BLE/server logic. Rather
+  than trust the Activity/composition to keep it in lockstep (fragile — the composition can be torn
+  down, e.g. on task removal, without running a "stop" branch), the service **observes
+  `AgentRunner.running` itself** and calls `stopSelf()` the moment it flips false, so it can never
+  outlive the agent it represents; it returns `START_NOT_STICKY` (it can't meaningfully resume
+  after a process kill) and adds `onTaskRemoved` as an independent backstop. `MainActivity`
+  requests the runtime `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` permissions (API 31+;
+  `ACCESS_FINE_LOCATION` below it) and **gates Start on the grant** — a denial disables Start and
+  shows an inline warning with a shortcut to app settings — since a `connectedDevice` foreground
+  service can't legally start without a qualifying Bluetooth permission on API 34+.
+- **iOS**: [`IosAgentEntry.kt`](../agent/src/iosMain/kotlin/dev/warsha/remoteble/agent/IosAgentEntry.kt)
+  has no foreground-service equivalent to reach for — iOS does not support a backgrounded,
+  listening TCP server at all (new inbound connections can't be accepted once the app backgrounds
+  or the screen locks, though the `bluetooth-central` background mode can keep *already-connected*
+  radio links alive briefly). Rather than leave that as a silent trap, the returned `IosAgentSession`
+  sets `UIApplication.sharedApplication.isIdleTimerDisabled` while the agent runs (so the screen
+  can't auto-lock and kill it), and `AgentApp` shows a matching on-screen reminder. The session
+  owns its runner and observing scope for exactly one hosting view controller; `ios-agent`'s
+  `ComposeView` disposes it from the SwiftUI `Coordinator`'s `deinit`, so repeated view creation
+  can't leak scopes/runners. See [`ios-agent/README.md`](../ios-agent/README.md).
+
+`:android-agent` and `ios-agent/` are thin app shells with no logic of their own — the
+same split as `:client-ui` → `:android-client`/`ios-client/`, just for the agent role.
+`:agent` itself holds the UI and orchestration (per your call to keep it in the one KMP
+module rather than mirroring that split a second time); the shells exist only because
+Android/iOS require an actual runnable app/Xcode project (AGP 9 forbids a
+`com.android.application` module from also declaring `androidTarget()`, and iOS has no
+Gradle-native app packaging at all).
 
 ---
 

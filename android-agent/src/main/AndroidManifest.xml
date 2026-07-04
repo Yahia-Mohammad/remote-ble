@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Runtime-requested (see MainActivity) — API 31+ needs explicit scan/connect grants;
+         below that, BLE scanning is gated on (coarse/fine) location instead. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- Pre-31 BLE permissions; harmless no-ops on newer OSes that use the two above instead. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <!-- The AgentWebSocketServer + dashboard listen on a plain TCP socket. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- LanAddress reads the active network's LinkProperties to show the agent's ws:// address. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Fallback IPv4 source (WifiManager) on OS/network combos where LinkProperties omits it. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- AgentService keeps the agent alive while backgrounded. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Required (API 33+) to post the foreground service's persistent notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:label="RemoteBLE Agent"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name="dev.warsha.remoteble.agent.AgentService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+</manifest>

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use btleplug::api::{
-    Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter as BtleScanFilter,
+    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
+    ScanFilter as BtleScanFilter,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures_util::stream::StreamExt;
@@ -34,8 +35,12 @@ pub struct BtleplugBackend {
     /// clears it once the last scan ends, so it can't grow without bound (rotating private
     /// addresses mint a fresh key on every rotation) and identity never bleeds from one scan
     /// into the next. This matches the KMP agent, whose coalescer is per-scan.
-    scan_identity: Arc<Mutex<HashMap<String, (Option<String>, Vec<String>)>>>,
+    scan_identity: Arc<Mutex<HashMap<String, ScanIdentity>>>,
 }
+
+/// Last-known `(local name, service UUIDs)` for a device within a scan session, used to
+/// backfill sparse advertisement packets (see [coalesce_identity]).
+type ScanIdentity = (Option<String>, Vec<String>);
 
 /// How long [BtleplugBackend::spawn_liveness_prober]'s probe waits before treating the link
 /// as dead.
@@ -269,6 +274,56 @@ async fn find_peripheral_by_id(adapter: &Adapter, id: &str) -> Result<Peripheral
     ))
 }
 
+/// Resolves a [CharRef] to the matching characteristic in the peripheral's discovered GATT
+/// table, or [ErrorKind::CharacteristicNotFound] if absent. UUID comparison is
+/// case-insensitive: btleplug stringifies UUIDs lowercase, but a client may send either case.
+fn find_characteristic(
+    peripheral: &Peripheral,
+    char_ref: &CharRef,
+) -> Result<Characteristic, AgentError> {
+    peripheral
+        .services()
+        .into_iter()
+        .filter(|s| s.uuid.to_string().eq_ignore_ascii_case(&char_ref.service))
+        .flat_map(|s| s.characteristics)
+        .find(|c| {
+            c.uuid
+                .to_string()
+                .eq_ignore_ascii_case(&char_ref.characteristic)
+        })
+        .ok_or_else(|| {
+            AgentError::new(
+                ErrorKind::CharacteristicNotFound,
+                Some(format!(
+                    "Char {} not found in service {}",
+                    char_ref.characteristic, char_ref.service
+                )),
+            )
+        })
+}
+
+/// Maps btleplug's characteristic property flags to the protocol's property bitmask (the same
+/// bit values Kotlin's `CharacteristicProperties` uses, so both agents report identically).
+fn char_prop_mask(flags: CharPropFlags) -> i32 {
+    let mut mask = 0i32;
+    if flags.contains(CharPropFlags::READ) {
+        mask |= 0x02;
+    }
+    if flags.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
+        mask |= 0x04;
+    }
+    if flags.contains(CharPropFlags::WRITE) {
+        mask |= 0x08;
+    }
+    if flags.contains(CharPropFlags::NOTIFY) {
+        mask |= 0x10;
+    }
+    if flags.contains(CharPropFlags::INDICATE) {
+        mask |= 0x20;
+    }
+    mask
+}
+
 /// Forces a real GATT round-trip so a dead link is caught even while btleplug/the native
 /// stack still reports it connected (see [BtleplugBackend::spawn_liveness_prober]).
 /// Re-running service discovery is the probe: it's safe to repeat (idempotent, no destructive
@@ -426,39 +481,22 @@ impl BleBackend for BtleplugBackend {
             )
         })?;
 
-        let mut service_nodes = Vec::new();
-        for service in peripheral.services() {
-            let mut char_nodes = Vec::new();
-            for c in service.characteristics {
-                let mut props_mask = 0i32;
-                if c.properties.contains(CharPropFlags::READ) {
-                    props_mask |= 0x02;
-                }
-                if c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
-                    props_mask |= 0x04;
-                }
-                if c.properties.contains(CharPropFlags::WRITE) {
-                    props_mask |= 0x08;
-                }
-                if c.properties.contains(CharPropFlags::NOTIFY) {
-                    props_mask |= 0x10;
-                }
-                if c.properties.contains(CharPropFlags::INDICATE) {
-                    props_mask |= 0x20;
-                }
-
-                char_nodes.push(CharNode {
-                    uuid: c.uuid.to_string(),
-                    properties: props_mask,
-                    descriptors: vec![],
-                });
-            }
-
-            service_nodes.push(ServiceNode {
+        let service_nodes = peripheral
+            .services()
+            .into_iter()
+            .map(|service| ServiceNode {
                 uuid: service.uuid.to_string(),
-                characteristics: char_nodes,
-            });
-        }
+                characteristics: service
+                    .characteristics
+                    .into_iter()
+                    .map(|c| CharNode {
+                        uuid: c.uuid.to_string(),
+                        properties: char_prop_mask(c.properties),
+                        descriptors: vec![],
+                    })
+                    .collect(),
+            })
+            .collect();
 
         Ok(ResultPayload::Services {
             services: service_nodes,
@@ -471,26 +509,12 @@ impl BleBackend for BtleplugBackend {
         char_ref: &CharRef,
     ) -> Result<ResultPayload, AgentError> {
         let peripheral = self.find_peripheral(device).await?;
-        for service in peripheral.services() {
-            if service.uuid.to_string().to_lowercase() == char_ref.service.to_lowercase() {
-                for c in service.characteristics {
-                    if c.uuid.to_string().to_lowercase() == char_ref.characteristic.to_lowercase() {
-                        let bytes = peripheral.read(&c).await.map_err(|e| {
-                            AgentError::new(ErrorKind::ReadFailed, Some(e.to_string()))
-                        })?;
-                        return Ok(ResultPayload::Bytes { value: bytes });
-                    }
-                }
-            }
-        }
-
-        Err(AgentError::new(
-            ErrorKind::CharacteristicNotFound,
-            Some(format!(
-                "Char {} not found in service {}",
-                char_ref.characteristic, char_ref.service
-            )),
-        ))
+        let characteristic = find_characteristic(&peripheral, char_ref)?;
+        let bytes = peripheral
+            .read(&characteristic)
+            .await
+            .map_err(|e| AgentError::new(ErrorKind::ReadFailed, Some(e.to_string())))?;
+        Ok(ResultPayload::Bytes { value: bytes })
     }
 
     async fn write(
@@ -501,31 +525,16 @@ impl BleBackend for BtleplugBackend {
         with_response: bool,
     ) -> Result<(), AgentError> {
         let peripheral = self.find_peripheral(device).await?;
-        for service in peripheral.services() {
-            if service.uuid.to_string().to_lowercase() == char_ref.service.to_lowercase() {
-                for c in service.characteristics {
-                    if c.uuid.to_string().to_lowercase() == char_ref.characteristic.to_lowercase() {
-                        let write_type = if with_response {
-                            btleplug::api::WriteType::WithResponse
-                        } else {
-                            btleplug::api::WriteType::WithoutResponse
-                        };
-                        peripheral.write(&c, value, write_type).await.map_err(|e| {
-                            AgentError::new(ErrorKind::WriteFailed, Some(e.to_string()))
-                        })?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        Err(AgentError::new(
-            ErrorKind::CharacteristicNotFound,
-            Some(format!(
-                "Char {} not found in service {}",
-                char_ref.characteristic, char_ref.service
-            )),
-        ))
+        let characteristic = find_characteristic(&peripheral, char_ref)?;
+        let write_type = if with_response {
+            btleplug::api::WriteType::WithResponse
+        } else {
+            btleplug::api::WriteType::WithoutResponse
+        };
+        peripheral
+            .write(&characteristic, value, write_type)
+            .await
+            .map_err(|e| AgentError::new(ErrorKind::WriteFailed, Some(e.to_string())))
     }
 
     async fn request_mtu(
@@ -544,47 +553,34 @@ impl BleBackend for BtleplugBackend {
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), AgentError> {
         let peripheral = self.find_peripheral(device).await?;
-        for service in peripheral.services() {
-            if service.uuid.to_string().to_lowercase() == char_ref.service.to_lowercase() {
-                for c in service.characteristics {
-                    if c.uuid.to_string().to_lowercase() == char_ref.characteristic.to_lowercase() {
-                        peripheral.subscribe(&c).await.map_err(|e| {
-                            AgentError::new(ErrorKind::GattError, Some(e.to_string()))
-                        })?;
+        let characteristic = find_characteristic(&peripheral, char_ref)?;
+        peripheral
+            .subscribe(&characteristic)
+            .await
+            .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
 
-                        let mut notifications = peripheral.notifications().await.map_err(|e| {
-                            AgentError::new(ErrorKind::GattError, Some(e.to_string()))
-                        })?;
+        let mut notifications = peripheral
+            .notifications()
+            .await
+            .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
 
-                        let target_uuid = c.uuid;
-                        tokio::spawn(async move {
-                            while let Some(notification) = notifications.next().await {
-                                if notification.uuid == target_uuid
-                                    && event_tx
-                                        .send(AgentEvent::Notification {
-                                            sub_id,
-                                            value: notification.value,
-                                        })
-                                        .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        });
-
-                        return Ok(());
-                    }
+        let target_uuid = characteristic.uuid;
+        tokio::spawn(async move {
+            while let Some(notification) = notifications.next().await {
+                if notification.uuid == target_uuid
+                    && event_tx
+                        .send(AgentEvent::Notification {
+                            sub_id,
+                            value: notification.value,
+                        })
+                        .is_err()
+                {
+                    break;
                 }
             }
-        }
+        });
 
-        Err(AgentError::new(
-            ErrorKind::CharacteristicNotFound,
-            Some(format!(
-                "Char {} not found in service {}",
-                char_ref.characteristic, char_ref.service
-            )),
-        ))
+        Ok(())
     }
 
     async fn stop_observe(&self, _sub_id: i64) -> Result<(), AgentError> {
@@ -600,11 +596,11 @@ impl BleBackend for BtleplugBackend {
 /// and service UUIDs per device and backfills them when a later packet lacks them. RSSI is not
 /// retained — it legitimately varies per packet and is forwarded as received.
 fn coalesce_identity(
-    last_seen: &mut HashMap<String, (Option<String>, Vec<String>)>,
+    last_seen: &mut HashMap<String, ScanIdentity>,
     handle: &str,
     name: Option<String>,
     service_uuids: Vec<String>,
-) -> (Option<String>, Vec<String>) {
+) -> ScanIdentity {
     let entry = last_seen
         .entry(handle.to_string())
         .or_insert_with(|| (None, Vec::new()));

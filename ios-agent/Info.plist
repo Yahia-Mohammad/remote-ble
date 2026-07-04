@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>RemoteBLE Agent</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <!-- This app drives CoreBluetooth as a central (never advertises/is a peripheral), so only
+         the "central" background mode applies — and even that only helps already-connected
+         links, not accepting new inbound WebSocket connections while backgrounded (see the
+         on-screen notice in AgentApp/IosAgentEntry: the agent is only reachable foregrounded). -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+    </array>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>RemoteBLE Agent connects to nearby Bluetooth peripherals on behalf of remote clients.</string>
+    <!-- The agent's own dashboard/WebSocket speak ws://http:// (cleartext), same as
+         android-agent/ios-client's network exceptions. ATS already carves out localhost for
+         free; a client on the same LAN reaching this phone's arbitrary IP needs a blanket
+         exception, since ATS can't scope NSExceptionDomains to an IP picked at runtime.
+         Dev/test app only — do not carry this into a shipping build. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+</dict>
+</plist>

@@ -7,14 +7,14 @@ It is pure `commonMain` Kotlin with one dependency family (kotlinx-serialization
 **zero BLE or network code**. Both the client SDK and the agent compile against it;
 it is the only thing they share.
 
-Source: [`protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol)
+Source: [`protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol)
 
-- [`Frame.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Frame.kt) — the envelope
-- [`Op.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Op.kt) — the operation set + `DeviceHandle`, `CharRef`, `ScanFilter`
-- [`Results.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Results.kt) — `OpResult`, `ResultPayload`, `ServiceNode`, `CharNode`
-- [`Events.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Events.kt) — `AgentEvent`, `BleConnState`, `AdvertisementDto`
-- [`Errors.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Errors.kt) — `AgentError`, `ErrorKind`, `AgentException`
-- [`ProtocolCodec.kt`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/ProtocolCodec.kt) — CBOR/JSON encode/decode
+- [`Frame.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Frame.kt) — the envelope
+- [`Op.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Op.kt) — the operation set + `DeviceHandle`, `CharRef`, `ScanFilter`
+- [`Results.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Results.kt) — `OpResult`, `ResultPayload`, `ServiceNode`, `CharNode`
+- [`Events.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Events.kt) — `AgentEvent`, `BleConnState`, `AdvertisementDto`
+- [`Errors.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Errors.kt) — `AgentError`, `ErrorKind`, `AgentException`
+- [`ProtocolCodec.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/ProtocolCodec.kt) — CBOR/JSON encode/decode
 
 ## The frozen wire identity
 
@@ -35,7 +35,7 @@ API.
 
 ## Frames — the envelope
 
-[`Frame`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Frame.kt)
+[`Frame`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Frame.kt)
 is a sealed interface with five implementations:
 
 | Frame | `@SerialName` | Direction | Fields | Purpose |
@@ -53,7 +53,7 @@ routed by `subId`/`scanId` inside the `AgentEvent`.
 
 ## Handshake & capability negotiation
 
-[`Capabilities`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Capabilities.kt)
+[`Capabilities`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
 + the two `Hello` frames let the two ends agree on an optional feature set on top of
 the `PROTOCOL_VERSION` (currently **`1`**) baseline.
 
@@ -94,7 +94,7 @@ WebSocket upgrade headers (`Authorization: Bearer …` and `CLIENT_ID_HEADER`).
 
 ## Operations — `Op`
 
-[`Op`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Op.kt) is a
+[`Op`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Op.kt) is a
 sealed interface; each variant is the payload of a `Command`. The set mirrors the
 GATT / scanning surface 1:1.
 
@@ -153,7 +153,7 @@ client can demultiplex. The matching stop op carries the same id.
 
 ## Results — `OpResult` and `ResultPayload`
 
-[`OpResult`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Results.kt)
+[`OpResult`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Results.kt)
 is the body of a `Reply`:
 
 ```kotlin
@@ -192,15 +192,15 @@ The GATT table shape returned by `Discover`:
 The client side never blind-casts a payload. Two helpers in the protocol/client
 enforce the contract:
 
-- `OpResult.orThrow(): ResultPayload?` ([Errors.kt](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Errors.kt)) —
+- `OpResult.orThrow(): ResultPayload?` ([Errors.kt](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Errors.kt)) —
   returns the success payload or throws `AgentException(error)` on `Err`.
-- `OpResult.payloadAs<T>()` ([RemoteGattClient.kt](../client-sdk/src/commonMain/kotlin/dev/warsha/ble/remoteble/client/RemoteGattClient.kt)) —
+- `OpResult.payloadAs<T>()` ([RemoteGattClient.kt](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteGattClient.kt)) —
   `orThrow()` then casts to the expected payload type, throwing `UNSUPPORTED` if the
   agent returned the wrong shape.
 
 ## Events — `AgentEvent`
 
-[`AgentEvent`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Events.kt)
+[`AgentEvent`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Events.kt)
 is the body of an unsolicited `Event` frame:
 
 | Event | `@SerialName` | Fields | Routed by |
@@ -237,7 +237,7 @@ The client wraps this in a Kable `Advertisement` (`RemoteAdvertisement`) and pul
 
 ## Errors — `AgentError` / `ErrorKind`
 
-[`AgentError`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/Errors.kt):
+[`AgentError`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Errors.kt):
 
 ```kotlin
 @Serializable data class AgentError(
@@ -271,7 +271,7 @@ agent. See the full taxonomy discussion in
 
 ## The codec
 
-[`ProtocolCodec`](../protocol/src/commonMain/kotlin/dev/warsha/ble/remoteble/protocol/ProtocolCodec.kt)
+[`ProtocolCodec`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/ProtocolCodec.kt)
 is a two-method interface so the session and transport stay codec-agnostic:
 
 ```kotlin
@@ -309,7 +309,7 @@ class`:
 avoid dumping payloads.
 
 The round-trip suite
-[`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/ble/remoteble/protocol/ProtocolCodecTest.kt)
+[`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt)
 (27 tests) encodes and decodes every variant and asserts structural equality —
 which is exactly why the content-based equality matters.
 
@@ -336,4 +336,4 @@ exactly. The non-obvious bits, each pinned by a cross-language interop test:
 These are verified both ways: Rust decodes the Kotlin codec's bytes
 ([`agent-rs/src/protocol/interop_tests.rs`](../agent-rs/src/protocol/interop_tests.rs))
 and Kotlin decodes the Rust agent's bytes
-([`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/ble/remoteble/protocol/RustAgentInteropTest.kt)).
+([`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt)).

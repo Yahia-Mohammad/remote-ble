@@ -10,10 +10,6 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
-        // Kable, built from source (see README.md#building-kable-from-source-mavenlocal) —
-        // Maven Central doesn't yet publish the JVM btleplug backend :agent needs.
-        // mavenLocal first so it wins.
-        mavenLocal()
         google()
         mavenCentral()
     }
@@ -35,4 +31,7 @@ include(
     // ws://10.0.2.2:8080/agent (the emulator's alias for the host loopback). No local radio. Thin
     // wrapper around :client-ui.
     ":android-client",
+    // On-device agent: a phone-side app hosting :agent's real BLE-central + WebSocket server
+    // directly on the phone's own radio. Thin wrapper around :agent's androidTarget.
+    ":android-agent",
 )

@@ -1,0 +1,31 @@
+# XcodeGen spec — run `xcodegen generate` to produce RemoteBleAgent.xcodeproj.
+# (Hand-writing a .pbxproj is error-prone; this YAML is the source of truth instead.)
+#
+# This project has no business logic of its own — the whole UI (AgentApp), the BLE-central +
+# WebSocket server (AgentRunner), and iOS-specific glue (IosAgentEntry — idle timer, the
+# Compose UIViewController factory) live in :agent's iosMain/mobileMain (Compose Multiplatform).
+# This is purely the launcher shell every iOS Compose Multiplatform app needs: an
+# App/ContentView/ComposeView trio hosting ComposeUIViewController.
+name: RemoteBleAgent
+options:
+  bundleIdPrefix: dev.warsha.remoteble.iosagent
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+targets:
+  RemoteBleAgent:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosagent
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      # Produced by `:agent:assembleRemoteBleAgentReleaseXCFramework -PiosFramework`.
+      - framework: ../agent/build/XCFrameworks/release/RemoteBleAgent.xcframework
+        embed: true

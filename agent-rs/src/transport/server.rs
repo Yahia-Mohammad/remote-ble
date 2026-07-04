@@ -317,14 +317,8 @@ impl AgentServer {
             Op::ScanStart {
                 scan_id,
                 filters: _,
-            } => match backend.start_scan(scan_id, event_tx).await {
-                Ok(_) => OpResult::ok(None),
-                Err(e) => OpResult::err(e),
-            },
-            Op::ScanStop { scan_id } => match backend.stop_scan(scan_id).await {
-                Ok(_) => OpResult::ok(None),
-                Err(e) => OpResult::err(e),
-            },
+            } => OpResult::from_unit(backend.start_scan(scan_id, event_tx).await),
+            Op::ScanStop { scan_id } => OpResult::from_unit(backend.stop_scan(scan_id).await),
             Op::Connect { device } => {
                 if let Err(e) = registry.acquire_lease(&device.value, client_id) {
                     return OpResult::err(e);
@@ -345,49 +339,29 @@ impl AgentServer {
             }
             Op::Disconnect { device } => {
                 registry.release_lease(&device.value, client_id);
-                match backend.disconnect(&device).await {
-                    Ok(_) => OpResult::ok(None),
-                    Err(e) => OpResult::err(e),
-                }
+                OpResult::from_unit(backend.disconnect(&device).await)
             }
-            Op::Discover { device } => match backend.discover(&device).await {
-                Ok(payload) => OpResult::ok(Some(payload)),
-                Err(e) => OpResult::err(e),
-            },
-            Op::Read { device, char } => match backend.read(&device, &char).await {
-                Ok(payload) => OpResult::ok(Some(payload)),
-                Err(e) => OpResult::err(e),
-            },
+            Op::Discover { device } => OpResult::from_payload(backend.discover(&device).await),
+            Op::Read { device, char } => OpResult::from_payload(backend.read(&device, &char).await),
             Op::Write {
                 device,
                 char,
                 value,
                 with_response,
-            } => match backend.write(&device, &char, &value, with_response).await {
-                Ok(_) => OpResult::ok(None),
-                Err(e) => OpResult::err(e),
-            },
-            Op::RequestMtu { device, mtu } => match backend.request_mtu(&device, mtu).await {
-                Ok(payload) => OpResult::ok(Some(payload)),
-                Err(e) => OpResult::err(e),
-            },
+            } => OpResult::from_unit(backend.write(&device, &char, &value, with_response).await),
+            Op::RequestMtu { device, mtu } => {
+                OpResult::from_payload(backend.request_mtu(&device, mtu).await)
+            }
             Op::ObserveStart {
                 sub_id,
                 device,
                 char,
-            } => {
-                match backend
+            } => OpResult::from_unit(
+                backend
                     .start_observe(sub_id, &device, &char, event_tx)
-                    .await
-                {
-                    Ok(_) => OpResult::ok(None),
-                    Err(e) => OpResult::err(e),
-                }
-            }
-            Op::ObserveStop { sub_id } => match backend.stop_observe(sub_id).await {
-                Ok(_) => OpResult::ok(None),
-                Err(e) => OpResult::err(e),
-            },
+                    .await,
+            ),
+            Op::ObserveStop { sub_id } => OpResult::from_unit(backend.stop_observe(sub_id).await),
             _ => OpResult::err(AgentError::new(
                 ErrorKind::Unsupported,
                 Some("Operation not supported on this agent".into()),

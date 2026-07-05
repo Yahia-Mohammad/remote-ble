@@ -132,3 +132,26 @@ tasks.register("printJvmRuntimeClasspath") {
         println(classesDir.path + sep + runtime.files.joinToString(sep) { it.path })
     }
 }
+
+// Self-contained executable JAR of the JVM agent: `java -jar remoteble-agent-<ver>-all.jar [port]`.
+// For Linux/rpi (and Windows) — btleplug talks to BlueZ there with no TCC dance. macOS still needs
+// the signed .app (CoreBluetooth/TCC — see run-agent.sh). Attached to GitHub Releases by
+// .github/workflows/agent-artifacts.yml.
+tasks.register<Jar>("jvmFatJar") {
+    notCompatibleWithConfigurationCache("Merges the resolved runtime classpath via zipTree")
+    group = "distribution"
+    description = "Assembles a self-contained executable JAR of the JVM agent (java -jar …)."
+    archiveBaseName.set("remoteble-agent")
+    archiveClassifier.set("all")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest { attributes("Main-Class" to "dev.warsha.remoteble.agent.MainKt") }
+
+    val jvmMain = kotlin.targets.getByName("jvm").compilations.getByName("main")
+    dependsOn(jvmMain.compileTaskProvider)
+    from(jvmMain.output.allOutputs)
+    from(configurations.getByName("jvmRuntimeClasspath").elements.map { entries ->
+        entries.map { if (it.asFile.isDirectory) it.asFile else zipTree(it.asFile) }
+    })
+    // Merged dependency jars carry conflicting signatures / module descriptors.
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "module-info.class")
+}

@@ -9,6 +9,7 @@ import dev.warsha.remoteble.agent.BleBackend
 import dev.warsha.remoteble.agent.ConnectionWatcher
 import dev.warsha.remoteble.agent.EngineBleBackend
 import dev.warsha.remoteble.agent.PeripheralRegistry
+import dev.warsha.remoteble.agent.StrictModeState
 import dev.warsha.remoteble.agent.DefaultDispatcherProvider
 import dev.warsha.remoteble.agent.DispatcherProvider
 import dev.warsha.remoteble.agent.platformName
@@ -49,6 +50,8 @@ fun agentModule(config: AgentConfig): Module = module {
     single { config }
     single<DispatcherProvider> { DefaultDispatcherProvider }
     single { AgentMonitor() }
+    // Shared identifier strict-mode switch: one instance the BleAgents read and the dashboard flips.
+    single { StrictModeState() }
     // Agent-lifetime scope: survives any single connection so leases, grace timers, and
     // post-disconnect teardown outlive the per-WebSocket scope.
     single<CoroutineScope>(qualifier = org.koin.core.qualifier.named("agent")) {
@@ -75,6 +78,7 @@ fun agentModule(config: AgentConfig): Module = module {
             // capabilities defaults to the backend's own (EngineBleBackend → descriptors).
             // btleplug exposes no bonding/MTU control, so pairing and conn.priority stay off.
             agentInfo = "kable/${platformName()}",
+            strictMode = get(),
         )
     }
     single {
@@ -85,5 +89,5 @@ fun agentModule(config: AgentConfig): Module = module {
             livenessInterval = config.livenessProbeInterval,
         )
     }
-    single { AgentWebSocketServer(config.port, backend = get(), authToken = config.authToken, monitor = get<AgentMonitor>(), registry = get()) }
+    single { AgentWebSocketServer(config.port, backend = get(), authToken = config.authToken, monitor = get<AgentMonitor>(), registry = get(), strictMode = get()) }
 }

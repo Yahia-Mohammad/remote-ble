@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.channelFlow
 
 /**
@@ -99,12 +100,17 @@ class RemoteGattClient(
     fun observe(char: CharRef, onSubscription: suspend () -> Unit = {}): Flow<ByteArray> = channelFlow {
         val subId = session.nextStreamId()
         val pump = session.events()
+            // Issue observe.start from onSubscription — only once this collector is registered on
+            // the shared event stream — so the first notification can't be emitted before we're
+            // listening and get dropped. The caller's onSubscription hook then runs.
+            .onSubscription {
+                session.request(Op.ObserveStart(subId, handle, char), timeouts.op).orThrow()
+                onSubscription()
+            }
             .filterIsInstance<AgentEvent.Notification>()
             .filter { it.subId == subId }
             .onEach { send(it.value) }
             .launchIn(this)
-        session.request(Op.ObserveStart(subId, handle, char), timeouts.op).orThrow()
-        onSubscription()
         awaitClose {
             pump.cancel()
             session.fireAndForget(Op.ObserveStop(subId))

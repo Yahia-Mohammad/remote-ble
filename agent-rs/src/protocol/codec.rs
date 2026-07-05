@@ -38,6 +38,7 @@ mod tests {
             min_version: 1,
             max_version: 1,
             capabilities: caps,
+            identifier_format: None,
         };
 
         let encoded = encode_cbor(&hello).unwrap();

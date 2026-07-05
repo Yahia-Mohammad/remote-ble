@@ -40,4 +40,14 @@ object Capabilities {
      * `ScanResult`. Agent-level (the agent does the coalescing).
      */
     const val SCAN_BATCH: String = "scan.batch"
+
+    /**
+     * Agent-side device-handle translation: the agent rewrites every outgoing [DeviceHandle] into
+     * the client's declared [IdentifierFormat] (see [ClientHello.identifierFormat]) and reverse-maps
+     * incoming ops back to the real radio handle, so a remote peripheral's Kable `Identifier` works
+     * on every client platform regardless of the agent's platform. Agent-level (pure computation +
+     * a per-client reverse map). When absent, handles pass through unchanged (the pre-0.8.0
+     * behavior — a format mismatch surfaces on the client as an unavailable `.identifier`).
+     */
+    const val IDENTIFIER_TRANSLATION: String = "identifier.translate"
 }

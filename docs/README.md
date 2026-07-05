@@ -31,6 +31,7 @@ the shipped system described above.
 | Proposal | Covers | Status |
 |---|---|---|
 | [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | Proposed |
+| [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | Proposed (targeting 0.8.0) |
 
 ---
 

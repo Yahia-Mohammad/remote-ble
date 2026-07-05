@@ -2,6 +2,7 @@ package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.DeviceHandle
@@ -24,6 +25,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -61,8 +63,13 @@ interface AgentSession {
 
     suspend fun request(op: Op, timeout: Duration = DEFAULT_TIMEOUT): OpResult
 
-    /** Hot, shared stream of all events; consumers filter by subId/scanId. */
-    fun events(): Flow<AgentEvent>
+    /**
+     * Hot, shared stream of all events; consumers filter by subId/scanId. Returned as a
+     * [SharedFlow] so stream openers can use `onSubscription` to issue their `scan.start` /
+     * `observe.start` only once they're registered as a collector — otherwise the agent's first
+     * event could be emitted before the collector subscribes and be missed.
+     */
+    fun events(): SharedFlow<AgentEvent>
 
     /** Session-global id for tagging event streams (scanId/subId). Unique per session. */
     fun nextStreamId(): Long
@@ -197,7 +204,7 @@ class DefaultAgentSession(
         return result
     }
 
-    override fun events(): Flow<AgentEvent> = _events.asSharedFlow()
+    override fun events(): SharedFlow<AgentEvent> = _events.asSharedFlow()
 
     override fun fireAndForget(op: Op) {
         scope.launch { runCatchingNonCancellation { request(op, FIRE_AND_FORGET_TIMEOUT) } }
@@ -268,7 +275,14 @@ class DefaultAgentSession(
         runCatchingNonCancellation {
             transport.send(
                 codec.encode(
-                    ClientHello(capabilities = clientCapabilities),
+                    ClientHello(
+                        // Always request handle translation and declare our local Identifier format:
+                        // it's purely additive (an agent that doesn't support it won't negotiate it,
+                        // leaving handles untranslated) and lets a supporting agent hand us handles
+                        // this platform can turn into a native Kable Identifier.
+                        capabilities = clientCapabilities + Capabilities.IDENTIFIER_TRANSLATION,
+                        identifierFormat = currentIdentifierFormat(),
+                    ),
                 ),
             )
         }

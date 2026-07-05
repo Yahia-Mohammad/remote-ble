@@ -70,14 +70,21 @@ kotlin {
 // iOS test binaries only link under a full Xcode toolchain, not the bare Command Line
 // Tools. Run them when Xcode is active (DEVELOPER_DIR set, or `xcode-select -p` points
 // inside an Xcode.app); otherwise skip so a CLT-only `./gradlew build` still succeeds
-// (the klibs still compile, and the shared logic is covered by the JVM suite).
-val activeDeveloperDir = providers.environmentVariable("DEVELOPER_DIR").orElse(
-    providers.exec {
-        commandLine("xcode-select", "-p")
-        isIgnoreExitValue = true
-    }.standardOutput.asText.map(String::trim),
-)
-if (!activeDeveloperDir.map { it.contains("Xcode") }.getOrElse(false)) {
-    tasks.matching { it.name.contains("Test") && it.name.contains("ios", ignoreCase = true) }
-        .configureEach { enabled = false }
+// (the klibs still compile, and the shared logic is covered by the JVM suite). Probe only
+// on macOS: `xcode-select` doesn't exist on Linux/Windows CI hosts, where invoking it fails
+// process *startup* (not just with a non-zero exit) — and the iOS test tasks are already
+// host-disabled by Kotlin there, so there's nothing to skip.
+val isMacOsHost = providers.systemProperty("os.name")
+    .map { it.startsWith("Mac") }.getOrElse(false)
+if (isMacOsHost) {
+    val activeDeveloperDir = providers.environmentVariable("DEVELOPER_DIR").orElse(
+        providers.exec {
+            commandLine("xcode-select", "-p")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map(String::trim),
+    )
+    if (!activeDeveloperDir.map { it.contains("Xcode") }.getOrElse(false)) {
+        tasks.matching { it.name.contains("Test") && it.name.contains("ios", ignoreCase = true) }
+            .configureEach { enabled = false }
+    }
 }

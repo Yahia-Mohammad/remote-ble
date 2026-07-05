@@ -122,6 +122,28 @@ Rules:
 | `DeviceHandle.value` | **agent** | agent | Opaque token (a MAC, a CoreBluetooth UUID, …). The client MUST treat it as **opaque** and MUST NOT parse, construct, or assume a format. The client MUST obtain it from a scan result (`AdvertisementDto.device`) or a handle it already holds. |
 | `scanId` / `subId` | client | client session | **Session-global**, not per-peripheral — unique across the whole client session so two streams never collide. The client MUST reuse the *same* id when replaying a stream (§9). |
 
+### 6.1 Handle translation (capability `identifier.translate`)
+
+A `DeviceHandle.value` is minted in the **agent's** platform format, which a client on a different
+platform may be unable to represent as its own local identifier. The optional, additive
+`identifier.translate` capability lets the agent translate handles into the client's format:
+
+- The client MAY request `identifier.translate` and declare its local format via the
+  `ClientHello.identifierFormat` field — one of `STRING`, `UUID`, `MAC_ADDRESS`, `BLUEZ_JSON`
+  (a client that omits the field or the capability gets untranslated handles).
+- When the capability is negotiated, the agent MUST mint every **outgoing** `DeviceHandle.value`
+  (in `scan.result`/`scan.batch`, `conn.state`, `bond.state`) in the client's declared format, and
+  MUST reverse-map handles on **incoming** ops back to the real radio device so routing is
+  unaffected. The mapping MUST be stable for a given real handle within the client session.
+- Translation is a per-client concern; the value stays **opaque** to the client (§6). Handles are
+  still not comparable across clients — `.handle` semantics are unchanged.
+- An agent MAY offer a **strict mode** in which it passes handles through untranslated even when the
+  capability is negotiated (a diagnostic aid to surface client/agent format mismatches). Absent the
+  capability, or under strict mode, a client whose local type can't hold the format MUST fall back
+  to using the handle as opaque identity.
+
+This is a backward-compatible `1.x` addition: peers that don't name the capability are unaffected.
+
 ## 7. Operations (`Op`)
 
 Every `Op` is a variant of `Command.op`. The agent MUST implement all of them. Unless stated,

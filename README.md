@@ -32,8 +32,9 @@ iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) res
 `iosArm64`/`iosSimulatorArm64`/`iosX64` klibs from Central automatically. There is no separate
 Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
 
-The **agent** is run from source (`agent/run-agent.sh`, the `agent-rs` binary, or the phone
-apps), not consumed as a dependency — see [Running the agent](#running-the-agent-live-macos).
+The **agent** is run from a prebuilt binary ([download from a release](https://github.com/Yahia-Mohammad/remote-ble/releases/latest))
+or from source (`agent/run-agent.sh`, the `agent-rs` binary, or the phone apps), not consumed as a
+dependency — see [Running the agent](#running-the-agent).
 
 ## Use cases
 
@@ -139,7 +140,28 @@ sudo xcode-select -s /Applications/Xcode.app
 ./gradlew :client-ui:assembleRemoteBleClientReleaseXCFramework -PiosFramework
 ```
 
-## Running the agent (live, macOS)
+## Running the agent
+
+### Download a prebuilt agent (no clone)
+
+Every [GitHub release](https://github.com/Yahia-Mohammad/remote-ble/releases/latest) attaches
+runnable agent binaries, so you don't have to clone and build:
+
+- **`remoteble-agent-<ver>-all.jar`** — the JVM agent, self-contained (bundles the native BLE
+  libs for Linux/macOS/Windows). Runs on **Linux / Raspberry Pi** (and Windows) with a JDK 17+:
+  ```sh
+  java -jar remoteble-agent-<ver>-all.jar 8080          # ws://0.0.0.0:8080/agent
+  ```
+- **`remoteble-agent-rs-linux-x86_64`** — the native Rust agent, a single self-contained binary
+  (no JVM needed):
+  ```sh
+  chmod +x remoteble-agent-rs-linux-x86_64 && ./remoteble-agent-rs-linux-x86_64 8080
+  ```
+
+**macOS** needs a signed `.app` for Bluetooth (CoreBluetooth/TCC — see below), so build from source
+with the scripts for now; prebuilt macOS `.app` bundles are a planned follow-up.
+
+### From source — macOS (`run-agent.sh`)
 
 ```sh
 agent/run-agent.sh 8080                       # ws://0.0.0.0:8080/agent, real CoreBluetooth

@@ -1,6 +1,7 @@
 mod ble;
 mod protocol;
 mod registry;
+mod translate;
 mod transport;
 
 use clap::Parser;
@@ -37,6 +38,11 @@ struct Args {
     /// How often the active (real GATT round-trip) liveness probe runs, in milliseconds
     #[arg(long, default_value_t = 15000, env = "REMOTE_BLE_LIVENESS_PROBE_MS")]
     liveness_probe_ms: u64,
+
+    /// Identifier strict mode: pass device handles through untranslated so a cross-platform
+    /// format mismatch surfaces loudly on the client (dev/CI). Off by default (translation on).
+    #[arg(long, default_value_t = false, env = "REMOTE_BLE_STRICT_IDENTIFIERS")]
+    strict_identifiers: bool,
 }
 
 #[tokio::main]
@@ -88,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_config = ServerConfig {
         addr,
         auth_token: args.token,
+        strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
     };
 
     let backend_for_shutdown = ble_backend.clone();

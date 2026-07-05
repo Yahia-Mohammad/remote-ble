@@ -257,6 +257,20 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun clientHello_withIdentifierFormat() {
+        // The 0.8.0 handshake field is optional (null default) and round-trips for every format.
+        assertRoundTrips(ClientHello(identifierFormat = null))
+        for (format in IdentifierFormat.entries) {
+            assertRoundTrips(
+                ClientHello(
+                    capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+                    identifierFormat = format,
+                ),
+            )
+        }
+    }
+
+    @Test
     fun serverHello_defaultsAndPopulated() {
         assertRoundTrips(ServerHello())
         assertRoundTrips(

@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -12,11 +13,12 @@ use crate::protocol::{
     codec::{decode_cbor, encode_cbor},
     errors::{AgentError, ErrorKind},
     events::AgentEvent,
-    frame::{Frame, PROTOCOL_VERSION},
+    frame::{Frame, PROTOCOL_VERSION, capabilities},
     op::Op,
     results::OpResult,
 };
 use crate::registry::peripheral_lease::PeripheralRegistry;
+use crate::translate::{HandleTranslator, agent_identifier_format};
 
 /// Outbound frame buffer per connection. Bounds memory for a slow/stalled client.
 const FRAME_CHANNEL_CAP: usize = 512;
@@ -32,6 +34,9 @@ const LIVENESS_TIMEOUT: Duration = Duration::from_secs(40);
 pub struct ServerConfig {
     pub addr: SocketAddr,
     pub auth_token: Option<String>,
+    /// Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
+    /// connections; when set, handles pass through untranslated.
+    pub strict_identifiers: Arc<AtomicBool>,
 }
 
 pub struct AgentServer {
@@ -88,6 +93,7 @@ impl AgentServer {
             let backend = self.backend.clone();
             let registry = self.registry.clone();
             let auth_token = self.config.auth_token.clone();
+            let strict = self.config.strict_identifiers.clone();
 
             tokio::spawn(async move {
                 let mut client_id = format!("anon-{}", peer_addr);
@@ -132,7 +138,8 @@ impl AgentServer {
                             peer_addr,
                             client_id
                         );
-                        Self::handle_connection(ws_stream, client_id, backend, registry).await;
+                        Self::handle_connection(ws_stream, client_id, backend, registry, strict)
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!("Handshake failed for {}: {}", peer_addr, e);
@@ -147,10 +154,14 @@ impl AgentServer {
         client_id: String,
         backend: Arc<dyn BleBackend>,
         registry: PeripheralRegistry,
+        strict: Arc<AtomicBool>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        // Per-connection handle translator (capability `identifier.translate`). Identity until a
+        // ClientHello configures it; shared with the event pump (forward) and op tasks (reverse).
+        let translator = Arc::new(HandleTranslator::new(agent_identifier_format(), strict));
         // Bounded so a stalled/slow client can't make outbound buffers grow without limit.
         // Replies apply backpressure (await space, bounded by the in-flight-op semaphore);
         // events are shed on overflow (a flood of notifications must never block the radio).
@@ -197,9 +208,12 @@ impl AgentServer {
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let frame_tx_event = frame_tx.clone();
+        let translator_event = translator.clone();
         let event_task = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                // Shed events rather than block the radio when the client can't keep up.
+                // Forward-translate the real handle the event carries into the client's format, then
+                // shed rather than block the radio when the client can't keep up.
+                let event = translator_event.to_client_event(event);
                 match frame_tx_event.try_send(Frame::Event { event }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -236,14 +250,21 @@ impl AgentServer {
                                 min_version: _,
                                 max_version: _,
                                 capabilities: wanted,
+                                identifier_format,
                             } => {
                                 // Negotiated set = clientWanted ∩ agentSupported. We only
                                 // advertise what the backend actually implements, so a client
-                                // never negotiates a capability we'd then answer UNSUPPORTED.
-                                let supported: std::collections::BTreeSet<String> =
+                                // never negotiates a capability we'd then answer UNSUPPORTED —
+                                // plus the agent-level `identifier.translate` (radio-independent).
+                                let mut supported: std::collections::BTreeSet<String> =
                                     backend.capabilities().into_iter().collect();
+                                supported.insert(capabilities::IDENTIFIER_TRANSLATION.to_string());
                                 _negotiated_caps =
                                     wanted.intersection(&supported).cloned().collect();
+                                translator.configure(
+                                    identifier_format,
+                                    _negotiated_caps.contains(capabilities::IDENTIFIER_TRANSLATION),
+                                );
                                 let reply_frame = Frame::ServerHello {
                                     version: PROTOCOL_VERSION,
                                     capabilities: _negotiated_caps.clone(),
@@ -273,10 +294,20 @@ impl AgentServer {
                                 let client_id = client_id.clone();
                                 let event_tx = event_tx.clone();
                                 let frame_tx = frame_tx.clone();
+                                let translator = translator.clone();
                                 tokio::spawn(async move {
                                     let _permit = permit;
+                                    // Reverse-translate the op's client-facing handle back to the
+                                    // real radio handle up front, so the registry and backend deal
+                                    // only in real handles.
+                                    let op = translator.to_real_op(op);
                                     let result = Self::execute_op(
-                                        op, &client_id, &backend, &registry, event_tx,
+                                        op,
+                                        &client_id,
+                                        &backend,
+                                        &registry,
+                                        &translator,
+                                        event_tx,
                                     )
                                     .await;
                                     let _ = frame_tx.send(Frame::Reply { cid, result }).await;
@@ -311,6 +342,7 @@ impl AgentServer {
         client_id: &str,
         backend: &Arc<dyn BleBackend>,
         registry: &PeripheralRegistry,
+        translator: &Arc<HandleTranslator>,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> OpResult {
         match op {
@@ -339,6 +371,7 @@ impl AgentServer {
             }
             Op::Disconnect { device } => {
                 registry.release_lease(&device.value, client_id);
+                translator.evict(&device.value);
                 OpResult::from_unit(backend.disconnect(&device).await)
             }
             Op::Discover { device } => OpResult::from_payload(backend.discover(&device).await),

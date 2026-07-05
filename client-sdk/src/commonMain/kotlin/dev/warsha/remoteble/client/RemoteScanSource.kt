@@ -9,6 +9,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.channelFlow
 
 /**
@@ -26,6 +27,10 @@ class RemoteScanSource(private val session: AgentSession) {
         // Handle both single results and coalesced batches (the agent sends one form or the
         // other for a given scan, depending on the negotiated `scan.batch` capability).
         val pump = session.events()
+            // Issue scan.start from onSubscription — i.e. only once this collector is registered on
+            // the shared event stream — so the agent's first advertisement can't be emitted before
+            // we're listening and get dropped (a rare race under load).
+            .onSubscription { session.request(Op.ScanStart(scanId, filters)).orThrow() }
             .onEach { event ->
                 when (event) {
                     is AgentEvent.ScanResult -> if (event.scanId == scanId) send(event.advertisement)
@@ -36,7 +41,6 @@ class RemoteScanSource(private val session: AgentSession) {
                 }
             }
             .launchIn(this)
-        session.request(Op.ScanStart(scanId, filters)).orThrow()
         awaitClose {
             pump.cancel()
             session.fireAndForget(Op.ScanStop(scanId))

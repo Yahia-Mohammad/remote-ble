@@ -15,6 +15,7 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
 import dev.warsha.remoteble.protocol.Frame
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.Reply
@@ -23,7 +24,9 @@ import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlin.time.Duration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -59,6 +62,9 @@ class BleAgentTest {
         capabilities: Set<String> = emptySet(),
         scanBatchWindow: Duration = BleAgent.DEFAULT_SCAN_BATCH_WINDOW,
         scanBatchMaxSize: Int = BleAgent.DEFAULT_SCAN_BATCH_MAX_SIZE,
+        strictMode: StrictModeState = StrictModeState(),
+        // Default to a format that differs from the clients tests declare, so translation engages.
+        agentFormat: IdentifierFormat = IdentifierFormat.BLUEZ_JSON,
     ) {
         private val codec = CborProtocolCodec()
         private val toAgent = Channel<ByteArray>(Channel.UNLIMITED)
@@ -79,6 +85,8 @@ class BleAgentTest {
                 capabilities = capabilities,
                 scanBatchWindow = scanBatchWindow,
                 scanBatchMaxSize = scanBatchMaxSize,
+                strictMode = strictMode,
+                agentFormat = agentFormat,
             ).start()
         }
 
@@ -91,8 +99,8 @@ class BleAgentTest {
             toAgent.trySend(bytes)
         }
 
-        fun sendHello(wanted: Set<String>) {
-            toAgent.trySend(codec.encode(ClientHello(capabilities = wanted)))
+        fun sendHello(wanted: Set<String>, identifierFormat: IdentifierFormat? = null) {
+            toAgent.trySend(codec.encode(ClientHello(capabilities = wanted, identifierFormat = identifierFormat)))
         }
     }
 
@@ -430,5 +438,76 @@ class BleAgentTest {
 
         h.send(3, Op.ObserveStop(9))
         assertIs<OpResult.Ok>(h.frames.reply(3))
+    }
+
+    // ---- Identifier translation (capability `identifier.translate`) ----
+
+    private suspend fun SharedFlow<Frame>.firstScanResult(scanId: Long): AgentEvent.ScanResult =
+        filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.ScanResult>()
+            .first { it.scanId == scanId }
+
+    @Test
+    fun identifierTranslation_rewritesScanHandleAndRoutesOpsBack() = runTest {
+        // A UUID-format client against an agent whose radio mints non-UUID (bluez) handles.
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val h = Harness(
+            backgroundScope, backend,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        // The client sees a UUID-shaped handle, not the real bluez one.
+        val clientHandle = h.frames.firstScanResult(7).advertisement.device.value
+        assertNotEquals(realHandle.value, clientHandle)
+        assertTrue(clientHandle.contains("-"), "expected a UUID handle, got $clientHandle")
+
+        // An op keyed on that translated handle routes to the real radio device.
+        h.send(2, Op.Connect(DeviceHandle(clientHandle)))
+        assertEquals(OpResult.Ok(), h.frames.reply(2))
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun identifierTranslation_strictModePassesHandlesThrough() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val h = Harness(
+            backgroundScope, backend,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            strictMode = StrictModeState(initial = true),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        // Strict mode: the real handle passes through untranslated (surfaces mismatches loudly).
+        assertEquals(realHandle.value, h.frames.firstScanResult(7).advertisement.device.value)
+    }
+
+    @Test
+    fun identifierTranslation_inactiveWhenCapabilityNotNegotiated() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        // Agent does not advertise the capability, so translation never engages.
+        val h = Harness(backgroundScope, backend, agentFormat = IdentifierFormat.BLUEZ_JSON)
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+        assertEquals(realHandle.value, h.frames.firstScanResult(7).advertisement.device.value)
     }
 }

@@ -265,6 +265,42 @@ Multiple **clients** may share one agent, but peripheral ownership keeps them fr
 the same hardware (above). Multiplexing many agents would live above this layer and is a
 non-goal for v1.
 
+## Monorepo: SDK and agent share one repository
+
+The client SDK and the agent(s) live in one repository, even though only `:protocol` and
+`:client-sdk` are published to Maven Central and the agent is distributed separately (as
+prebuilt binaries — see below). This was reconsidered against splitting the agent into its own
+repo and deliberately kept as a monorepo.
+
+**The two are already decoupled at the code level**, so a monorepo costs almost nothing:
+
+- Production `:client-sdk` has **zero** dependency on `:agent`. The only edge is a *test-only*
+  one — `client-sdk`'s `jvmTest` wires the client against the agent's `FakeAgent` over an
+  in-memory transport (`client-sdk/build.gradle.kts`). Keeping both in one repo makes this
+  end-to-end test a trivial `project(":agent")` dependency; across repos it would require
+  extracting `FakeAgent` into a published test fixture or moving the test to consume the
+  released SDK.
+- The real compatibility contract between SDK and agent is **`:protocol`** (the wire format),
+  which is *already* an independently published, independently versioned Central artifact. SDK
+  and agent are compatible when they agree on the protocol version — they do **not** need to
+  share a release version. Version coupling is therefore a release-process choice, not a
+  structural requirement.
+
+**Why not split (yet).** Splitting would *add* coordination cost for a solo, pre-1.0 project:
+every protocol change would become publish-`:protocol` → bump-in-SDK-repo → bump-in-agent-repo
+instead of one atomic commit; it would fork CI, signing secrets, and changelogs; and
+`:e2e-runner` straddles both sides. The upside (independent cadence, an SDK-only tree) mostly
+pays off once the agent has its own contributors or a distinct release rhythm. The split is
+also **cheap to do later** — `:protocol` is the clean seam and `git filter-repo` preserves
+history — whereas un-splitting is painful. So the bias is to defer until the pain is real
+(revisit post-1.0 or when the agent draws independent contributors).
+
+**The actual consumer pain is distribution, not repo layout.** The complaint "consumers must
+clone the whole repo to run an agent" is solved by *shipping the agent as a released artifact*
+(JVM fat JAR, `agent-rs` native binaries, on-device APK via GitHub Releases), which removes the
+clone-and-build step entirely without touching repo structure. That release workflow is tracked
+as remaining work in `ai-context/RELEASE_PLAN.md`.
+
 ## Known boundaries & extension points
 
 These are deliberate v1 cuts, each a clean extension:

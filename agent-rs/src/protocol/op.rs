@@ -40,6 +40,18 @@ pub enum ConnPriority {
     LowPower,
 }
 
+/// The format a client's Kable `Identifier` can hold on its local platform (mirrors Kotlin
+/// `IdentifierFormat`). Declared in `ClientHello` so an agent that negotiated
+/// `identifier.translate` can mint device handles in the client's native format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum IdentifierFormat {
+    String,
+    Uuid,
+    MacAddress,
+    BluezJson,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     ScanStart {

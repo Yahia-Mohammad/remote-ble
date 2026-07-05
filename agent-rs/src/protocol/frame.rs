@@ -1,5 +1,5 @@
 use super::events::AgentEvent;
-use super::op::Op;
+use super::op::{IdentifierFormat, Op};
 use super::results::OpResult;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -19,6 +19,7 @@ pub mod capabilities {
     pub const CONNECTION_SLOTS: &str = "slots";
     pub const CONN_PRIORITY: &str = "conn.priority";
     pub const SCAN_BATCH: &str = "scan.batch";
+    pub const IDENTIFIER_TRANSLATION: &str = "identifier.translate";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,7 @@ pub enum Frame {
         min_version: i32,
         max_version: i32,
         capabilities: BTreeSet<String>,
+        identifier_format: Option<IdentifierFormat>,
     },
     ServerHello {
         version: i32,
@@ -72,6 +74,12 @@ struct ClientHelloPayload {
     max_version: i32,
     #[serde(default)]
     capabilities: BTreeSet<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "identifierFormat"
+    )]
+    identifier_format: Option<IdentifierFormat>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,12 +129,14 @@ impl Serialize for Frame {
                 min_version,
                 max_version,
                 capabilities,
+                identifier_format,
             } => {
                 seq.serialize_element("hello")?;
                 seq.serialize_element(&ClientHelloPayload {
                     min_version: *min_version,
                     max_version: *max_version,
                     capabilities: capabilities.clone(),
+                    identifier_format: *identifier_format,
                 })?;
             }
             Frame::ServerHello {
@@ -201,6 +211,7 @@ impl<'de> Deserialize<'de> for Frame {
                             min_version: p.min_version,
                             max_version: p.max_version,
                             capabilities: p.capabilities,
+                            identifier_format: p.identifier_format,
                         })
                     }
                     "server_hello" => {

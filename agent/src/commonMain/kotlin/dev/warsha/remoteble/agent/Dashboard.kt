@@ -15,11 +15,16 @@ import io.ktor.server.routing.post
  * served at `/`, backed by a JSON snapshot at `/api/state` that the page polls. Shows
  * connected RemoteBLE clients, peripheral ownership, and a rolling activity log.
  *
- * Mostly read-only; the one mutation is the operator switch
- * `POST /api/peripheral/exclusive` (form: `handle`, `value`) that toggles a peripheral
- * between exclusive (one client) and shared. It never touches the radio.
+ * Mostly read-only; the mutations are operator switches: `POST /api/peripheral/exclusive`
+ * (form: `handle`, `value`) toggles a peripheral between exclusive (one client) and shared, and
+ * `POST /api/strict` (form: `value`) flips identifier strict mode agent-wide (see [StrictModeState]).
+ * Neither touches the radio.
  */
-fun Routing.dashboardRoutes(monitor: AgentMonitor, registry: PeripheralRegistry? = null) {
+fun Routing.dashboardRoutes(
+    monitor: AgentMonitor,
+    registry: PeripheralRegistry? = null,
+    strictMode: StrictModeState? = null,
+) {
     get("/") { call.respondText(DASHBOARD_HTML, ContentType.Text.Html) }
     get("/api/state") {
         val leases = registry?.snapshot().orEmpty()
@@ -34,6 +39,21 @@ fun Routing.dashboardRoutes(monitor: AgentMonitor, registry: PeripheralRegistry?
         } else {
             registry.setExclusive(handle, value)
             call.respondText("ok")
+        }
+    }
+    // Identifier strict-mode switch. GET reports the current state (404 when the feature isn't wired,
+    // so the dashboard hides its button); POST sets it and echoes the resulting value.
+    get("/api/strict") {
+        if (strictMode == null) call.respond(HttpStatusCode.NotFound)
+        else call.respondText(strictMode.enabled.toString())
+    }
+    post("/api/strict") {
+        val value = call.receiveParameters()["value"]?.toBooleanStrictOrNull()
+        if (strictMode == null || value == null) {
+            call.respond(HttpStatusCode.BadRequest)
+        } else {
+            strictMode.enabled = value
+            call.respondText(strictMode.enabled.toString())
         }
     }
 }
@@ -81,6 +101,7 @@ private val DASHBOARD_HTML = """
   .toggle { margin-left:8px; font-size:11px; padding:2px 8px; border-radius:6px; cursor:pointer;
     background:var(--panel); color:var(--text); border:1px solid var(--border); }
   .toggle:hover { border-color:var(--accent2); }
+  .toggle.on { color:var(--warn); border-color:var(--warn); }
   .log { font-family:var(--mono); font-size:12.5px; }
   .log .row { padding:5px 14px; border-bottom:none; }
   .log .t { color:var(--muted); }
@@ -101,6 +122,8 @@ private val DASHBOARD_HTML = """
     <span>owned <b id="dN">0</b></span>
     <span>grace <b id="grace">—</b></span>
   </div>
+  <button class="toggle" id="strictBtn" title="Identifier strict mode: pass handles through untranslated"
+    onclick="toggleStrict()" style="display:none">strict: —</button>
 </header>
 <main>
   <section class="panel">
@@ -136,6 +159,32 @@ private val DASHBOARD_HTML = """
       });
       poll();
     } catch (e) { /* next poll will reconcile */ }
+  }
+
+  let strictOn = false;
+  function renderStrict() {
+    const b = ${'$'}("strictBtn");
+    b.style.display = "";
+    b.textContent = "strict: " + (strictOn ? "on" : "off");
+    b.classList.toggle("on", strictOn);
+  }
+  async function loadStrict() {
+    try {
+      const r = await fetch("/api/strict", { cache: "no-store" });
+      if (!r.ok) { ${'$'}("strictBtn").style.display = "none"; return; }
+      strictOn = (await r.text()) === "true";
+      renderStrict();
+    } catch (e) { /* leave hidden */ }
+  }
+  async function toggleStrict() {
+    try {
+      const r = await fetch("/api/strict", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "value=" + (!strictOn),
+      });
+      if (r.ok) { strictOn = (await r.text()) === "true"; renderStrict(); }
+    } catch (e) { /* next load will reconcile */ }
   }
 
   const short = id => (id && id.length > 8) ? id.slice(0, 8) : id;
@@ -188,6 +237,7 @@ private val DASHBOARD_HTML = """
     }
   }
   poll();
+  loadStrict();
   setInterval(poll, 1000);
 </script>
 </body>

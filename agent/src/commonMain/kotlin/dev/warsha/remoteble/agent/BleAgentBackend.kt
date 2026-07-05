@@ -26,6 +26,9 @@ class BleAgentBackend(
     // connection-slot events). Derived so the advertised set can't drift from what's wired.
     private val capabilities: Set<String> = backend.capabilities + BleAgent.AGENT_CAPABILITIES,
     private val agentInfo: String? = null,
+    // Shared identifier strict-mode switch (capability `identifier.translate`), flipped from the
+    // dashboard. One instance across all connections so a toggle applies agent-wide.
+    private val strictMode: StrictModeState = StrictModeState(),
 ) : AgentBackend {
     override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job =
         BleAgent(
@@ -37,5 +40,6 @@ class BleAgentBackend(
             clientKey = clientKey,
             capabilities = capabilities,
             agentInfo = agentInfo,
+            strictMode = strictMode,
         ).start()
 }

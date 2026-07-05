@@ -13,8 +13,10 @@ import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
+import dev.warsha.remoteble.protocol.mapDevice
 import dev.warsha.remoteble.protocol.PROTOCOL_VERSION
 import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
@@ -77,6 +79,11 @@ class BleAgent(
     // least this often, or sooner once a burst reaches [scanBatchMaxSize].
     private val scanBatchWindow: Duration = DEFAULT_SCAN_BATCH_WINDOW,
     private val scanBatchMaxSize: Int = DEFAULT_SCAN_BATCH_MAX_SIZE,
+    // Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
+    // connections and flipped live from the dashboard; read on each forward handle translation.
+    private val strictMode: StrictModeState = StrictModeState(),
+    // The handle format this agent's radio mints, so translation is skipped for a same-platform peer.
+    private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
 ) {
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
@@ -88,6 +95,15 @@ class BleAgent(
     // handshake. Gates agent→client features the client must opt into to decode — sending an
     // event a client never negotiated would break its decode loop.
     private var negotiated: Set<String> = emptySet()
+
+    // Per-connection device-handle translator (capability `identifier.translate`). Identity until a
+    // handshake declares the client's format; then it rewrites outgoing handles into that format and
+    // reverse-maps incoming ops. Set on the collect loop (respondHello), read from command/emit
+    // coroutines — same benign single-writer pattern as `negotiated` (the client sends hello first).
+    private var translator: HandleTranslator = identityTranslator()
+
+    private fun identityTranslator(): HandleTranslator =
+        HandleTranslator(clientFormat = null, agentFormat = agentFormat, capabilityNegotiated = false, strict = { false })
 
     // How the registry reaches this connection to report an unsolicited BLE drop it detected
     // out-of-band (ConnectionWatcher) — an explicit Disconnect op already emits its own event via
@@ -106,6 +122,7 @@ class BleAgent(
                 observer.onDeviceDisconnected(clientId, handle)
                 observer.onClientLog(clientId, "unsolicited disconnect: $handle")
                 emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED))
+                translator.evict(handle)
                 emitSlotsIfNegotiated()
             } catch (e: CancellationException) {
                 throw e
@@ -159,7 +176,10 @@ class BleAgent(
 
     private suspend fun handle(cmd: Command) {
         try {
-            when (val op = cmd.op) {
+            // Reverse-translate the op's client-facing handle back to the real radio handle up front,
+            // so connection tracking, the registry, and the backend all deal only in real handles.
+            // (mapDevice is inline, so the suspend toReal call is legal here.)
+            when (val op = cmd.op.mapDevice { DeviceHandle(translator.toReal(it.value)) }) {
                 is Op.Connect -> reply(cmd.cid, connect(op.device))
                 is Op.Disconnect -> reply(cmd.cid, disconnect(op.device))
                 is Op.Discover -> reply(cmd.cid, OpResult.Ok(ResultPayload.Services(backend.discover(op.device))))
@@ -271,6 +291,7 @@ class BleAgent(
         observer.onDeviceDisconnected(clientId, device.value)
         observer.onClientLog(clientId, "disconnected ${device.value}")
         emit(AgentEvent.ConnectionState(device, BleConnState.DISCONNECTED))
+        translator.evict(device.value)
         emitSlotsIfNegotiated()
         return OpResult.Ok()
     }
@@ -387,6 +408,12 @@ class BleAgent(
     /** Answer the client's handshake with the negotiated capability set (intersection). */
     private suspend fun respondHello(hello: ClientHello) {
         negotiated = hello.capabilities intersect capabilities
+        translator = HandleTranslator(
+            clientFormat = hello.identifierFormat,
+            agentFormat = agentFormat,
+            capabilityNegotiated = Capabilities.IDENTIFIER_TRANSLATION in negotiated,
+            strict = { strictMode.enabled },
+        )
         outgoing(
             codec.encode(
                 ServerHello(version = PROTOCOL_VERSION, capabilities = negotiated, agentInfo = agentInfo),
@@ -404,7 +431,9 @@ class BleAgent(
 
     private suspend fun reply(cid: Long, result: OpResult) = outgoing(codec.encode(Reply(cid, result)))
 
-    private suspend fun emit(event: AgentEvent) = outgoing(codec.encode(Event(event)))
+    // Forward-translate any real handle the event carries into the client's declared format before
+    // it goes on the wire (identity when translation isn't active).
+    private suspend fun emit(event: AgentEvent) = outgoing(codec.encode(Event(translator.outgoing(event))))
 
     companion object {
         const val DEFAULT_MAX_CONNECTIONS: Int = 4
@@ -418,6 +447,6 @@ class BleAgent(
          * advertised set by [BleAgentBackend].
          */
         val AGENT_CAPABILITIES: Set<String> =
-            setOf(Capabilities.CONNECTION_SLOTS, Capabilities.SCAN_BATCH)
+            setOf(Capabilities.CONNECTION_SLOTS, Capabilities.SCAN_BATCH, Capabilities.IDENTIFIER_TRANSLATION)
     }
 }

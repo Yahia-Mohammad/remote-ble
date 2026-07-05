@@ -48,6 +48,8 @@ class AgentWebSocketServer(
     private val authToken: String? = null,
     private val monitor: AgentMonitor? = null,
     private val registry: PeripheralRegistry? = null,
+    // Shared identifier strict-mode switch, exposed on the dashboard for live toggling.
+    private val strictMode: StrictModeState? = null,
     // Liveness: Ktor pings idle clients every [pingPeriod] and closes the session if no
     // pong arrives within [pongTimeout]. This promptly frees a client that vanished without
     // a TCP FIN (Wi-Fi drop, NAT timeout, sleep) — which also triggers its lease grace timer
@@ -80,7 +82,7 @@ class AgentWebSocketServer(
                 }
             }
             routing {
-                statusMonitor?.let { dashboardRoutes(it, registry) }
+                statusMonitor?.let { dashboardRoutes(it, registry, strictMode) }
                 webSocket(path) {
                     val clientId = nextClientId.incrementAndGet()
                     val address = call.request.origin.let { "${it.remoteHost}:${it.remotePort}" }

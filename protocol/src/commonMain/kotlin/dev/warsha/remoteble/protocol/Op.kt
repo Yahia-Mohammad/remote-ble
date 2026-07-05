@@ -137,3 +137,25 @@ sealed interface Op {
     @Serializable @SerialName("conn.priority")
     data class RequestConnectionPriority(val device: DeviceHandle, val priority: ConnPriority) : Op
 }
+
+/**
+ * Returns a copy of this [Op] with its [DeviceHandle] replaced by [transform] applied to it. Ops
+ * that carry no device (scan/observe control keyed by scanId/subId) are returned unchanged. Used by
+ * the agent to reverse-translate a client-facing handle back to the real radio handle at the op
+ * boundary, so the rest of op handling deals only in real handles.
+ */
+inline fun Op.mapDevice(transform: (DeviceHandle) -> DeviceHandle): Op = when (this) {
+    is Op.Connect -> copy(device = transform(device))
+    is Op.Disconnect -> copy(device = transform(device))
+    is Op.Discover -> copy(device = transform(device))
+    is Op.Read -> copy(device = transform(device))
+    is Op.Write -> Op.Write(transform(device), char, value, withResponse)
+    is Op.ObserveStart -> copy(device = transform(device))
+    is Op.RequestMtu -> copy(device = transform(device))
+    is Op.ReadDescriptor -> copy(device = transform(device))
+    is Op.WriteDescriptor -> Op.WriteDescriptor(transform(device), desc, value)
+    is Op.Pair -> copy(device = transform(device))
+    is Op.Unpair -> copy(device = transform(device))
+    is Op.RequestConnectionPriority -> copy(device = transform(device))
+    is Op.ScanStart, is Op.ScanStop, is Op.ObserveStop -> this
+}

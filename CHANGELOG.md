@@ -9,9 +9,34 @@ The **wire protocol** version is tracked separately from the library version —
 is a distinct compatibility contract for agent/client implementers. Current wire
 protocol version: **1**.
 
-## [Unreleased]
+## [0.8.0] - 2026-07-05
 
-_Becomes `0.7.0` at the first tag._
+### Added
+
+- **Cross-platform device `Identifier` via agent-side handle translation** (capability
+  `identifier.translate`). The client declares its local `IdentifierFormat` in the handshake; a
+  supporting agent mints device handles already in that format and reverse-maps ops back to the real
+  radio device, so a remote peripheral's Kable `Identifier` now works on every client platform
+  regardless of the agent's platform. Same-platform pairings are unaffected (identity translation).
+  Implemented in **both** the Kotlin agent and `agent-rs`. See
+  [docs/proposals/agent-side-identifier-translation.md](docs/proposals/agent-side-identifier-translation.md).
+- **Identifier strict mode** — an agent-side switch that passes handles through untranslated to
+  surface cross-platform format mismatches loudly (dev/CI). Live-toggleable from the Kotlin agent's
+  dashboard (`POST /api/strict`); a `--strict-identifiers` flag on `agent-rs`.
+
+### Fixed
+
+- Scan and observe streams now issue their `scan.start` / `observe.start` from a flow
+  `onSubscription` hook, so the collector is guaranteed registered on the shared event stream before
+  the agent can emit — closing a rare race where the first advertisement/notification could be
+  dropped under load. `AgentSession.events()` now returns a `SharedFlow<AgentEvent>` (was `Flow`).
+
+### Notes
+
+- Wire protocol version stays **1**: the new `identifier.translate` capability and the optional
+  `ClientHello.identifierFormat` field are additive and backward-compatible with 0.7.0 peers.
+
+## [0.7.0] - 2026-07-05
 
 ### Added
 
@@ -36,4 +61,5 @@ _Becomes `0.7.0` at the first tag._
 - A normative, language-agnostic conformance spec
   ([docs/agent-proxy-spec.md](docs/agent-proxy-spec.md)).
 
-[Unreleased]: https://github.com/Yahia-Mohammad/remote-ble/commits/main
+[0.8.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.0
+[0.7.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.7.0

@@ -14,7 +14,7 @@ use super::codec::{decode_cbor, encode_cbor};
 use super::errors::{AgentError, ErrorKind};
 use super::events::{AdvertisementDto, AgentEvent, BleConnState};
 use super::frame::Frame;
-use super::op::{CharRef, ConnPriority, DeviceHandle, Op};
+use super::op::{CharRef, ConnPriority, DeviceHandle, IdentifierFormat, Op};
 use super::results::{OpResult, ResultPayload};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +50,7 @@ fn client_hello_default() {
             min_version: 1,
             max_version: 1,
             capabilities: BTreeSet::new(),
+            identifier_format: None,
         },
     );
 }
@@ -66,6 +67,26 @@ fn client_hello_with_caps() {
             min_version: 1,
             max_version: 2,
             capabilities: caps,
+            identifier_format: None,
+        },
+    );
+}
+
+#[test]
+fn client_hello_with_identifier_format() {
+    // Kotlin ClientHello(capabilities={identifier.translate}, identifierFormat=UUID) — proves the
+    // Rust agent decodes the 0.8.0 handshake field and its SCREAMING_SNAKE enum encoding.
+    let caps: BTreeSet<String> = ["identifier.translate"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_kotlin_decodes_to(
+        "9f6568656c6c6fbf6c6361706162696c69746965739f746964656e7469666965722e7472616e736c617465ff706964656e746966696572466f726d61746455554944ffff",
+        Frame::ClientHello {
+            min_version: 1,
+            max_version: 1,
+            capabilities: caps,
+            identifier_format: Some(IdentifierFormat::Uuid),
         },
     );
 }

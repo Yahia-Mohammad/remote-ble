@@ -1,0 +1,93 @@
+name: Agent artifacts
+
+# Builds the runnable agent artifacts and attaches them to the GitHub Release for a tag, so
+# consumers can download and run an agent without cloning the repo.
+#
+# Phase 1 (this file): cross-platform JVM agent fat JAR + Linux x86_64 agent-rs binary.
+# Future phases: macOS .app bundles (CoreBluetooth/TCC needs a signed .app), multi-arch
+# (arm64 / Windows), and the on-device Android APK.
+#
+# Runs automatically on a release tag, and can be dispatched manually against an existing tag
+# (e.g. to backfill) without pushing a tag — pushing a `v*` tag also triggers the Maven publish.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build + attach artifacts to (e.g. v0.7.0)"
+        required: true
+
+permissions:
+  contents: write # upload release assets
+
+jobs:
+  jvm-agent-jar:
+    name: JVM agent fat JAR (cross-platform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      # :agent applies the Android KMP library plugin, so configuring the project needs the SDK
+      # even though jvmFatJar only touches the jvm() target.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build fat JAR
+        run: ./gradlew :agent:jvmFatJar --no-configuration-cache
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: agent/build/libs/remoteble-agent-*-all.jar
+
+  agent-rs-linux:
+    name: agent-rs (linux x86_64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      # btleplug's Linux (BlueZ/D-Bus) backend needs libdbus headers to compile.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('agent-rs/Cargo.lock') }}
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/release/agent-rs dist/remoteble-agent-rs-linux-x86_64
+          chmod +x dist/remoteble-agent-rs-linux-x86_64
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: agent-rs/dist/remoteble-agent-rs-linux-x86_64

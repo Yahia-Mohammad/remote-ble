@@ -52,6 +52,11 @@ data class ClientHello(
     val minVersion: Int = PROTOCOL_VERSION,
     val maxVersion: Int = PROTOCOL_VERSION,
     val capabilities: Set<String> = emptySet(),
+    // The format this client's local Kable `Identifier` can hold. Only meaningful when the client
+    // also names [Capabilities.IDENTIFIER_TRANSLATION]; an agent that negotiated it mints handles in
+    // this format. Optional/nullable (and trailing) so the frame stays wire-compatible with peers
+    // that predate translation — they simply omit it and get untranslated handles.
+    val identifierFormat: IdentifierFormat? = null,
 ) : Frame
 
 /**

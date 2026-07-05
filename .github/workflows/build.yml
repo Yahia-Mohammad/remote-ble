@@ -65,5 +65,5 @@ jobs:
           ./gradlew \
             :protocol:compileKotlinIosArm64 :protocol:compileKotlinIosX64 :protocol:compileKotlinIosSimulatorArm64 \
             :client-sdk:compileKotlinIosArm64 :client-sdk:compileKotlinIosX64 :client-sdk:compileKotlinIosSimulatorArm64 \
-            :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosX64 :client-ui:compileKotlinIosSimulatorArm64 \
+            :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosSimulatorArm64 \
             :agent:compileKotlinIosArm64 :agent:compileKotlinIosSimulatorArm64

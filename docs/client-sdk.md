@@ -389,14 +389,26 @@ doesn't model (`txPower`, `isConnectable`, aggregate `manufacturerData`) are `nu
 
 Both `RemoteAdvertisement.identifier` and `RemotePeripheral.identifier` go through an
 internal `expect fun deviceHandleToIdentifier(value: String): Identifier`
-([`RemoteIdentifier.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteIdentifier.kt)),
-**not** Kable's `String.toIdentifier()`. The agent mints handles as macOS CoreBluetooth
-**UUID** strings, but Kable's Android `Identifier` is a MAC address and its `toIdentifier()`
-throws `"MAC Address has invalid format"` for a UUID — which crashed Android clients the
-moment they read `identifier`. The actuals: **JVM** wraps it in an opaque `PeripheralId`
-(no validation); **Android** returns the `String` as-is (its `Identifier` is a `String`
-typealias); **Apple** does `Uuid.parse` (handles are UUIDs). The value is identity/display
-only — remote ops key off `DeviceHandle`. Guarded by `RemoteAdvertisementIdentifierTest`.
+([`RemoteIdentifier.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteIdentifier.kt)).
+Kable's `Identifier` is a **local-platform** type, so the actuals differ: **Android** returns the
+`String` as-is (its `Identifier` is a `String` typealias — this also skips the MAC-format check
+Kable's Android `toIdentifier()` applies, which used to crash on a UUID handle); **Apple** does
+`Uuid.parse`; **JVM** goes through the host radio's native parser (UUID on macOS, MAC on Windows,
+a bluez id on Linux).
+
+**Cross-platform translation (0.8.0).** The handle's format is set by the *agent's* platform (a
+macOS agent mints UUIDs). Since 0.8.0 the client declares its local `IdentifierFormat` in the
+handshake and requests the `identifier.translate` capability; a supporting agent then mints handles
+already in the client's native format and reverse-maps ops back to the real radio device (see
+[proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md)).
+So `.identifier` normally succeeds on every client platform, and `deviceHandleToIdentifier` only
+throws [`RemoteIdentifierUnavailableException`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemoteIdentifier.kt)
+when translation is off: a **pre-0.8.0 agent**, the agent's **strict mode** (dashboard toggle), or
+the still-stubbed **Linux-host-JVM `BLUEZ_JSON`** format. The value is identity/display only —
+**remote ops key off `DeviceHandle`, so `.handle` remains the portable cross-platform identity.**
+Covered by `RemoteAdvertisementIdentifierTest` (portable `.handle`), `RemoteIdentifierJvmTest`
+(host-specific `.identifier`), and the agent's `HandleTranslatorTest` / `BleAgentTest` translation
+e2e.
 
 ### `peripheralFor` and `RemotePeripheralFactory` — the decision point
 

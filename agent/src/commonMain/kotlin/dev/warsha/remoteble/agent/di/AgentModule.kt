@@ -67,7 +67,9 @@ fun agentModule(config: AgentConfig): Module = module {
             onRelease = { handle -> backend.disconnect(DeviceHandle(handle)) },
         )
     }
-    single<BleBackend> { EngineBleBackend() }
+    single<BleBackend> {
+        EngineBleBackend(scope = get(qualifier = org.koin.core.qualifier.named("agent")))
+    }
     single<AgentBackend> {
         BleAgentBackend(
             backend = get(),

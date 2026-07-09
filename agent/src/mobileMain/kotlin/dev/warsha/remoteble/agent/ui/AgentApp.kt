@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -16,6 +17,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -31,8 +33,6 @@ import dev.warsha.remoteble.agent.AgentRunner
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.persistToken
-import kotlin.uuid.ExperimentalUuidApi
-import kotlin.uuid.Uuid
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -54,11 +54,12 @@ import kotlinx.coroutines.launch
  * button routing to the app's settings page.
  *
  * Auth token: an editable field, enabled only while
- * stopped, backed by [loadPersistedToken]/[persistToken] so a token set (or auto-generated) in a
- * previous session survives relaunch. If the field is left blank, a random token is generated
- * when Start is pressed and shown alongside the address — the agent never starts token-free.
+ * stopped, backed by [loadPersistedToken]/[persistToken] so a token set in a previous session
+ * survives relaunch. If the field is left blank, pressing Start prompts for confirmation and then
+ * runs the agent token-free (no auth — any client on the network can connect); see
+ * [dev.warsha.remoteble.agent.AgentWebSocketServer], which drops the Authorization gate when the
+ * token is null.
  */
-@OptIn(ExperimentalUuidApi::class)
 @Composable
 fun AgentApp(
     runner: AgentRunner,
@@ -74,6 +75,7 @@ fun AgentApp(
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
     var token by remember { mutableStateOf<String?>(null) }
     var tokenEdited by remember { mutableStateOf(false) }
+    var showNoTokenConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val persisted = loadPersistedToken()
@@ -97,14 +99,19 @@ fun AgentApp(
         }
     }
 
-    val onStart: () -> Unit = {
-        // If the field is blank, mint a random token so the agent never starts token-free.
-        val effectiveToken =
-            token?.takeIf { it.isNotBlank() } ?: Uuid.random().toString().replace("-", "")
+    // Start the agent with [chosen]; a blank/null token runs token-free (no auth gate).
+    val startWith: (String?) -> Unit = { chosen ->
+        val effectiveToken = chosen?.takeIf { it.isNotBlank() }
         token = effectiveToken
-        // Persist on Start, not per keystroke: only records tokens the agent actually ran with.
+        // Persist on Start, not per keystroke: only records what the agent actually ran with.
+        // A null token clears any stored value so a relaunch also comes up token-free.
         scope.launch { persistToken(effectiveToken) }
         runner.start(config.copy(authToken = effectiveToken))
+    }
+    val onStart: () -> Unit = {
+        // A blank field is a deliberate, security-relevant choice (anyone on the LAN can then
+        // connect), so confirm before running without auth rather than silently minting a token.
+        if (token.isNullOrBlank()) showNoTokenConfirm = true else startWith(token)
     }
     val onStop: () -> Unit = { scope.launch { runner.stop() } }
 
@@ -142,6 +149,28 @@ fun AgentApp(
                     logsSection(s.logs)
                 }
             }
+        }
+
+        if (showNoTokenConfirm) {
+            AlertDialog(
+                onDismissRequest = { showNoTokenConfirm = false },
+                title = { Text("Start without an auth token?") },
+                text = {
+                    Text(
+                        "The agent will accept any client on the network with no authentication. " +
+                            "Only do this on a trusted network. To require a token, cancel and " +
+                            "type one into the field first.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { showNoTokenConfirm = false; startWith(null) }) {
+                        Text("Start without token")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showNoTokenConfirm = false }) { Text("Cancel") }
+                },
+            )
         }
     }
 }
@@ -183,14 +212,17 @@ private fun AgentHeader(
     OutlinedTextField(
         value = token.orEmpty(),
         onValueChange = onTokenChange,
-        label = { Text("Auth token") },
+        label = { Text("Auth token (blank = none)") },
         enabled = !running,
         modifier = Modifier.fillMaxWidth(),
     )
     if (running) {
-        // Start always injects a token (the typed one, or an auto-generated fallback),
-        // so while running it's never blank — just surface it for the client operator.
-        Text("Token: $token", style = MaterialTheme.typography.bodySmall)
+        // Surface what the agent is actually running with: the token for client operators to
+        // copy, or a clear warning when it was started token-free.
+        Text(
+            if (token.isNullOrBlank()) "No auth token — any client can connect" else "Token: $token",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
     if (!startEnabled && permissionWarning != null) {
         Text(
@@ -206,12 +238,17 @@ private fun AgentHeader(
     }
 }
 
+// NOTE on keys: all three sections below feed the *same* LazyColumn (see AgentApp), so their
+// item keys share one namespace. A raw client id and a raw log id are both small ints that
+// collide the instant a client connects (client #1 vs log #1) — Compose throws
+// "Key 1 was already used" and the UI crashes. Prefix every key with its section so they can
+// never collide across sections.
 private fun LazyListScope.clientsSection(clients: List<AgentMonitor.ClientDto>) {
     sectionHeader("Connected clients (${clients.size})")
     if (clients.isEmpty()) {
         item { Text("No clients connected.") }
     } else {
-        items(clients, key = { it.id }) { c -> Text("#${c.id} · ${c.address}") }
+        items(clients, key = { "client-${it.id}" }) { c -> Text("#${c.id} · ${c.address}") }
     }
 }
 
@@ -223,7 +260,7 @@ private fun LazyListScope.leasesSection(
     if (leases.isEmpty()) {
         item { Text("No peripherals owned. Clients can still scan.") }
     } else {
-        items(leases, key = { it.handle }) { lease ->
+        items(leases, key = { "lease-${it.handle}" }) { lease ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -242,7 +279,7 @@ private fun LazyListScope.logsSection(logs: List<AgentMonitor.LogEntry>) {
     if (logs.isEmpty()) {
         item { Text("No activity yet.") }
     } else {
-        items(logs.asReversed(), key = { it.id }) { log ->
+        items(logs.asReversed(), key = { "log-${it.id}" }) { log ->
             Text(log.message, style = MaterialTheme.typography.bodySmall)
         }
     }

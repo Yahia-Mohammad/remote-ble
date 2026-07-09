@@ -39,16 +39,51 @@ class Backoff(
 }
 
 /**
+ * How the transport recovers a lost — or not-yet-established — link.
+ *
+ * [enabled] off makes connects one-shot: [WebSocketAgentTransport.connect] throws on failure and
+ * nothing retries. [backoff] paces attempts. [maxAttempts] bounds a single recovery *episode*: after
+ * that many consecutive failed attempts the transport stops, rests at
+ * [TransportState.DISCONNECTED], and invokes [onGaveUp] exactly once; `null` (the default) means
+ * retry forever. A later successful (re)connection resets the count, so a subsequent drop gets a
+ * fresh episode. This lets a caller distinguish "still reconnecting" from "gave up — surface an
+ * error to the user" rather than watching an unbounded, silent loop.
+ */
+data class ReconnectPolicy(
+    val enabled: Boolean = true,
+    val backoff: Backoff = Backoff(),
+    val maxAttempts: Int? = null,
+    val onGaveUp: (() -> Unit)? = null,
+) {
+    init {
+        require(maxAttempts == null || maxAttempts >= 1) { "maxAttempts must be >= 1 or null (unlimited)" }
+    }
+
+    companion object {
+        /** One-shot: no background reconnect; `connect()` throws on the first failure. */
+        val None: ReconnectPolicy = ReconnectPolicy(enabled = false)
+    }
+}
+
+/**
  * LAYER 1 over a Ktor WebSocket. Each protocol frame is one binary WS message.
  * The endpoint URL ("ws://host:port/path") is opaque to everything above this.
  *
- * [connect] is idempotent. On an unexpected close the transport goes DISCONNECTED
- * (which makes the session fail in-flight requests with TRANSPORT_LOST) and, if
- * [autoReconnect], retries with [Backoff] until reconnected — at which point new
- * requests succeed again. The incoming pipe survives reconnects.
+ * [connect] is idempotent. If the *initial* attempt fails (e.g. the agent isn't up yet) and
+ * [reconnect] is enabled, it arms the same [Backoff] loop instead of giving up — a client that
+ * starts before its agent still connects once the agent appears, without the caller retrying.
+ * With reconnect disabled, the initial attempt is one-shot and [connect] throws on failure.
+ * On an unexpected close the transport goes DISCONNECTED (which makes the session fail in-flight
+ * requests with TRANSPORT_LOST) and, if enabled, retries per [reconnect] until reconnected (or the
+ * policy gives up) — at which point new requests succeed again. The incoming pipe survives reconnects.
  *
- * [authToken] is the Phase-7 auth hook: a bearer credential injected at construction.
- * The SDK does not own the identity system.
+ * [authToken] is the Phase-7 auth hook: a suspend provider for the bearer credential.
+ * It is invoked once per connection attempt (including every [Backoff] reconnect retry),
+ * so a token that rotates or expires is refreshed on reconnect rather than replayed stale.
+ * The SDK never caches the returned value and does not own the identity system; the provider
+ * owns its own caching/expiry. If it throws, the attempt fails like any other connect error
+ * and folds into the reconnect/backoff path. Return `null` (the default) — or a blank string — to
+ * send no header, i.e. connect unauthenticated against a token-free agent.
  *
  * [clientId] is a *stable session id* generated once and re-sent on every reconnect, so the
  * agent recognises this client after a brief drop and lets it resume its peripheral ownership.
@@ -59,9 +94,8 @@ class WebSocketAgentTransport(
     private val url: String,
     private val scope: CoroutineScope,
     private val httpClient: HttpClient,
-    private val authToken: String? = null,
-    private val autoReconnect: Boolean = true,
-    private val backoff: Backoff = Backoff(),
+    private val authToken: suspend () -> String? = { null },
+    private val reconnect: ReconnectPolicy = ReconnectPolicy(),
     private val clientId: String = Uuid.random().toString(),
 ) : AgentTransport {
 
@@ -79,7 +113,19 @@ class WebSocketAgentTransport(
         connectMutex.withLock {
             if (closed) throw TransportClosedException("transport closed")
             if (_state.value == TransportState.CONNECTED) return
-            openSession()
+            try {
+                openSession()
+            } catch (e: Throwable) {
+                // A one-shot failure would otherwise strand a client that started before its
+                // agent: openSession() only arms the backoff loop from a post-CONNECTED drop,
+                // never from the first attempt. With reconnect enabled, keep trying in the
+                // background so the initial connect self-heals like a reconnect does.
+                if (reconnect.enabled && !closed) {
+                    scope.launch { reconnectWithBackoff() }
+                } else {
+                    throw e
+                }
+            }
         }
     }
 
@@ -104,8 +150,12 @@ class WebSocketAgentTransport(
     private suspend fun openSession() {
         _state.value = TransportState.CONNECTING
         val s = try {
+            val token = authToken()
             httpClient.webSocketSession(urlString = url) {
-                authToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+                // A blank provider result is treated the same as null: send no Authorization
+                // header at all (an empty `Bearer ` would just be a malformed credential). This is
+                // how an empty token means "connect unauthenticated" against a token-free agent.
+                token?.takeIf { it.isNotBlank() }?.let { header(HttpHeaders.Authorization, "Bearer $it") }
                 header(CLIENT_ID_HEADER, clientId)
             }
         } catch (e: Throwable) {
@@ -134,16 +184,23 @@ class WebSocketAgentTransport(
         if (session !== closedSession && session != null) return
         session = null
         _state.value = TransportState.DISCONNECTED
-        if (autoReconnect && !closed) {
+        if (reconnect.enabled && !closed) {
             scope.launch { reconnectWithBackoff() }
         }
     }
 
+    /**
+     * Retries [openSession] with [ReconnectPolicy.backoff] until connected, closed, or —
+     * when [ReconnectPolicy.maxAttempts] is set — that many consecutive attempts have failed,
+     * in which case it gives up (resting at DISCONNECTED) and fires [ReconnectPolicy.onGaveUp].
+     */
     private suspend fun reconnectWithBackoff() {
+        val maxAttempts = reconnect.maxAttempts
         var attempt = 0
         while (!closed && _state.value != TransportState.CONNECTED) {
-            delay(backoff.delayFor(attempt++))
+            delay(reconnect.backoff.delayFor(attempt))
             if (closed) return
+            attempt++
             try {
                 connectMutex.withLock {
                     if (closed || _state.value == TransportState.CONNECTED) return
@@ -151,7 +208,10 @@ class WebSocketAgentTransport(
                 }
                 return
             } catch (_: Throwable) {
-                // retry on next iteration
+                if (maxAttempts != null && attempt >= maxAttempts) {
+                    if (!closed) reconnect.onGaveUp?.invoke()
+                    return
+                }
             }
         }
     }

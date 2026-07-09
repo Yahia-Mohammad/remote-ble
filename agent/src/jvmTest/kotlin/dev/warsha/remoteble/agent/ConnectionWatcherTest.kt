@@ -1,6 +1,8 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.DeviceHandle
+import dev.warsha.remoteble.protocol.ErrorKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -92,12 +94,37 @@ class ConnectionWatcherTest {
     }
 
     @Test
+    fun nativeDropIsForwardedToTheRegistryWithReasonWithoutWaitingForAPoll() = runTest {
+        val backend = FakeBleBackend()
+        backend.connect(DeviceHandle(handle)) // radio reports connected: the poll loop alone won't flag it
+        val registry = PeripheralRegistry(backgroundScope, leaseGrace = 10.seconds)
+        registry.acquire(handle, owner)
+        registry.onConnected(handle, owner)
+
+        val notified = mutableListOf<Pair<String, AgentError?>>()
+        registry.registerClient(owner) { h, r -> notified += h to r }
+
+        ConnectionWatcher(registry, backend, backgroundScope, interval = tick).start()
+        runCurrent() // let the native-drop collector subscribe before we emit
+
+        // The backend detects the drop natively and pushes it with a reason — no poll tick elapses.
+        val reason = AgentError(ErrorKind.DISCONNECTED, message = "peer disconnected")
+        backend.connectionDropSignals.emit(ConnectionDrop(DeviceHandle(handle), reason))
+        runCurrent()
+
+        assertEquals(listOf<Pair<String, AgentError?>>(handle to reason), notified, "native drop must reach the client with its reason")
+        val lease = registry.snapshot().single { it.handle == handle }
+        assertFalse(lease.connected, "the native drop must mark the lease disconnected")
+        assertTrue(lease.inGrace, "the native drop must start the release grace")
+    }
+
+    @Test
     fun aThrowingClientNotifierDoesNotKillTheWatcher() = runTest {
         val backend = FakeBleBackend()
         val registry = PeripheralRegistry(backgroundScope, leaseGrace = 10.seconds)
         // Models a client whose wire send fails (e.g. a socket already closing during the
         // transport-grace window): the registry invokes this to notify the client of the drop.
-        registry.registerClient(owner) { error("send on closed socket") }
+        registry.registerClient(owner) { _, _ -> error("send on closed socket") }
 
         // First dropped peripheral: leased + connected, but the radio is not up in the backend.
         registry.acquire(handle, owner)

@@ -7,6 +7,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -31,6 +32,11 @@ class ConnectionWatcher(
     private val livenessInterval: Duration = 15.seconds,
 ) {
     fun start(): Job = scope.launch {
+        // Native fast-path: forward drops the backend detects itself — promptly and with a reason —
+        // running concurrently with the polling fallback below. Backends with no native signal
+        // return an empty stream, leaving only the poll loop.
+        launch { collectNativeDrops() }
+
         var sinceLiveness = Duration.ZERO
         while (isActive) {
             delay(interval)
@@ -53,6 +59,26 @@ class ConnectionWatcher(
                 } catch (t: Throwable) {
                     // Best-effort: skip this lease this tick and keep watching the rest.
                 }
+            }
+        }
+    }
+
+    /**
+     * Forwards the backend's native [BleBackend.connectionDrops] to the registry. Resolves the
+     * dropped handle's current owner (the native signal only knows the handle) and routes it through
+     * the same [PeripheralRegistry.onUnsolicitedDisconnect] path as the poll loop — but immediately
+     * and with the drop's [ConnectionDrop.reason]. Each drop is contained so one failure (or one
+     * unleased handle) can't tear down the stream.
+     */
+    private suspend fun collectNativeDrops() {
+        backend.connectionDrops().collect { drop ->
+            try {
+                val owner = registry.ownerOf(drop.device.value) ?: return@collect // not (any longer) leased
+                registry.onUnsolicitedDisconnect(drop.device.value, owner, drop.reason)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                // Best-effort: skip this drop and keep collecting.
             }
         }
     }

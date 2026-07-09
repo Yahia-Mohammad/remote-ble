@@ -2,8 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Runtime-requested (see MainActivity) — API 31+ needs explicit scan/connect grants;
-         below that, BLE scanning is gated on (coarse/fine) location instead. -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+         below that, BLE scanning is gated on (coarse/fine) location instead.
+         neverForLocation: the agent only wants advertisements, it never derives physical location
+         from them. Asserting this is what lets scan *results* through on API 31+ without holding
+         ACCESS_FINE_LOCATION — without it, Android treats BLUETOOTH_SCAN as location-bearing and
+         silently returns zero results (the scan "runs" but nothing is ever reported). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
     <!-- Pre-31 BLE permissions; harmless no-ops on newer OSes that use the two above instead. -->

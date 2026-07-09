@@ -51,9 +51,8 @@ class WebSocketAgentTransport(
     url: String,                  // "ws://host:port/path" — opaque above this layer
     scope: CoroutineScope,
     httpClient: HttpClient,
-    authToken: String? = null,    // bearer credential, sent as Authorization: Bearer <token>
-    autoReconnect: Boolean = true,
-    backoff: Backoff = Backoff(),
+    authToken: suspend () -> String? = { null }, // bearer provider, sent as Authorization: Bearer <token>
+    reconnect: ReconnectPolicy = ReconnectPolicy(), // how the link recovers (below)
 ) : AgentTransport
 ```
 
@@ -61,18 +60,26 @@ Behavior:
 
 - **`connect()` is idempotent** — guarded by a mutex; returns immediately if already
   CONNECTED; otherwise opens a session (CONNECTING → CONNECTED) and launches a
-  receive loop.
+  receive loop. If the *initial* attempt fails and `reconnect` is enabled, it arms the
+  same backoff loop instead of giving up, so a client that starts before its agent still
+  connects once the agent appears (with `enabled = false` the first attempt is one-shot
+  and `connect()` throws).
 - **On an unexpected close** the receive loop falls through to `onDisconnected`,
   which flips state to DISCONNECTED (this is what makes the session fail in-flight
-  requests with `TRANSPORT_LOST`) and, if `autoReconnect`, launches
+  requests with `TRANSPORT_LOST`) and, if enabled, launches
   `reconnectWithBackoff`. Stale receive loops from a session that was already
   replaced are ignored.
-- **`reconnectWithBackoff`** retries `openSession()` with exponential `Backoff`
-  until CONNECTED or `close()`. **The `incoming` channel survives reconnects** (it is
-  created once, `Channel.UNLIMITED`), so the session's decode loop is uninterrupted.
-- **`authToken`**, when set, is sent as an `Authorization: Bearer <token>` header on
-  the WS upgrade. (Server-side enforcement lives in the agent — see
-  [agent.md](agent.md#authentication).)
+- **`reconnectWithBackoff`** retries `openSession()` with the policy's `Backoff` until
+  CONNECTED, `close()`, or — when `maxAttempts` is set — the attempt budget is spent, at
+  which point it rests at DISCONNECTED and fires `onGaveUp` once. **The `incoming` channel
+  survives reconnects** (created once, `Channel.UNLIMITED`), so the decode loop is uninterrupted.
+- **`authToken`** is a suspend provider invoked once per connection attempt (including
+  every reconnect retry); a non-null return is sent as an `Authorization: Bearer <token>`
+  header on the WS upgrade. Because it's called per attempt, a token that rotates or
+  expires is refreshed on reconnect — the SDK never caches the value. For a static token
+  just return it: `authToken = { "secret" }`. If the provider throws, the attempt fails
+  like any connect error and folds into the backoff/reconnect path. (Server-side
+  enforcement lives in the agent — see [agent.md](agent.md#authentication).)
 
 ```kotlin
 class Backoff(base: Duration = 50.ms, max: Duration = 2000.ms) {
@@ -82,6 +89,68 @@ class Backoff(base: Duration = 50.ms, max: Duration = 2000.ms) {
 
 The Ktor engine is **not** baked in — it is passed as `httpClient`. Each platform
 provides a default via an `expect`/`actual` (next section).
+
+### Error and retry policies
+
+Two independent policies control recovery. Both default to **today's behavior**, so they
+are pure opt-ins.
+
+**`ReconnectPolicy`** — how the *transport link* recovers (constructor arg above):
+
+```kotlin
+data class ReconnectPolicy(
+    val enabled: Boolean = true,            // false = one-shot; connect() throws on failure
+    val backoff: Backoff = Backoff(),
+    val maxAttempts: Int? = null,           // null = retry forever; else give up after N
+    val onGaveUp: (() -> Unit)? = null,     // fired once when a bounded episode is exhausted
+)
+```
+
+`maxAttempts` bounds a single recovery *episode* (a later success resets the count), and
+`onGaveUp` lets a UI distinguish "still reconnecting" from "gave up — surface an error"
+rather than watching an unbounded, silent loop.
+
+**`RetryPolicy`** — whether the *session* retries a failed **operation**. It's an interface, not a
+bag of parameters: given the failure so far, it answers one question — wait how long, or stop?
+
+```kotlin
+fun interface RetryPolicy {
+    // 1-based attempt that just failed, the AgentError, and time since the first try.
+    // Return the delay before the next attempt, or null to stop.
+    fun retryDelay(attempt: Int, error: AgentError, elapsed: Duration): Duration?
+}
+```
+
+It is **stateless** — the loop passes the attempt count and elapsed time *in*, so one instance is
+safe to share across concurrent `request()` calls and there is nothing to reset. Arbitrary logic
+(per-error budgets, deadlines, circuit breakers, jitter) is just another implementation; the common
+cases are built into `RetryPolicies`:
+
+```kotlin
+RetryPolicies.None                                   // attempt once, never retry
+RetryPolicies.maxAttempts(3)                         // up to 3, transient errors, backoff
+RetryPolicies.untilElapsed(10.seconds)               // retry transient errors until a deadline
+
+// The built-in per-op default resolver, derived from safety (Op.isIdempotent):
+fun defaultRetryPolicyFor(op: Op): RetryPolicy = when {
+    !op.isIdempotent -> RetryPolicies.None            // Write / WriteDescriptor / Pair
+    op is Op.Connect -> RetryPolicies.maxAttempts(3)
+    else             -> RetryPolicies.maxAttempts(2)
+}
+```
+
+Which policy an op gets is resolved most-specific first:
+
+1. **Per call** — `request(op, retry = RetryPolicies.None)` overrides everything for that one call.
+   This is the deliberate "I know this write *is* safe to repeat" opt-in (or the reverse — force a
+   single attempt).
+2. **Per session** — `DefaultAgentSession(retryPolicyFor = …)` swaps the whole default table;
+   otherwise `defaultRetryPolicyFor` applies.
+
+Write-safety therefore lives in *which policy an op gets by default* — **writes and pairing default
+to `None`**, because re-issuing a `Write` whose reply was merely lost would apply it twice — not in
+a runtime gate. `timeout` on `request()` is **per attempt**; a `TRANSPORT_LOST` retry waits (up to
+the policy's delay) for the link to reconnect rather than busy-failing.
 
 ### `defaultWebSocketHttpClient()` — per-platform engine
 
@@ -469,7 +538,7 @@ The smallest remote client:
 ```kotlin
 val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 val transport = WebSocketAgentTransport("ws://agent-host:8080/agent", scope,
-                                        defaultWebSocketHttpClient(), authToken = "secret")
+                                        defaultWebSocketHttpClient(), authToken = { "secret" })
 val session = DefaultAgentSession(transport, CborProtocolCodec(), scope)
 
 // scan → pick a device → get a Kable Peripheral that happens to be remote
@@ -498,7 +567,7 @@ target) that binds the same constructors:
 ```kotlin
 startKoin {
     modules(remoteBleClientModule(RemoteBleClientConfig(url = "ws://agent-host:8080/agent",
-                                                        authToken = "secret")))
+                                                        authToken = { "secret" })))
 }
 val session = koin.get<AgentSession>()
 val factory = koin.get<RemotePeripheralFactory>()

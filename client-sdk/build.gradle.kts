@@ -21,7 +21,9 @@ kotlin {
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
     }
-    iosX64()
+    // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
+    // simulator): matches :protocol and the rest of the repo, and trims ~24 files per release off the
+    // Central Portal monthly file-count quota (see ai-context/maven-central-publish-footprint notes).
     iosArm64()
     iosSimulatorArm64()
 

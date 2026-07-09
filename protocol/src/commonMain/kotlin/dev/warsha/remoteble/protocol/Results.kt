@@ -37,6 +37,10 @@ sealed interface ResultPayload {
     @Serializable @SerialName("mtu")
     data class Mtu(val mtu: Int) : ResultPayload
 
+    /** ReadRssi result — the connected link's RSSI in dBm (negative; capability `rssi`). */
+    @Serializable @SerialName("rssi")
+    data class Rssi(val rssi: Int) : ResultPayload
+
     /** Pair result — the resulting bond state. */
     @Serializable @SerialName("bond")
     data class Bond(val state: BleBondState) : ResultPayload

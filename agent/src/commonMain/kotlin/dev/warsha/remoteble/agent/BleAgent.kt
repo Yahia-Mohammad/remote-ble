@@ -115,13 +115,13 @@ class BleAgent(
     // back: emit() ultimately writes to this client's WebSocket, and a send that throws (socket
     // already closing) or suspends (slow consumer) must not stall or tear down the watchdog that
     // monitors every other client's peripherals. Any failure here is contained to this client.
-    private val onUnsolicitedDisconnect: suspend (handle: String) -> Unit = { handle ->
+    private val onUnsolicitedDisconnect: suspend (handle: String, reason: AgentError?) -> Unit = { handle, reason ->
         scope.launch {
             try {
                 state.withLock { connected -= handle }
                 observer.onDeviceDisconnected(clientId, handle)
                 observer.onClientLog(clientId, "unsolicited disconnect: $handle")
-                emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED))
+                emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED, reason = reason))
                 translator.evict(handle)
                 emitSlotsIfNegotiated()
             } catch (e: CancellationException) {
@@ -189,6 +189,7 @@ class BleAgent(
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.RequestMtu -> reply(cmd.cid, OpResult.Ok(ResultPayload.Mtu(backend.requestMtu(op.device, op.mtu))))
+                is Op.ReadRssi -> reply(cmd.cid, OpResult.Ok(ResultPayload.Rssi(backend.readRssi(op.device))))
                 is Op.ReadDescriptor ->
                     reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(backend.readDescriptor(op.device, op.desc))))
                 is Op.WriteDescriptor -> {

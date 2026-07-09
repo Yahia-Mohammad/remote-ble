@@ -37,12 +37,15 @@ app: DefaultAgentSession(WebSocketAgentTransport("ws://host:8080/agent", …), C
 1. The session's `init` launches three coroutines: the decode loop (collects
    `transport.incoming`), the transport-state watcher, and a one-shot
    `transport.connect()`.
-2. `WebSocketAgentTransport.connect()` opens the WS (sending `Authorization: Bearer
-   <token>` if configured). State: `DISCONNECTED → CONNECTING → CONNECTED`.
+2. `WebSocketAgentTransport.connect()` opens the WS. `openSession()` first invokes the
+   `authToken` provider (a `suspend () -> String?`, called once per attempt so a rotated
+   token is picked up on reconnect); a non-null result is sent as `Authorization: Bearer
+   <token>`. State: `DISCONNECTED → CONNECTING → CONNECTED`.
 3. If auth fails, the agent returns `401` and the upgrade never completes →
-   `openSession()` throws → state returns to `DISCONNECTED` → (if `autoReconnect`) the
-   backoff loop retries. `request()` short-circuits to `Err(TRANSPORT_LOST)` while not
-   CONNECTED.
+   `openSession()` throws → state returns to `DISCONNECTED` → (if `ReconnectPolicy.enabled`)
+   the backoff loop retries until connected or the policy gives up. A throwing `authToken`
+   provider (e.g. a refresh failure) lands the same way. `request()` short-circuits to
+   `Err(TRANSPORT_LOST)` while not CONNECTED (unless a `RetryPolicy` waits out the reconnect).
 
 No frames cross the wire yet — the session is request-driven.
 

@@ -39,7 +39,8 @@ import kotlinx.coroutines.flow.onEach
  *
  * Descriptor [read]/[write] are supported when the agent advertises the
  * `descriptors` capability (the op is otherwise answered with `UNSUPPORTED`).
- * Connected-RSSI ([rssi]) has no wire op and remains unsupported.
+ * Connected-RSSI ([rssi]) likewise requires the agent's `rssi` capability — a live
+ * read only on Android/iOS agents; other agents answer `UNSUPPORTED`.
  * [maximumWriteValueLengthForType] reports the MTU the agent negotiated on connect
  * (requesting [requestedMtu]), falling back to the ATT default of 23.
  */
@@ -169,8 +170,7 @@ public class RemotePeripheral(
         .map { it.state }
 
     @ExperimentalApi
-    override suspend fun rssi(): Int =
-        throw UnsupportedOperationException("Connected RSSI is not part of the remote protocol (v1).")
+    override suspend fun rssi(): Int = gatt.readRssi()
 
     override suspend fun read(descriptor: Descriptor): ByteArray =
         gatt.readDescriptor(descriptor.toDescRef())

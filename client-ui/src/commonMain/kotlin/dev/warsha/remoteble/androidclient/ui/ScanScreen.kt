@@ -14,12 +14,18 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,6 +47,7 @@ fun ScanScreen(
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onUrlChanged: (String) -> Unit,
+    onTokenChanged: (String) -> Unit,
     onConnectDevice: (DiscoveredDevice) -> Unit,
     onHideUnnamedChanged: (Boolean) -> Unit,
 ) {
@@ -55,10 +62,12 @@ fun ScanScreen(
 
         AgentEndpointCard(
             url = state.agentUrl,
+            token = state.agentToken,
             isScanning = state.isScanning,
             onStartScan = onStartScan,
             onStopScan = onStopScan,
             onUrlChanged = onUrlChanged,
+            onTokenChanged = onTokenChanged,
         )
 
         Text(
@@ -121,19 +130,43 @@ private fun Header(isScanning: Boolean) {
 @Composable
 private fun AgentEndpointCard(
     url: String,
+    token: String,
     isScanning: Boolean,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onUrlChanged: (String) -> Unit,
+    onTokenChanged: (String) -> Unit,
 ) {
+    // Confirm before connecting with no token: the endpoint is unauthenticated, which only makes
+    // sense against a token-free agent (e.g. the JVM CLI). The mobile agents always require one.
+    var confirmNoToken by remember { mutableStateOf(false) }
+
     SurfaceCard(modifier = Modifier.padding(bottom = 20.dp)) {
         SectionLabel(text = "AGENT ENDPOINT", modifier = Modifier.padding(bottom = 6.dp))
 
+        // The URL and token identify the connection, so they're locked while a scan is live —
+        // changing them mid-scan would be meaningless (the session is already established).
         OutlinedTextField(
             value = url,
             onValueChange = onUrlChanged,
+            enabled = !isScanning,
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
+            colors = endpointFieldColors(),
+            shape = RoundedCornerShape(8.dp),
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Bearer token for the agent upgrade. Leave blank for a token-free agent; the mobile
+        // agents require it and show the value to copy here.
+        OutlinedTextField(
+            value = token,
+            onValueChange = onTokenChanged,
+            enabled = !isScanning,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Auth token (blank = none)") },
             colors = endpointFieldColors(),
             shape = RoundedCornerShape(8.dp),
         )
@@ -144,9 +177,37 @@ private fun AgentEndpointCard(
         // so it's always clear whether a scan is running.
         AccentButton(
             text = if (isScanning) "Stop Scan" else "Start Scan",
-            onClick = if (isScanning) onStopScan else onStartScan,
+            onClick = {
+                when {
+                    isScanning -> onStopScan()
+                    token.isBlank() -> confirmNoToken = true
+                    else -> onStartScan()
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             container = if (isScanning) AppColors.danger else AppColors.accent,
+        )
+    }
+
+    if (confirmNoToken) {
+        AlertDialog(
+            onDismissRequest = { confirmNoToken = false },
+            title = { Text("Connect without a token?") },
+            text = {
+                Text(
+                    "No auth token is set, so the connection to the agent will be unauthenticated. " +
+                        "The mobile agents always require a token and will reject this — continue only " +
+                        "for a token-free agent (e.g. the JVM CLI).",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmNoToken = false; onStartScan() }) {
+                    Text("Connect anyway")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmNoToken = false }) { Text("Cancel") }
+            },
         )
     }
 }

@@ -10,6 +10,7 @@ import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
+import dev.warsha.remoteble.protocol.isIdempotent
 import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ServerHello
@@ -19,9 +20,11 @@ import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -61,7 +64,12 @@ interface AgentSession {
      */
     val capabilities: StateFlow<Set<String>?>
 
-    suspend fun request(op: Op, timeout: Duration = DEFAULT_TIMEOUT): OpResult
+    /**
+     * Issues [op] and awaits its reply. [retry] overrides the session's per-op default policy for
+     * this one call (`null` = use the default resolved for [op]); [timeout] is applied **per
+     * attempt**. See [RetryPolicy].
+     */
+    suspend fun request(op: Op, timeout: Duration = DEFAULT_TIMEOUT, retry: RetryPolicy? = null): OpResult
 
     /**
      * Hot, shared stream of all events; consumers filter by subId/scanId. Returned as a
@@ -102,6 +110,68 @@ suspend fun AgentSession.awaitCapabilities(): Set<String> =
 suspend fun AgentSession.supportsCapability(capability: String): Boolean =
     awaitCapabilities().contains(capability)
 
+/**
+ * The retry decision for a failed op — **behavior, not parameters**. Given the failure so far it
+ * answers one question: wait how long before trying again, or stop? Returning `null` stops and
+ * surfaces the error. Implementations are **stateless** — the loop passes the state in ([attempt],
+ * [elapsed]) — so a single instance is safe to share across concurrent `request()` calls, and there
+ * is nothing to reset. Built-ins live in [RetryPolicies]; anything exotic (per-error budgets,
+ * deadlines, circuit breakers, jitter) is just another implementation.
+ *
+ * A policy is chosen **per op**: the session resolves one via its `retryPolicyFor` (default
+ * [defaultRetryPolicyFor]), and a caller can override it for a single call with
+ * `request(op, retry = …)`. [timeout] on `request` is applied **per attempt**.
+ */
+fun interface RetryPolicy {
+    /**
+     * @param attempt 1-based number of the attempt that just failed
+     * @param error the failure — inspect [AgentError.kind], or [AgentError.gattStatus] for raw status
+     * @param elapsed wall-clock time since the first attempt began
+     * @return the delay before the next attempt, or `null` to stop retrying
+     */
+    fun retryDelay(attempt: Int, error: AgentError, elapsed: Duration): Duration?
+}
+
+/** Built-in [RetryPolicy] implementations. */
+object RetryPolicies {
+    /** Attempt once, never retry. */
+    val None: RetryPolicy = RetryPolicy { _, _, _ -> null }
+
+    /** Retry up to [maxAttempts] total attempts, on [retryOn] errors, paced by [backoff]. */
+    fun maxAttempts(
+        maxAttempts: Int,
+        backoff: Backoff = Backoff(),
+        retryOn: Set<ErrorKind> = ErrorKind.transientKinds,
+    ): RetryPolicy {
+        require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
+        return RetryPolicy { attempt, error, _ ->
+            if (attempt < maxAttempts && error.kind in retryOn) backoff.delayFor(attempt) else null
+        }
+    }
+
+    /** Keep retrying [retryOn] errors, paced by [backoff], until [budget] wall-clock has elapsed. */
+    fun untilElapsed(
+        budget: Duration,
+        backoff: Backoff = Backoff(),
+        retryOn: Set<ErrorKind> = ErrorKind.transientKinds,
+    ): RetryPolicy = RetryPolicy { attempt, error, elapsed ->
+        if (elapsed < budget && error.kind in retryOn) backoff.delayFor(attempt) else null
+    }
+}
+
+/**
+ * The built-in per-op default policy, derived from safety: a non-idempotent op (write, pairing —
+ * see [Op.isIdempotent]) is never auto-retried, [Op.Connect] gets a little more patience, and every
+ * other idempotent op retries a couple of times. Only [ErrorKind.transient] errors are retried.
+ * Override for a whole session via `DefaultAgentSession(retryPolicyFor = …)`, or per call via
+ * `request(op, retry = …)`.
+ */
+fun defaultRetryPolicyFor(op: Op): RetryPolicy = when {
+    !op.isIdempotent -> RetryPolicies.None
+    op is Op.Connect -> RetryPolicies.maxAttempts(3)
+    else -> RetryPolicies.maxAttempts(2)
+}
+
 @OptIn(ExperimentalAtomicApi::class)
 class DefaultAgentSession(
     private val transport: AgentTransport,
@@ -110,6 +180,9 @@ class DefaultAgentSession(
     // The capabilities this client understands, sent in every ClientHello. Defaults to
     // empty (the v1 baseline); grows as the SDK gains descriptor/pairing support.
     private val clientCapabilities: Set<String> = emptySet(),
+    // Resolves the retry policy for each op. Default = per-op-type defaults ([defaultRetryPolicyFor]);
+    // a caller can still override any single call via request(op, retry = …).
+    private val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
 ) : AgentSession {
 
     private val ids = AtomicLong(0)
@@ -178,7 +251,28 @@ class DefaultAgentSession(
 
     override fun nextStreamId(): Long = ids.incrementAndFetch()
 
-    override suspend fun request(op: Op, timeout: Duration): OpResult {
+    override suspend fun request(op: Op, timeout: Duration, retry: RetryPolicy?): OpResult {
+        val policy = retry ?: retryPolicyFor(op)
+        val started = TimeSource.Monotonic.markNow()
+        var attempt = 0
+        while (true) {
+            attempt++
+            val result = attemptRequest(op, timeout)
+            if (result is OpResult.Ok) return result
+            val error = (result as OpResult.Err).error
+            val pause = policy.retryDelay(attempt, error, started.elapsedNow()) ?: return result
+            // For a lost link, wait (up to the chosen delay) for it to come back rather than
+            // burning the attempt on an instant TRANSPORT_LOST; other errors just back off.
+            if (error.kind == ErrorKind.TRANSPORT_LOST) {
+                withTimeoutOrNull(pause) { transport.state.first { it == TransportState.CONNECTED } }
+            } else {
+                delay(pause)
+            }
+        }
+    }
+
+    /** One attempt at [op]: send, await the reply within [timeout], and record it for replay. */
+    private suspend fun attemptRequest(op: Op, timeout: Duration): OpResult {
         if (transport.state.value != TransportState.CONNECTED) {
             return OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "transport not connected"))
         }

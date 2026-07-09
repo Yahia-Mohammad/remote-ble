@@ -2,8 +2,11 @@ package dev.warsha.remoteble.client.di
 
 import dev.warsha.remoteble.client.AgentSession
 import dev.warsha.remoteble.client.AgentTransport
-import dev.warsha.remoteble.client.Backoff
 import dev.warsha.remoteble.client.DefaultAgentSession
+import dev.warsha.remoteble.client.ReconnectPolicy
+import dev.warsha.remoteble.client.RetryPolicy
+import dev.warsha.remoteble.client.defaultRetryPolicyFor
+import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.client.RemotePeripheralFactory
 import dev.warsha.remoteble.client.RemoteScanner
 import dev.warsha.remoteble.client.WebSocketAgentTransport
@@ -26,9 +29,9 @@ import org.koin.dsl.module
  */
 public data class RemoteBleClientConfig(
     val url: String,
-    val authToken: String? = null,
-    val autoReconnect: Boolean = true,
-    val backoff: Backoff = Backoff(),
+    val authToken: suspend () -> String? = { null },
+    val reconnect: ReconnectPolicy = ReconnectPolicy(),
+    val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
 )
 
 /**
@@ -56,8 +59,7 @@ public fun remoteBleClientModule(config: RemoteBleClientConfig): Module = module
             get(),
             get(),
             authToken = config.authToken,
-            autoReconnect = config.autoReconnect,
-            backoff = config.backoff,
+            reconnect = config.reconnect,
         )
     }
     single<AgentSession> {
@@ -70,6 +72,7 @@ public fun remoteBleClientModule(config: RemoteBleClientConfig): Module = module
                 Capabilities.CONN_PRIORITY,
                 Capabilities.SCAN_BATCH,
             ),
+            retryPolicyFor = config.retryPolicyFor,
         )
     }
     factory { RemotePeripheralFactory(get(), get()) }

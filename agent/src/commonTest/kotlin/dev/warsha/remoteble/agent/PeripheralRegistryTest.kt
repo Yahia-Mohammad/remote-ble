@@ -1,6 +1,8 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.agent.PeripheralRegistry.Acquisition
+import dev.warsha.remoteble.protocol.AgentError
+import dev.warsha.remoteble.protocol.ErrorKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -117,11 +119,17 @@ class PeripheralRegistryTest {
         registry.onConnected(p, a)
 
         val notified = mutableListOf<String>()
-        registry.registerClient(a) { handle -> notified += handle }
+        var receivedReason: AgentError? = null
+        registry.registerClient(a) { handle, reason ->
+            notified += handle
+            receivedReason = reason
+        }
 
-        registry.onUnsolicitedDisconnect(p, a)
+        val reason = AgentError(ErrorKind.DISCONNECTED, message = "peer disconnected")
+        registry.onUnsolicitedDisconnect(p, a, reason)
 
         assertEquals(listOf(p), notified)
+        assertEquals(reason, receivedReason, "the drop's reason must reach the client notifier")
         advanceTimeBy(11.seconds)
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // grace elapsed, same as onDisconnected
@@ -145,8 +153,8 @@ class PeripheralRegistryTest {
         val registry = PeripheralRegistry(backgroundScope)
         val oldNotified = mutableListOf<String>()
         val newNotified = mutableListOf<String>()
-        val oldCallback: suspend (String) -> Unit = { oldNotified += it }
-        val newCallback: suspend (String) -> Unit = { newNotified += it }
+        val oldCallback: suspend (String, AgentError?) -> Unit = { handle, _ -> oldNotified += handle }
+        val newCallback: suspend (String, AgentError?) -> Unit = { handle, _ -> newNotified += handle }
 
         registry.registerClient(a, oldCallback)
         registry.registerClient(a, newCallback) // reconnect's fresh BleAgent registers first

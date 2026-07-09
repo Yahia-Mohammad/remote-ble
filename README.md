@@ -2,6 +2,7 @@
 
 [![Build](https://github.com/Yahia-Mohammad/remote-ble/actions/workflows/build.yml/badge.svg)](https://github.com/Yahia-Mohammad/remote-ble/actions/workflows/build.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/dev.warsha.remoteble/client-sdk?label=Maven%20Central)](https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk)
+[![GitHub release](https://img.shields.io/github/v/release/Yahia-Mohammad/remote-ble?label=GitHub%20release&sort=semver)](https://github.com/Yahia-Mohammad/remote-ble/releases/latest)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A "remote mode" for a Kotlin Multiplatform BLE stack: client app code written against
@@ -23,7 +24,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.7.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.8.1")
 }
 ```
 
@@ -152,21 +153,23 @@ runnable agent binaries, so you don't have to clone and build:
   ```sh
   java -jar remoteble-agent-<ver>-all.jar 8080          # ws://0.0.0.0:8080/agent
   ```
-- **`remoteble-agent-rs-linux-x86_64`** — the native Rust agent, a single self-contained binary
-  (no JVM needed):
+- **`remoteble-agent-rs-<platform>`** — the native Rust agent, a single self-contained binary
+  (no JVM needed), built for **`linux-x86_64`**, **`linux-aarch64`** (Raspberry Pi / ARM SBCs), and
+  **`windows-x86_64.exe`**:
   ```sh
-  chmod +x remoteble-agent-rs-linux-x86_64 && ./remoteble-agent-rs-linux-x86_64 8080
+  chmod +x remoteble-agent-rs-linux-aarch64 && ./remoteble-agent-rs-linux-aarch64 8080
   ```
 
-**macOS** needs a signed `.app` for Bluetooth (CoreBluetooth/TCC — see below), so build from source
-with the scripts for now; prebuilt macOS `.app` bundles are a planned follow-up.
+**macOS** needs a signed `.app` for Bluetooth (CoreBluetooth/TCC — see below), so there's no prebuilt
+macOS download: build + run from source with the scripts below (they assemble and ad-hoc-sign the
+`.app` for you).
 
 ### From source — macOS (`run-agent.sh`)
 
 ```sh
 agent/run-agent.sh 8080                       # ws://0.0.0.0:8080/agent, real CoreBluetooth
 
-# Require a bearer token (clients must pass the same value as WebSocketAgentTransport.authToken):
+# Require a bearer token (clients must return the same value from WebSocketAgentTransport.authToken):
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 ```
 

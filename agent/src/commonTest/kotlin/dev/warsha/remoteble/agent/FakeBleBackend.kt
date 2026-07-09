@@ -14,6 +14,7 @@ import dev.warsha.remoteble.protocol.ServiceNode
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 
@@ -36,6 +37,9 @@ class FakeBleBackend(
     private val emitInterval: Duration = 10.milliseconds,
 ) : BleBackend {
 
+    // Lets tests drive the native unsolicited-drop stream (see BleBackend.connectionDrops).
+    val connectionDropSignals = MutableSharedFlow<ConnectionDrop>(extraBufferCapacity = 8)
+
     val connectCalls = mutableListOf<DeviceHandle>()
     val disconnectCalls = mutableListOf<DeviceHandle>()
     val pairCalls = mutableListOf<DeviceHandle>()
@@ -43,6 +47,8 @@ class FakeBleBackend(
     var lastWrite: Triple<CharRef, ByteArray, Boolean>? = null
     var lastDescriptorWrite: Pair<DescRef, ByteArray>? = null
     var lastConnectionPriority: ConnPriority? = null
+
+    override fun connectionDrops(): Flow<ConnectionDrop> = connectionDropSignals
 
     override fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto> = flow {
         var i = 0

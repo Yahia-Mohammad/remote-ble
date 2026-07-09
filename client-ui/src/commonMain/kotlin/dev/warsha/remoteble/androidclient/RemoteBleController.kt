@@ -47,6 +47,7 @@ class RemoteBleController(
     /** The slice of state this controller itself owns; the device/agent state come from flows. */
     private data class Local(
         val agentUrl: String = UiState.DEFAULT_AGENT_URL,
+        val agentToken: String = "",
         val status: String = "Idle.",
         val isScanning: Boolean = false,
         val discovered: List<DiscoveredDevice> = emptyList(),
@@ -72,6 +73,7 @@ class RemoteBleController(
     ) { local, agentState, device ->
         UiState(
             agentUrl = local.agentUrl,
+            agentToken = local.agentToken,
             agentState = agentState,
             isScanning = local.isScanning,
             status = local.status,
@@ -88,6 +90,10 @@ class RemoteBleController(
         local.update { it.copy(agentUrl = url) }
     }
 
+    fun updateToken(token: String) {
+        local.update { it.copy(agentToken = token) }
+    }
+
     fun setHideUnnamed(hide: Boolean) {
         local.update { it.copy(hideUnnamed = hide) }
     }
@@ -97,7 +103,7 @@ class RemoteBleController(
         local.update { it.copy(isScanning = true, discovered = emptyList(), status = "Connecting to agent…") }
         scanJob = scope.launch {
             try {
-                val session = agent.connect(local.value.agentUrl)
+                val session = agent.connect(local.value.agentUrl, local.value.agentToken)
                 local.update { it.copy(status = "Scanning via agent…") }
                 agent.advertisements(session).collect { adv ->
                     val sighting = DiscoveredDevice.from(adv)
@@ -135,7 +141,7 @@ class RemoteBleController(
         local.update { it.copy(isScanning = false) }
         scope.launch {
             try {
-                val session = agent.connect(local.value.agentUrl)
+                val session = agent.connect(local.value.agentUrl, local.value.agentToken)
                 active.value?.close()
                 active.value = PeripheralSession(agent.peripheral(session, handle, name), handle, name, scope)
                 local.update { it.copy(status = "Connecting to ${name ?: handle.value}…") }

@@ -24,6 +24,7 @@ fun RemoteBleApp(controller: RemoteBleController) {
                 onStartScan = controller::startScan,
                 onStopScan = controller::stopScan,
                 onUrlChanged = controller::updateUrl,
+                onTokenChanged = controller::updateToken,
                 onConnectDevice = { adv -> controller.connectDevice(adv.handle, adv.name) },
                 onHideUnnamedChanged = controller::setHideUnnamed,
             )

@@ -38,3 +38,16 @@ tasks.register<JavaExec>("scanRun") {
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
     mainClass.set("dev.warsha.remoteble.e2e.ScanMainKt")
 }
+
+// Connected-RSSI (F2) live check (RssiMain.kt): connect to a peripheral and print the connected
+// link RSSI once a second. Needs an agent with the `rssi` capability (Kable Android/Apple backend);
+// the JVM/btleplug + agent-rs backends don't advertise it, so rssi() there fails fast.
+//   ./gradlew :e2e-runner:rssiRun --args "ws://localhost:8080/agent \"Warsha HRM\" <token> 120"
+tasks.register<JavaExec>("rssiRun") {
+    group = "application"
+    description = "Read connected-link RSSI from a peripheral via a live agent (F2)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.RssiMainKt")
+}

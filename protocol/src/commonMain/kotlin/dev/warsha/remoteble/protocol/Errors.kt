@@ -15,25 +15,40 @@ data class AgentError(
     val message: String? = null,
 )
 
+/**
+ * [transient] answers "could an identical retry, later, plausibly succeed?" — it is about the
+ * *error*, independent of the *operation*. A transient kind reflects a passing condition (a busy
+ * radio, a dropped link, a full slot table); a non-transient one reflects a stable fact that a
+ * retry cannot change (an unknown device, an unsupported op, a missing characteristic). It is the
+ * error half of the retry decision; the operation half is [Op.isIdempotent] — a caller should
+ * auto-retry only when *both* say yes (see `RetryPolicy` in the client SDK). Wire form is unchanged:
+ * the enum serializes by name, so [transient] is a pure client-side annotation.
+ */
 @Serializable
-enum class ErrorKind {
+enum class ErrorKind(val transient: Boolean) {
     // Reached the radio and the radio said no:
-    CONNECTION_FAILED,
-    DISCONNECTED,
-    GATT_ERROR,
-    READ_FAILED,
-    WRITE_FAILED,
-    CHARACTERISTIC_NOT_FOUND,
-    NOT_CONNECTED,
+    CONNECTION_FAILED(transient = true),   // link setup can succeed on a later attempt
+    DISCONNECTED(transient = true),        // the device can be reconnected
+    GATT_ERROR(transient = false),         // a GATT-layer protocol/permission error won't change
+    READ_FAILED(transient = true),         // a read can fail momentarily and succeed on retry
+    WRITE_FAILED(transient = true),        // the radio rejected the write; a retry may take (but see isIdempotent)
+    CHARACTERISTIC_NOT_FOUND(transient = false), // the GATT table won't grow on retry
+    NOT_CONNECTED(transient = true),       // reconnect, then the op can proceed
 
     // Never reached the radio (agent- or transport-level):
-    UNKNOWN_DEVICE,
-    NO_CONNECTION_SLOT,
-    PERIPHERAL_BUSY,
-    AGENT_BUSY,
-    UNSUPPORTED,
-    TIMEOUT,
-    TRANSPORT_LOST,
+    UNKNOWN_DEVICE(transient = false),     // the agent has never seen this handle
+    NO_CONNECTION_SLOT(transient = true),  // a slot may free up
+    PERIPHERAL_BUSY(transient = true),     // the peripheral may become free
+    AGENT_BUSY(transient = true),          // the agent may become free
+    UNSUPPORTED(transient = false),        // capability absent — permanently so for this agent
+    TIMEOUT(transient = true),             // the agent may answer a later attempt
+    TRANSPORT_LOST(transient = true),      // the IP link may reconnect
+    ;
+
+    companion object {
+        /** The kinds for which a later retry could plausibly succeed. */
+        val transientKinds: Set<ErrorKind> = entries.filter { it.transient }.toSet()
+    }
 }
 
 class AgentException(val error: AgentError) : Exception(error.message ?: error.kind.name)

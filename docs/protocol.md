@@ -253,21 +253,38 @@ happened** — "reached the radio and the radio said no" versus "never reached t
 radio (agent- or transport-level)". That distinction is what lets a caller decide
 whether a retry could possibly help.
 
-| Reached the radio (radio said no) | Never reached the radio |
-|---|---|
-| `CONNECTION_FAILED` | `UNKNOWN_DEVICE` |
-| `DISCONNECTED` | `NO_CONNECTION_SLOT` |
-| `GATT_ERROR` | `AGENT_BUSY` |
-| `READ_FAILED` | `UNSUPPORTED` |
-| `WRITE_FAILED` | `TIMEOUT` |
-| `CHARACTERISTIC_NOT_FOUND` | `TRANSPORT_LOST` |
-| `NOT_CONNECTED` | |
+Each kind also carries a `transient: Boolean` (a pure client-side annotation — the wire
+form is unchanged, since the enum serializes by name). **Transient** = a passing condition
+an identical retry could plausibly clear; **permanent** = a stable fact a retry can't
+change. This is the *error* half of the retry decision — the *operation* half is
+`Op.isIdempotent` (below).
+
+| Reached the radio (radio said no) | | Never reached the radio | |
+|---|---|---|---|
+| `CONNECTION_FAILED` | transient | `UNKNOWN_DEVICE` | permanent |
+| `DISCONNECTED` | transient | `NO_CONNECTION_SLOT` | transient |
+| `GATT_ERROR` | permanent | `PERIPHERAL_BUSY` | transient |
+| `READ_FAILED` | transient | `AGENT_BUSY` | transient |
+| `WRITE_FAILED` | transient | `UNSUPPORTED` | permanent |
+| `CHARACTERISTIC_NOT_FOUND` | permanent | `TIMEOUT` | transient |
+| `NOT_CONNECTED` | transient | `TRANSPORT_LOST` | transient |
 
 `gattStatus` carries the raw BLE-stack status when the radio answered. `TIMEOUT` and
 `TRANSPORT_LOST` are minted **client-side** by the session (the agent never sends
 them — by definition the agent was unreachable); everything else originates at the
 agent. See the full taxonomy discussion in
 [design-decisions.md](design-decisions.md#the-error-taxonomy-where-not-just-what).
+
+### Retryability: `transient` × `isIdempotent`
+
+`ErrorKind.transient` says a retry *could* help; `Op.isIdempotent` says a retry is *safe*.
+Automatic retry needs **both**. The hazard is a mutation that reached the radio and took
+effect but whose reply was lost (`TIMEOUT`/`TRANSPORT_LOST`): a blind retry would apply it
+twice. So **all writes and pairing are non-idempotent** — `Op.Write`, `Op.WriteDescriptor`,
+`Op.Pair` — while reads, discovery, connect/disconnect, scan/observe control, MTU and
+connection-priority requests are convergent or effect-free and safe to repeat. The client SDK
+turns this into the *default* retry policy per op — non-idempotent ops default to no retry — which
+a caller can still override per call (see [client-sdk.md](client-sdk.md#error-and-retry-policies)).
 
 ## The codec
 

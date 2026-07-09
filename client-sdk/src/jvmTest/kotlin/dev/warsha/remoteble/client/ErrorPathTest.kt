@@ -64,7 +64,7 @@ class ErrorPathTest {
     fun writeRejectionSurfacesAndSessionStaysUsable() = runBlocking {
         val port = freePort()
         val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend(failWrites = true)))
-            .also { it.start() }
+            .also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val peripheral = RemoteGattClient(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -88,7 +88,7 @@ class ErrorPathTest {
     fun readFailureMapsToErrorKind() = runBlocking {
         val port = freePort()
         val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend(failReads = true)))
-            .also { it.start() }
+            .also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val peripheral = RemoteGattClient(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -107,7 +107,7 @@ class ErrorPathTest {
     @Test
     fun kablePeripheralReflectsAgentReportedDisconnect() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val handle = DeviceHandle(StubBleBackend.DEVICE)

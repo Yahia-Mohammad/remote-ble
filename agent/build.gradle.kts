@@ -108,6 +108,15 @@ kotlin {
         // hierarchy template (Kotlin's warning: "explicit dependsOn edges... template not
         // applied"), so the iosArm64Main/iosSimulatorArm64Main -> iosMain edge it would
         // otherwise supply has to be wired by hand too.
+        //
+        // The declarative alternative — `applyDefaultHierarchyTemplate { common { group("mobile")
+        // { withAndroidTarget(); withIos() } } }` — was tried (KGP 2.4.0 / AGP 9.2.1) and does NOT
+        // work here: `withAndroidTarget()` only matches the legacy `KotlinAndroidTarget`, not the
+        // target registered by the AGP `com.android.kotlin.multiplatform.library` plugin we use
+        // (see the `android {}` block above). The template creates `mobileMain` but leaves
+        // androidMain/iosMain unwired to it, so androidMain/iosMain fail to resolve AgentRunner +
+        // compose.*. Until KGP ships a matcher for the KMP-library android target, this manual
+        // wiring is the working approach and the "template not applied" warning is expected.
         val iosMainSourceSet = iosMain.get().apply { dependsOn(mobileMain) }
         iosArm64Main.get().dependsOn(iosMainSourceSet)
         iosSimulatorArm64Main.get().dependsOn(iosMainSourceSet)

@@ -68,6 +68,10 @@ class RemoteGattClient(
     suspend fun requestMtu(mtu: Int): Int =
         session.request(Op.RequestMtu(handle, mtu), timeouts.op).payloadAs<ResultPayload.Mtu>().mtu
 
+    /** Reads the connected link's RSSI in dBm (requires the agent's `rssi` capability). */
+    suspend fun readRssi(): Int =
+        session.request(Op.ReadRssi(handle), timeouts.op).payloadAs<ResultPayload.Rssi>().rssi
+
     /** Reads a descriptor (requires the agent's `descriptors` capability). */
     suspend fun readDescriptor(desc: DescRef): ByteArray =
         session.request(Op.ReadDescriptor(handle, desc), timeouts.op).payloadAs<ResultPayload.Bytes>().value

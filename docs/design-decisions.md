@@ -19,10 +19,11 @@ Consequences that ripple through the whole codebase:
   the ops *are* the BLE operations.
 - The client SDK's job is "make a remote thing satisfy a local interface," which is
   why Layer 3 (Kable adapters) is thin and most of the work is in Layers 1–2.
-- Anything Kable's interface exposes that the wire doesn't yet model
-  (connected RSSI) must still *type-check*, so it throws
-  `UnsupportedOperationException` rather than not existing. (Descriptor I/O *was* such a
-  gap; it is now modelled behind the `descriptors` capability.)
+- Anything Kable's interface exposes that the wire doesn't yet model must still
+  *type-check*, so it throws `UnsupportedOperationException` rather than not existing.
+  (Both early gaps — descriptor I/O and connected RSSI — are now modelled, behind the
+  `descriptors` and `rssi` capabilities respectively; either surfaces `UNSUPPORTED`
+  against an agent whose backend lacks it.)
 
 ### Prior art: ESPHome's Bluetooth Proxy
 
@@ -71,6 +72,15 @@ This is the information a caller actually needs to decide what to do: a
 the peer probably won't. Encoding *where* a failure occurred — rather than a flat
 "error" — is the difference between a transport that's debuggable in the field and one
 that isn't.
+
+That judgment is now **encoded, not left to the caller's memory**: each `ErrorKind`
+carries `transient` (could a retry help?), and each `Op` carries `isIdempotent` (is a
+retry *safe*?). The client SDK combines the two into a per-op [`RetryPolicy`](client-sdk.md#error-and-retry-policies)
+— a stateless `fun interface` resolved per op, overridable per call — so the default is
+correct-by-construction (idempotent ops retry transient errors; a `Write` whose reply was
+merely lost is never silently repeated) while any op can still be tuned. Keeping retry a
+*client* concern (not a wire feature) is deliberate: the agent reports facts, the client
+decides strategy.
 
 A corollary: `TIMEOUT` and `TRANSPORT_LOST` are minted **client-side** by the session,
 never sent by the agent — because by definition they describe the agent being
@@ -122,6 +132,14 @@ the right design:
 The replay set is maintained from **successful** ops only (a failed connect never
 happened on the agent) and a `Disconnect` forgets that device's subscriptions (they
 can't outlive the connection).
+
+The *timing* of reconnection is a separate, configurable concern: the transport retries
+with exponential [`Backoff`](client-sdk.md#error-and-retry-policies) under a
+[`ReconnectPolicy`](client-sdk.md#error-and-retry-policies). By default it retries
+forever, but a `maxAttempts` budget can bound an episode and fire `onGaveUp` so a UI can
+distinguish "still reconnecting" from "gave up" instead of watching a silent loop. The
+same loop also covers the **initial** connect — a client started before its agent is up
+self-heals once the agent appears, rather than the first attempt being one-shot.
 
 ## Concurrency model
 
@@ -194,12 +212,16 @@ be meaningfully validated without a real radio).
 
 ## Auth is a hook, not a framework
 
-A single bearer token: the client sends `Authorization: Bearer <token>` at transport
-construction; the server enforces it at the WebSocket handshake (`401` before the
-upgrade completes, so the client never reaches CONNECTED). Rejecting at the handshake
-— rather than accepting then closing — avoids a CONNECTED→DISCONNECTED flap. The SDK
-deliberately owns no identity system beyond the shared token; richer auth is the
-embedder's concern.
+A single bearer token: the client supplies it via a **suspend provider**
+(`authToken: suspend () -> String?`) rather than a fixed string, and sends
+`Authorization: Bearer <token>` on the WebSocket upgrade; the server enforces it at the
+handshake (`401` before the upgrade completes, so the client never reaches CONNECTED).
+Rejecting at the handshake — rather than accepting then closing — avoids a
+CONNECTED→DISCONNECTED flap. The provider is invoked **once per connection attempt**
+(including every reconnect), so a rotating or short-lived token is refreshed on reconnect
+instead of replayed stale, and the SDK never caches it — the embedder owns token
+lifecycle. The SDK deliberately owns no identity system beyond the shared token; richer
+auth is the embedder's concern.
 
 ## CBOR by default, JSON for debugging
 
@@ -307,7 +329,6 @@ These are deliberate v1 cuts, each a clean extension:
 
 | Boundary | Where | Extension |
 |---|---|---|
-| No connected RSSI (descriptor read/write now modelled behind the `descriptors` capability) | `RemotePeripheral.rssi()` throws `UnsupportedOperation` | add `Op.Rssi` + payload |
 | Agent emits `DISCONNECTED` only on explicit `Disconnect` (ownership leases *do* track unsolicited drops via `ConnectionWatcher`, but no `AgentEvent` is emitted for them yet) | `BleAgent` | a `BleBackend` connection-state stream feeding spontaneous-drop events |
 | Write/notify are best-effort on the real engine | `EngineBleBackend` | engines with completion callbacks can be exact |
 | `CharNode.properties` populated only on macOS engine | `EngineBleBackend.propertiesOf` | other engines exposing property bits |

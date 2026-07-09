@@ -47,6 +47,8 @@ class FakeAgent(
         val services: List<ServiceNode> = DEFAULT_SERVICES,
         val readValue: ByteArray = byteArrayOf(0x42, 0x07),
         val descriptorValue: ByteArray = byteArrayOf(0x01, 0x00),
+        /** Connected-RSSI (dBm) the fake reports for `Op.ReadRssi`. */
+        val rssi: Int = -55,
         val advertisements: List<AdvertisementDto> = DEFAULT_ADVERTISEMENTS,
         val notificationValues: List<ByteArray> = DEFAULT_NOTIFICATIONS,
         val emitInterval: Duration = 50.milliseconds,
@@ -97,6 +99,7 @@ class FakeAgent(
             is Op.Read -> reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(config.readValue)))
             is Op.Write -> reply(cmd.cid, OpResult.Ok())
             is Op.RequestMtu -> reply(cmd.cid, OpResult.Ok(ResultPayload.Mtu(op.mtu)))
+            is Op.ReadRssi -> reply(cmd.cid, OpResult.Ok(ResultPayload.Rssi(config.rssi)))
             is Op.ReadDescriptor -> reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(config.descriptorValue)))
             is Op.WriteDescriptor -> reply(cmd.cid, OpResult.Ok())
             is Op.Pair -> {

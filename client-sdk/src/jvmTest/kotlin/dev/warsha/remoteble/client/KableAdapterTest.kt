@@ -78,7 +78,7 @@ class KableAdapterTest {
     @Test
     fun appLogicRunsUnchangedAgainstRemotePeripheral() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -97,7 +97,7 @@ class KableAdapterTest {
     @Test
     fun observeViaKableCharacteristicStreamsNotifications() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -118,7 +118,7 @@ class KableAdapterTest {
     @Test
     fun negotiatedMtuFeedsMaximumWriteValueLength() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             val peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session, requestedMtu = 185)
@@ -143,7 +143,7 @@ class KableAdapterTest {
     @Test
     fun factoryThreadsInjectedDispatcherIntoPeripheralScope() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
             // A provider whose `default` is a distinct, tracked dispatcher: prove the factory
@@ -171,7 +171,7 @@ class KableAdapterTest {
     @Test
     fun scannerEmitsRemoteAdvertisementsAndFactoryBuildsPeripheral() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = connectedSession(port)
 

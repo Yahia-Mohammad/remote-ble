@@ -18,6 +18,10 @@ import kotlin.uuid.Uuid
 @OptIn(ExperimentalUuidApi::class)
 data class UiState(
     val agentUrl: String = DEFAULT_AGENT_URL,
+    // Bearer token presented on the agent WebSocket upgrade. Blank = no Authorization header
+    // (for a token-free agent, e.g. the JVM CLI with REMOTE_BLE_TOKEN unset); the mobile agents
+    // always require one and display it in their UI.
+    val agentToken: String = "",
     val agentState: TransportState = TransportState.DISCONNECTED,
     val isScanning: Boolean = false,
     val status: String = "Idle.",

@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.AgentError
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -46,9 +47,11 @@ class PeripheralRegistry(
     private val mutex = Mutex()
     private val leases = mutableMapOf<String, Lease>()
     private val exclusiveOverride = mutableMapOf<String, Boolean>()
-    // clientKey -> how to push a disconnect notification to that client's live connection.
-    // Registered by BleAgent.start(); a reconnect's fresh registration simply replaces the old.
-    private val clientNotifiers = mutableMapOf<String, suspend (handle: String) -> Unit>()
+    // clientKey -> how to push a disconnect notification to that client's live connection (with the
+    // drop's reason, when known). Registered by BleAgent.start(); a reconnect's fresh registration
+    // simply replaces the old.
+    private val clientNotifiers =
+        mutableMapOf<String, suspend (handle: String, reason: AgentError?) -> Unit>()
 
     private class Lease(val owner: String, var connected: Boolean, var graceJob: Job?)
 
@@ -126,8 +129,10 @@ class PeripheralRegistry(
      * Registers how to reach [clientKey]'s live wire connection, for [onUnsolicitedDisconnect].
      * Called once from [BleAgent.start]; overwritten wholesale by a reconnect's fresh [BleAgent].
      */
-    suspend fun registerClient(clientKey: String, onDisconnect: suspend (handle: String) -> Unit) =
-        mutex.withLock { clientNotifiers[clientKey] = onDisconnect }
+    suspend fun registerClient(
+        clientKey: String,
+        onDisconnect: suspend (handle: String, reason: AgentError?) -> Unit,
+    ) = mutex.withLock { clientNotifiers[clientKey] = onDisconnect }
 
     /**
      * Undoes [registerClient], but only if [onDisconnect] is still the current registration for
@@ -136,7 +141,10 @@ class PeripheralRegistry(
      * (called from [Job.invokeOnCompletion], which isn't a suspend context) mirrors
      * [onTransportDropped]'s own launch-internally pattern.
      */
-    fun unregisterClient(clientKey: String, onDisconnect: suspend (handle: String) -> Unit) {
+    fun unregisterClient(
+        clientKey: String,
+        onDisconnect: suspend (handle: String, reason: AgentError?) -> Unit,
+    ) {
         scope.launch {
             mutex.withLock {
                 if (clientNotifiers[clientKey] === onDisconnect) clientNotifiers.remove(clientKey)
@@ -144,22 +152,26 @@ class PeripheralRegistry(
         }
     }
 
+    /** The [clientKey] currently leasing [handle], or `null` if it isn't leased. */
+    suspend fun ownerOf(handle: String): String? = mutex.withLock { leases[handle]?.owner }
+
     /**
-     * An unsolicited BLE drop — [ConnectionWatcher]'s cached-state or active-liveness checks,
-     * never an explicit `Disconnect` op (that already emits its own event). Starts the same
-     * release grace as [onDisconnected], then — unlike that method — also pushes a disconnect
-     * notification to the owning client's live connection if one is registered, since nothing
-     * else tells it this happened.
+     * An unsolicited BLE drop — reported by [ConnectionWatcher], either from the backend's native
+     * [BleBackend.connectionDrops] stream (fast, carries a [reason]) or from its cached-state /
+     * active-liveness polling (fallback). Never an explicit `Disconnect` op (that already emits its
+     * own event). Starts the same release grace as [onDisconnected], then — unlike that method —
+     * also pushes a disconnect notification (with [reason]) to the owning client's live connection
+     * if one is registered, since nothing else tells it this happened.
      *
-     * An explicit `Disconnect` racing the watcher can make both this and the op's own path emit
-     * `ConnectionState(DISCONNECTED)` for the same handle. That's tolerated by design: the window
-     * is narrow ([onDisconnected] flips `connected` under the mutex, so the watcher skips it on the
-     * next tick) and the client SDK treats a repeat DISCONNECTED as idempotent.
+     * Two detectors (native stream + polling) or an explicit `Disconnect` racing them can make more
+     * than one path emit `ConnectionState(DISCONNECTED)` for the same handle. That's tolerated by
+     * design: the window is narrow ([onDisconnected] flips `connected` under the mutex, so the
+     * watcher skips it on the next tick) and the client SDK treats a repeat DISCONNECTED as idempotent.
      */
-    suspend fun onUnsolicitedDisconnect(handle: String, clientKey: String) {
+    suspend fun onUnsolicitedDisconnect(handle: String, clientKey: String, reason: AgentError? = null) {
         onDisconnected(handle, clientKey)
         val notify = mutex.withLock { clientNotifiers[clientKey] }
-        notify?.invoke(handle)
+        notify?.invoke(handle, reason)
     }
 
     /**

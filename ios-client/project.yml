@@ -24,6 +24,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosclient
         INFOPLIST_FILE: Info.plist
         TARGETED_DEVICE_FAMILY: "1"
+        # The Kotlin framework is also named "RemoteBleClient"; if the app's own Swift module shared
+        # that name, `import RemoteBleClient` would resolve to itself ("part of module … ignoring
+        # import") and the framework's MainViewControllerKt would be out of scope. Give the app a
+        # distinct module name so the import unambiguously targets the framework.
+        PRODUCT_MODULE_NAME: RemoteBleClientApp
+        # :client-ui ships no iosX64 slice (Intel simulator was dropped), so the app must not try
+        # to build an x86_64 simulator slice — there'd be no framework arch to link against and the
+        # Kotlin symbols would appear "not in scope". Apple-Silicon simulators build arm64 anyway.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     dependencies:
       # Produced by `:client-ui:assembleRemoteBleClientReleaseXCFramework -PiosFramework`.
       - framework: ../client-ui/build/XCFrameworks/release/RemoteBleClient.xcframework

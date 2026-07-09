@@ -136,6 +136,11 @@ sealed interface Op {
 
     @Serializable @SerialName("conn.priority")
     data class RequestConnectionPriority(val device: DeviceHandle, val priority: ConnPriority) : Op
+
+    // --- Connected RSSI (capability: "rssi") ---
+
+    @Serializable @SerialName("rssi")
+    data class ReadRssi(val device: DeviceHandle) : Op
 }
 
 /**
@@ -157,5 +162,28 @@ inline fun Op.mapDevice(transform: (DeviceHandle) -> DeviceHandle): Op = when (t
     is Op.Pair -> copy(device = transform(device))
     is Op.Unpair -> copy(device = transform(device))
     is Op.RequestConnectionPriority -> copy(device = transform(device))
+    is Op.ReadRssi -> copy(device = transform(device))
     is Op.ScanStart, is Op.ScanStop, is Op.ObserveStop -> this
 }
+
+/**
+ * Whether re-issuing this op after a lost/uncertain reply is *safe* — i.e. a second execution has no
+ * additional observable effect beyond the first. This is the operation half of the auto-retry
+ * decision (the error half is [ErrorKind.transient]); a policy should auto-retry only when both hold.
+ *
+ * The hazard is a mutation that reached the radio and took effect, but whose reply was lost to a
+ * [ErrorKind.TIMEOUT] / [ErrorKind.TRANSPORT_LOST]: a blind retry would apply it twice. So **all
+ * writes and pairing are non-idempotent by default** — a characteristic [Op.Write] could be an
+ * "increment"/"dispense", a [Op.WriteDescriptor] an arbitrary value, [Op.Pair] a bonding side
+ * effect. Reads, discovery, connect/disconnect, scan/observe control, MTU and connection-priority
+ * requests are convergent or effect-free, so repeating them is harmless.
+ *
+ * A caller who knows a specific write *is* safe to repeat can still opt in via `RetryPolicy`.
+ */
+val Op.isIdempotent: Boolean
+    get() = when (this) {
+        is Op.Write, is Op.WriteDescriptor, is Op.Pair -> false
+        is Op.ScanStart, is Op.ScanStop, is Op.Connect, is Op.Disconnect, is Op.Discover,
+        is Op.Read, is Op.ObserveStart, is Op.ObserveStop, is Op.RequestMtu, is Op.ReadDescriptor,
+        is Op.Unpair, is Op.RequestConnectionPriority, is Op.ReadRssi -> true
+    }

@@ -36,6 +36,13 @@ object Capabilities {
     const val CONN_PRIORITY: String = "conn.priority"
 
     /**
+     * Connected-RSSI read op (`Op.ReadRssi`). Backend-level. A live connected read only on Kable's
+     * Android/Apple backends; the JVM/btleplug backend has no connected-RSSI API (only cached
+     * advertisement RSSI) and so neither implements the op nor advertises this.
+     */
+    const val RSSI: String = "rssi"
+
+    /**
      * Coalesced `AgentEvent.ScanResultBatch` events instead of per-advertisement
      * `ScanResult`. Agent-level (the agent does the coalescing).
      */

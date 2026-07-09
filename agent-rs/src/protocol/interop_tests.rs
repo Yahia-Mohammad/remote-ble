@@ -188,6 +188,31 @@ fn reply_ok_mtu() {
 }
 
 #[test]
+fn cmd_read_rssi() {
+    assert_kotlin_decodes_to(
+        "9f63636d64bf6363696416626f709f6472737369bf66646576696365bf6576616c75657141413a42423a43433a44443a45453a4646ffffffffff",
+        Frame::Command {
+            cid: 22,
+            op: Op::ReadRssi { device: dev() },
+        },
+    );
+}
+
+#[test]
+fn reply_ok_rssi_signed_negative() {
+    // -55 dBm encodes as CBOR negative-int 0x3836 (= -(0x36 + 1)); guards the signed decode.
+    assert_kotlin_decodes_to(
+        "9f657265706c79bf636369640966726573756c749f626f6bbf677061796c6f61649f6472737369bf64727373693836ffffffffffff",
+        Frame::Reply {
+            cid: 9,
+            result: OpResult::Ok {
+                payload: Some(ResultPayload::Rssi { rssi: -55 }),
+            },
+        },
+    );
+}
+
+#[test]
 fn reply_err_carries_camelcase_gatt_status() {
     assert_kotlin_decodes_to(
         "9f657265706c79bf636369640866726573756c749f63657272bf656572726f72bf646b696e646a474154545f4552524f526a676174745374617475731885676d6573736167656178ffffffffff",

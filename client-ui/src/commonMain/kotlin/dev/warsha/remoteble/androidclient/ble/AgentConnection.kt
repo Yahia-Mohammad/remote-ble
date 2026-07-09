@@ -39,6 +39,7 @@ class AgentConnection(private val scope: CoroutineScope) {
     private val session = MutableStateFlow<AgentSession?>(null)
     private var client: HttpClient? = null
     private var url: String? = null
+    private var token: String? = null
 
     /** The live transport state of the current session, or [TransportState.DISCONNECTED] when idle. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -50,8 +51,8 @@ class AgentConnection(private val scope: CoroutineScope) {
      * Returns a session connected to [url], (re)building one if needed, and suspends until
      * the transport reports [TransportState.CONNECTED]. Throws on timeout.
      */
-    suspend fun connect(url: String): AgentSession {
-        val session = obtain(url.trim())
+    suspend fun connect(url: String, token: String): AgentSession {
+        val session = obtain(url.trim(), token.trim())
         withTimeout(CONNECT_TIMEOUT) {
             session.transportState.first { it == TransportState.CONNECTED }
         }
@@ -72,22 +73,29 @@ class AgentConnection(private val scope: CoroutineScope) {
         client?.close()
         client = null
         url = null
+        token = null
     }
 
-    private fun obtain(url: String): AgentSession {
+    private fun obtain(url: String, token: String): AgentSession {
         val current = session.value
-        if (current != null && this.url == url && current.transportState.value != TransportState.DISCONNECTED) {
+        if (current != null && this.url == url && this.token == token &&
+            current.transportState.value != TransportState.DISCONNECTED
+        ) {
             return current
         }
         close()
         val newClient = defaultWebSocketHttpClient().also { client = it }
+        // Blank token → no Authorization header (token-free agent); otherwise present it as the
+        // bearer credential. Read via the provider lambda so a rotated value would be picked up on
+        // reconnect (see WebSocketAgentTransport.authToken / F5).
         return DefaultAgentSession(
-            WebSocketAgentTransport(url, scope, newClient, authToken = null),
+            WebSocketAgentTransport(url, scope, newClient, authToken = { token.ifBlank { null } }),
             CborProtocolCodec(),
             scope,
         ).also {
             session.value = it
             this.url = url
+            this.token = token
         }
     }
 

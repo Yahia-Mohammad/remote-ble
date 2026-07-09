@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -35,7 +36,8 @@ import kotlinx.coroutines.launch
  * (none of which `:android-client` needed — it never touches a local radio) and starts
  * [AgentService] (handing it the [AgentRunner] it should observe) whenever [AgentRunner.running]
  * flips true — [AgentService] is responsible for stopping itself in lockstep from there, so the
- * agent survives backgrounding without depending on this composition staying alive.
+ * agent survives backgrounding without depending on this composition staying alive. It also holds
+ * the screen on while running (see the `running` effect below): a slept screen throttles BLE scans.
  */
 class MainActivity : ComponentActivity() {
 
@@ -56,7 +58,16 @@ class MainActivity : ComponentActivity() {
             val running by viewModel.runner.running.collectAsState()
             val bluetoothGranted by viewModel.bluetoothPermissionsGranted
             LaunchedEffect(running) {
-                if (running) AgentService.start(this@MainActivity, viewModel.runner)
+                if (running) {
+                    AgentService.start(this@MainActivity, viewModel.runner)
+                    // Keep the screen awake while serving: with the screen off Android throttles
+                    // (and can effectively stop) BLE scans, so a locked phone silently stops
+                    // discovering/holding peripherals. The foreground service keeps the *process*
+                    // alive; this keeps the *radio* at full rate while the agent UI is foreground.
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
             }
             AgentApp(
                 runner = viewModel.runner,

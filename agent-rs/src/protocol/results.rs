@@ -31,6 +31,7 @@ pub enum ResultPayload {
     Services { services: Vec<ServiceNode> },
     Mtu { mtu: i32 },
     Bond { state: BleBondState },
+    Rssi { rssi: i32 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,6 +53,11 @@ struct MtuPayload {
 #[derive(Serialize, Deserialize)]
 struct BondPayload {
     state: BleBondState,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RssiPayload {
+    rssi: i32,
 }
 
 impl Serialize for ResultPayload {
@@ -81,6 +87,10 @@ impl Serialize for ResultPayload {
             ResultPayload::Bond { state } => {
                 seq.serialize_element("bond")?;
                 seq.serialize_element(&BondPayload { state: *state })?;
+            }
+            ResultPayload::Rssi { rssi } => {
+                seq.serialize_element("rssi")?;
+                seq.serialize_element(&RssiPayload { rssi: *rssi })?;
             }
         }
         seq.end()
@@ -136,9 +146,15 @@ impl<'de> Deserialize<'de> for ResultPayload {
                             .ok_or_else(|| de::Error::invalid_length(1, &self))?;
                         Ok(ResultPayload::Bond { state: p.state })
                     }
+                    "rssi" => {
+                        let p: RssiPayload = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                        Ok(ResultPayload::Rssi { rssi: p.rssi })
+                    }
                     _ => Err(de::Error::unknown_variant(
                         &tag,
-                        &["bytes", "services", "mtu", "bond"],
+                        &["bytes", "services", "mtu", "bond", "rssi"],
                     )),
                 }
             }

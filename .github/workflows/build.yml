@@ -58,12 +58,13 @@ jobs:
 
       # Verifies the iOS klibs compile (:protocol, :client-sdk, :client-ui, :agent). Does not
       # link or run iOS test binaries — see docs/build-and-testing.md#the-ios-test-caveat.
-      # :agent (like :client-ui) has no iosX64() target — Compose Multiplatform 1.11.1 doesn't
-      # publish for the Intel Simulator — so only iosArm64/iosSimulatorArm64 apply to it.
+      # No module has an iosX64() target (Intel Simulator): Compose Multiplatform 1.11.1 doesn't
+      # publish for it and Apple Silicon covers device + simulator, so every module ships only
+      # iosArm64 (device) + iosSimulatorArm64 (simulator).
       - name: Compile iOS klibs
         run: |
           ./gradlew \
-            :protocol:compileKotlinIosArm64 :protocol:compileKotlinIosX64 :protocol:compileKotlinIosSimulatorArm64 \
-            :client-sdk:compileKotlinIosArm64 :client-sdk:compileKotlinIosX64 :client-sdk:compileKotlinIosSimulatorArm64 \
+            :protocol:compileKotlinIosArm64 :protocol:compileKotlinIosSimulatorArm64 \
+            :client-sdk:compileKotlinIosArm64 :client-sdk:compileKotlinIosSimulatorArm64 \
             :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosSimulatorArm64 \
             :agent:compileKotlinIosArm64 :agent:compileKotlinIosSimulatorArm64

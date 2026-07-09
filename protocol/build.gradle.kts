@@ -21,7 +21,11 @@ kotlin {
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
     }
-    iosX64()
+    // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
+    // simulator): the rest of the repo already omits it (:agent, :client-ui), Apple Silicon is the
+    // standard dev machine, and every published KMP target costs ~24 files against the Central Portal
+    // monthly *file-count* quota — dropping it here + in :client-sdk saves ~48 files per release (see
+    // ai-context/maven-central-publish-footprint notes).
     iosArm64()
     iosSimulatorArm64()
 

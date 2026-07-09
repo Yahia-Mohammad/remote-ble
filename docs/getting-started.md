@@ -73,7 +73,8 @@ agent on the phone's own radio. Grant the Bluetooth permission it requests, tap 
 point a client at the `ws://<phone-ip>:8080/agent` the screen shows (the app resolves the LAN IP
 for you). Because the phone listens on the open Wi-Fi in cleartext, the mobile agent is **always
 token-protected**: type an auth token or let it auto-generate one — it's shown next to the address,
-and the client passes it as `WebSocketAgentTransport.authToken`. iOS can't keep the agent running
+and the client supplies it via `WebSocketAgentTransport.authToken` (a suspend provider — return the
+token). iOS can't keep the agent running
 backgrounded (no equivalent of Android's foreground service — see
 [agent.md](agent.md#android--ios-a-phone-as-the-agent)), so keep that app open.
 
@@ -99,7 +100,7 @@ val transport = WebSocketAgentTransport(
     url = "ws://192.168.1.50:8080/agent",   // the agent host
     scope = scope,
     httpClient = defaultWebSocketHttpClient(),  // platform engine (JVM CIO / Android OkHttp / iOS Darwin)
-    authToken = "s3cr3t",                    // omit if the agent has no auth
+    authToken = { "s3cr3t" },                // suspend provider; omit if the agent has no auth
 )
 
 val session = DefaultAgentSession(transport, CborProtocolCodec(), scope)
@@ -269,9 +270,13 @@ val transport = WebSocketAgentTransport(url, scope, httpClient)
 - **Device handles are opaque and agent-scoped.** Always get one from a
   `RemoteAdvertisement` (or by reconnecting an existing peripheral). Don't try to
   construct or parse `DeviceHandle.value`.
-- **Not in protocol v1:** descriptor read/write and connected RSSI. Calling
-  `peripheral.read(descriptor)`, `write(descriptor)`, or `rssi()` on a remote
-  peripheral throws `UnsupportedOperationException`.
+- **Capability-gated ops:** descriptor read/write (`descriptors`) and connected RSSI
+  (`rssi`) are supported, but only when the agent advertises the capability — it enables
+  each one only on backends that implement it (connected RSSI is live on the Android
+  `readRemoteRssi()` / Apple `readRSSI()` Kable backends, but **not** the JVM/btleplug
+  or `agent-rs` agents). Calling `peripheral.read(descriptor)`, `write(descriptor)`, or
+  `rssi()` against an agent that lacks the capability fails with a clear `UNSUPPORTED`
+  error, never a stale value.
 - **`peripheral.identifier`** is best-effort on a remote peripheral (the agent handle
   may not parse as your local platform's Kable `Identifier`) — you don't need it to
   operate the device.

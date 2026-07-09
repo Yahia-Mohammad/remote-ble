@@ -111,6 +111,9 @@ pub enum Op {
         device: DeviceHandle,
         priority: ConnPriority,
     },
+    ReadRssi {
+        device: DeviceHandle,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -312,6 +315,12 @@ impl Serialize for Op {
                     priority: *priority,
                 })?;
             }
+            Op::ReadRssi { device } => {
+                seq.serialize_element("rssi")?;
+                seq.serialize_element(&DevicePayload {
+                    device: device.clone(),
+                })?;
+            }
         }
         seq.end()
     }
@@ -458,6 +467,12 @@ impl<'de> Deserialize<'de> for Op {
                             priority: p.priority,
                         })
                     }
+                    "rssi" => {
+                        let p: DevicePayload = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                        Ok(Op::ReadRssi { device: p.device })
+                    }
                     _ => Err(de::Error::unknown_variant(
                         &tag,
                         &[
@@ -476,6 +491,7 @@ impl<'de> Deserialize<'de> for Op {
                             "pair",
                             "unpair",
                             "conn.priority",
+                            "rssi",
                         ],
                     )),
                 }

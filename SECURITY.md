@@ -28,8 +28,11 @@ Understanding what RemoteBLE does and does not protect helps scope reports:
 - **Transport auth is a single optional bearer token**
   (`REMOTE_BLE_TOKEN` / `WebSocketAgentTransport.authToken`), enforced at the
   WebSocket handshake (a wrong/missing token is rejected with `401` before the
-  connection upgrades). This is deliberately "a hook, not a framework" — richer
-  identity/authorization is left to the embedding application.
+  connection upgrades). On the client the token is supplied through a **suspend
+  provider** invoked per connection attempt (never cached), so an embedder can back it
+  with short-lived/rotating credentials that refresh on reconnect. This is deliberately
+  "a hook, not a framework" — richer identity/authorization is left to the embedding
+  application.
 - **The phone agents (`android-agent`, `ios-agent`) are dev/test tools, not
   shipping builds.** They serve `ws://` in cleartext and always require a token
   (auto-generated if left blank) because they listen on open Wi-Fi. Do not treat

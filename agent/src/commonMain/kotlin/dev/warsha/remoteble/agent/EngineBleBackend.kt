@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AdvertisementDto
+import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -12,6 +13,7 @@ import dev.warsha.remoteble.protocol.ServiceNode
 import com.juul.kable.DiscoveredCharacteristic
 import com.juul.kable.DiscoveredDescriptor
 import com.juul.kable.DiscoveredService
+import com.juul.kable.ExperimentalApi
 import com.juul.kable.Filter
 import com.juul.kable.Peripheral
 import com.juul.kable.Scanner
@@ -25,8 +27,15 @@ import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -46,10 +55,19 @@ import kotlinx.coroutines.withTimeoutOrNull
  * cancellation is preserved.
  */
 @OptIn(ExperimentalUuidApi::class)
-class EngineBleBackend : BleBackend {
+class EngineBleBackend(
+    // Agent-lifetime scope for the per-connection state watchers (see [connect]). Defaults to a
+    // standalone scope so plain `EngineBleBackend()` (tests) works; the DI graph injects the shared
+    // agent scope so the watchers are torn down with the process, not leaked.
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) : BleBackend {
 
     override val capabilities: Set<String> = buildSet {
         add(Capabilities.DESCRIPTORS) // Kable exposes descriptor read/write on every platform.
+        // Connected RSSI is a live read only on Kable's Android/Apple backends; the JVM/btleplug
+        // backend returns cached advertisement RSSI (or Int.MIN_VALUE), so advertise it only where
+        // readRssi() below is genuinely a connected read.
+        if (agentRssiSupported()) add(Capabilities.RSSI)
     }
 
     // Plain map guarded by a multiplatform lock (kotlinx-atomicfu — java.util.concurrent has no
@@ -57,6 +75,16 @@ class EngineBleBackend : BleBackend {
     // this stays a synchronous lock rather than a suspend-only Mutex.
     private val lock = SynchronizedObject()
     private val peripherals = mutableMapOf<DeviceHandle, Peripheral>()
+
+    // Native unsolicited-drop stream (see [connectionDrops]). DROP_OLDEST + a small buffer so a slow
+    // or absent collector can never suspend the per-connection watcher that emits here; the polling
+    // ConnectionWatcher is the backstop if a rare overflow drops a signal.
+    private val drops = MutableSharedFlow<ConnectionDrop>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    override fun connectionDrops(): Flow<ConnectionDrop> = drops
 
     /**
      * Resolves [device] to a cached (or freshly created) [Peripheral]. `toIdentifier()` throws
@@ -104,8 +132,30 @@ class EngineBleBackend : BleBackend {
     }
 
     override suspend fun connect(device: DeviceHandle) {
-        bleOp(ErrorKind.CONNECTION_FAILED) { resolve(device).connect() }
+        val peripheral = resolve(device)
+        bleOp(ErrorKind.CONNECTION_FAILED) { peripheral.connect() }
+        // Watch this connection for an unsolicited drop and surface it (with a reason) on `drops`
+        // immediately, rather than waiting for ConnectionWatcher's poll. One watcher per connect();
+        // a reconnect makes a fresh peripheral and a fresh watcher.
+        scope.launch { watchForUnsolicitedDrop(device, peripheral) }
     }
+
+    /**
+     * Suspends until [peripheral] transitions to [State.Disconnected], then emits a
+     * [ConnectionDrop] — UNLESS this was an explicit [disconnect], which removes and closes the
+     * peripheral first, so it's no longer the active instance for [device]. Only a drop the radio
+     * initiated on its own leaves the peripheral still mapped here, which is exactly the unsolicited
+     * case [connectionDrops] promises.
+     */
+    private suspend fun watchForUnsolicitedDrop(device: DeviceHandle, peripheral: Peripheral) {
+        val disconnected = peripheral.state.first { it is State.Disconnected } as State.Disconnected
+        val stillActive = synchronized(lock) { peripherals[device] === peripheral }
+        if (stillActive) drops.tryEmit(ConnectionDrop(device, disconnected.reason()))
+    }
+
+    /** Maps Kable's disconnect [State.Disconnected.Status] to a wire [AgentError] cause. */
+    private fun State.Disconnected.reason(): AgentError =
+        AgentError(ErrorKind.DISCONNECTED, message = status?.let { it::class.simpleName } ?: "peer disconnected")
 
     override suspend fun disconnect(device: DeviceHandle) {
         val peripheral = synchronized(lock) { peripherals.remove(device) } ?: return
@@ -190,6 +240,18 @@ class EngineBleBackend : BleBackend {
         // MTU was negotiated and oversize its writes), report the ATT default minimum — the
         // only value guaranteed safe for a client sizing payloads against the result.
         return DEFAULT_ATT_MTU
+    }
+
+    @OptIn(ExperimentalApi::class)
+    override suspend fun readRssi(device: DeviceHandle): Int {
+        val peripheral = connectedPeripheral(device)
+        val rssi = bleOp(ErrorKind.READ_FAILED) { peripheral.rssi() }
+        // Defensive: Kable's btleplug backend returns Int.MIN_VALUE when it has no cached value. This
+        // backend only advertises the `rssi` capability where rssi() is a real connected read
+        // (agentRssiSupported()), so this guards a stub/edge case rather than a normal path — surface
+        // it as UNSUPPORTED so the sentinel never reaches the client as a real reading.
+        if (rssi == Int.MIN_VALUE) bleError(ErrorKind.UNSUPPORTED, message = "connected RSSI unavailable")
+        return rssi
     }
 
     override suspend fun readDescriptor(device: DeviceHandle, desc: DescRef): ByteArray {

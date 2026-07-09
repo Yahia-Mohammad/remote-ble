@@ -3,12 +3,17 @@ name: Agent artifacts
 # Builds the runnable agent artifacts and attaches them to the GitHub Release for a tag, so
 # consumers can download and run an agent without cloning the repo.
 #
-# Phase 1 (this file): cross-platform JVM agent fat JAR + Linux x86_64 agent-rs binary.
-# Future phases: macOS .app bundles (CoreBluetooth/TCC needs a signed .app), multi-arch
-# (arm64 / Windows), and the on-device Android APK.
+# Attaches: the cross-platform JVM agent fat JAR (bundles kable-btleplug natives for
+# linux/darwin/win × x86_64+aarch64, so the one JAR runs on x86_64/ARM Linux, Apple Silicon, and
+# Windows), plus native agent-rs binaries for Linux x86_64, Linux aarch64 (Pi/ARM SBCs), and Windows
+# x86_64 — for devs who want a single-file agent without a JRE.
+# Not built here (by decision): macOS .app bundles (a bare binary can't hold CoreBluetooth/TCC — macOS
+# devs build from source via agent/run-agent.sh) and the on-device Android APK.
 #
 # Runs automatically on a release tag, and can be dispatched manually against an existing tag
-# (e.g. to backfill) without pushing a tag — pushing a `v*` tag also triggers the Maven publish.
+# (e.g. to backfill) without pushing a tag. Note: pushing a `v*` tag builds+attaches these agent
+# binaries but does NOT publish to Maven Central — the Central publish (release.yml) is manual
+# (workflow_dispatch) on purpose, so interim GitHub-only releases don't spend Central quota.
 on:
   push:
     tags: ["v*"]
@@ -91,3 +96,86 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: agent-rs/dist/remoteble-agent-rs-linux-x86_64
+
+  agent-rs-linux-arm64:
+    name: agent-rs (linux aarch64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-release-aarch64-${{ hashFiles('agent-rs/Cargo.lock') }}
+
+      # cross runs the build in a target-arch container (no host QEMU/toolchain juggling); the
+      # foreign-arch libdbus is installed inside it via agent-rs/Cross.toml. (If this repo's plan has
+      # native arm64 hosted runners, `runs-on: ubuntu-24.04-arm` + the plain apt/cargo steps from the
+      # x86_64 job above is a simpler swap.)
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build (release, aarch64)
+        run: cross build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/agent-rs dist/remoteble-agent-rs-linux-aarch64
+          chmod +x dist/remoteble-agent-rs-linux-aarch64
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: agent-rs/dist/remoteble-agent-rs-linux-aarch64
+
+  agent-rs-windows:
+    name: agent-rs (windows x86_64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      # btleplug's Windows backend is WinRT — no system packages to install (unlike Linux/libdbus).
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('agent-rs/Cargo.lock') }}
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Stage binary
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/agent-rs.exe dist/remoteble-agent-rs-windows-x86_64.exe
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: agent-rs/dist/remoteble-agent-rs-windows-x86_64.exe

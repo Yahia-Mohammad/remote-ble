@@ -14,7 +14,7 @@ import org.koin.dsl.koinApplication
 /**
  * Guards the client SDK's composition root: [remoteBleClientModule] must resolve the
  * public entry points apps use — [AgentSession], [RemotePeripheralFactory], and the
- * parameterized [RemoteScanner]. `autoReconnect = false` so the single failed connect
+ * parameterized [RemoteScanner]. `ReconnectPolicy.None` so the single failed connect
  * the session kicks off on creation does not spin a backoff loop; the bound scope and
  * HttpClient are torn down afterward.
  */
@@ -25,7 +25,7 @@ class ClientKoinTest {
         val app = koinApplication {
             modules(
                 remoteBleClientModule(
-                    RemoteBleClientConfig(url = "ws://127.0.0.1:1/agent", autoReconnect = false),
+                    RemoteBleClientConfig(url = "ws://127.0.0.1:1/agent", reconnect = ReconnectPolicy.None),
                 ),
             )
         }

@@ -1,0 +1,15 @@
+# cross-rs config for building agent-rs for foreign Linux architectures in CI (see
+# .github/workflows/agent-artifacts.yml). btleplug's Linux (BlueZ/D-Bus) backend links libdbus, so
+# the target-arch libdbus-1-dev must be present inside cross's build container — not just the host's.
+#
+# cross sets $CROSS_DEB_ARCH to the Debian arch of the target (e.g. arm64 for aarch64), and its images
+# have the multiarch apt sources wired up, so `dpkg --add-architecture` + installing the `:$CROSS_DEB_ARCH`
+# package pulls the correct foreign-arch libdbus. PKG_CONFIG_ALLOW_CROSS lets pkg-config resolve it.
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes --no-install-recommends libdbus-1-dev:$CROSS_DEB_ARCH pkg-config",
+]
+
+[target.aarch64-unknown-linux-gnu.env]
+passthrough = ["PKG_CONFIG_ALLOW_CROSS=1"]

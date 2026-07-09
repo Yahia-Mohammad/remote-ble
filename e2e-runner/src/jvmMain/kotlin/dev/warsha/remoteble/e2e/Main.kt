@@ -61,7 +61,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val http = defaultWebSocketHttpClient()
     val session = DefaultAgentSession(
-        WebSocketAgentTransport(url, scope, http, authToken = token),
+        WebSocketAgentTransport(url, scope, http, authToken = { token }),
         CborProtocolCodec(),
         scope,
     )

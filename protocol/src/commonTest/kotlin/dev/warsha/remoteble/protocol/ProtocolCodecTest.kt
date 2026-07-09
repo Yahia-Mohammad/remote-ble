@@ -82,6 +82,9 @@ class ProtocolCodecTest {
     fun requestMtu() = assertRoundTrips(Command(14, Op.RequestMtu(dev, mtu = 247)))
 
     @Test
+    fun readRssi() = assertRoundTrips(Command(22, Op.ReadRssi(dev)))
+
+    @Test
     fun readWriteDescriptor() {
         val desc = DescRef(service = "180d", characteristic = "2a37", descriptor = "2902")
         assertRoundTrips(Command(15, Op.ReadDescriptor(dev, desc)))
@@ -173,6 +176,14 @@ class ProtocolCodecTest {
 
     @Test
     fun reply_okMtu() = assertRoundTrips(Reply(6, OpResult.Ok(ResultPayload.Mtu(mtu = 185))))
+
+    @Test
+    fun reply_okRssi() {
+        assertRoundTrips(Reply(9, OpResult.Ok(ResultPayload.Rssi(rssi = -55))))
+        // Edge values: 0 (impossible in practice but a clean codec check) and a large negative.
+        assertRoundTrips(Reply(10, OpResult.Ok(ResultPayload.Rssi(rssi = 0))))
+        assertRoundTrips(Reply(11, OpResult.Ok(ResultPayload.Rssi(rssi = -128))))
+    }
 
     @Test
     fun reply_err_minimalAndFull() {

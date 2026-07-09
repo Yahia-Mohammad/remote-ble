@@ -12,6 +12,14 @@ import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServiceNode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+
+/**
+ * An unsolicited BLE drop the backend observed natively — the radio lost an established link on its
+ * own (peripheral powered off, out of range, crashed), NOT an explicit [BleBackend.disconnect].
+ * [reason] carries the platform's disconnect cause when it reports one.
+ */
+data class ConnectionDrop(val device: DeviceHandle, val reason: AgentError? = null)
 
 /**
  * The physical BLE operations, decoupled from the wire protocol. [BleAgent] maps
@@ -30,6 +38,16 @@ interface BleBackend {
      * [ErrorKind.UNSUPPORTED]). Defaults to none (the v1 baseline).
      */
     val capabilities: Set<String> get() = emptySet()
+
+    /**
+     * A hot stream of unsolicited BLE drops the backend detects *natively* — e.g. Kable's
+     * `Peripheral.state` transitioning to Disconnected — so a drop is surfaced promptly and with a
+     * [ConnectionDrop.reason], rather than only via [ConnectionWatcher]'s periodic polling. Default:
+     * [emptyFlow] for backends with no native signal (fakes, the blackhole backend), which rely on
+     * the watcher's [isConnected]/[checkLiveness] polling instead. An explicit [disconnect] must NOT
+     * appear here — that path emits its own `ConnectionState`.
+     */
+    fun connectionDrops(): Flow<ConnectionDrop> = emptyFlow()
 
     /** Streams advertisements while collected; stops scanning on cancellation. */
     fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto>
@@ -82,6 +100,15 @@ interface BleBackend {
      */
     suspend fun requestConnectionPriority(device: DeviceHandle, priority: ConnPriority): Unit =
         bleError(ErrorKind.UNSUPPORTED, message = "connection priority not supported")
+
+    /**
+     * Reads the connected link's RSSI in dBm (capability: `rssi`). Optional, like the other gated
+     * ops; the default reports [ErrorKind.UNSUPPORTED]. Only Kable's Android/Apple backends do a live
+     * connected read — the JVM/btleplug backend exposes no connected-RSSI API (only cached
+     * advertisement RSSI), so it neither overrides this nor advertises the capability.
+     */
+    suspend fun readRssi(device: DeviceHandle): Int =
+        bleError(ErrorKind.UNSUPPORTED, message = "connected RSSI not supported")
 
     /** Checks if the peripheral is currently connected. */
     fun isConnected(device: DeviceHandle): Boolean = false

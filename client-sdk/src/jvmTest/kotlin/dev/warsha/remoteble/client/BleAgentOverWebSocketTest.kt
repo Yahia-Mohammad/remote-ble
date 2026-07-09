@@ -56,7 +56,7 @@ class BleAgentOverWebSocketTest {
     @Test
     fun productionAgentHandlerOverWebSocket() = runBlocking {
         val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.start() }
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
         try {
             val session = DefaultAgentSession(
                 WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),

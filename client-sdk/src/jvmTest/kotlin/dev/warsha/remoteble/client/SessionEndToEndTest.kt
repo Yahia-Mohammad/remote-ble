@@ -84,6 +84,17 @@ class SessionEndToEndTest {
     }
 
     @Test
+    fun readRssiRoundTrips() = runTest {
+        val h = Harness(backgroundScope, FakeAgent.Config(rssi = -63))
+        h.awaitConnected()
+        val peripheral = RemoteGattClient(device, h.session)
+
+        peripheral.connect()
+
+        assertEquals(-63, peripheral.readRssi())
+    }
+
+    @Test
     fun handshakeNegotiatesCapabilityIntersection() = runTest {
         // Client understands two capabilities; the agent only supports one. The negotiated
         // set the client observes must be exactly the intersection.

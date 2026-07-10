@@ -40,6 +40,27 @@ pub enum ConnPriority {
     LowPower,
 }
 
+/// Portable primary of `Op::SetConnParams`. Supersedes `ConnPriority`; matches Kotlin's
+/// `ConnProfile` ordering/naming exactly for byte-parity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConnProfile {
+    LowLatency,
+    Balanced,
+    LowPower,
+}
+
+/// Reserved fine-grained hint accompanying a `ConnProfile`. No shipping engine honors this;
+/// btleplug advertises no interval/priority control at all, so agent-rs is codec-parity only.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnParamHint {
+    pub min_interval_ms: f64,
+    pub max_interval_ms: f64,
+    pub latency: i32,
+    pub supervision_timeout_ms: i32,
+}
+
 /// The format a client's Kable `Identifier` can hold on its local platform (mirrors Kotlin
 /// `IdentifierFormat`). Declared in `ClientHello` so an agent that negotiated
 /// `identifier.translate` can mint device handles in the client's native format.
@@ -52,7 +73,7 @@ pub enum IdentifierFormat {
     BluezJson,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     ScanStart {
         scan_id: i64,
@@ -113,6 +134,11 @@ pub enum Op {
     },
     ReadRssi {
         device: DeviceHandle,
+    },
+    SetConnParams {
+        device: DeviceHandle,
+        profile: ConnProfile,
+        hint: Option<ConnParamHint>,
     },
 }
 
@@ -194,6 +220,14 @@ struct WriteDescPayload {
 struct ConnPriorityPayload {
     device: DeviceHandle,
     priority: ConnPriority,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SetConnParamsPayload {
+    device: DeviceHandle,
+    profile: ConnProfile,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    hint: Option<ConnParamHint>,
 }
 
 impl Serialize for Op {
@@ -319,6 +353,18 @@ impl Serialize for Op {
                 seq.serialize_element("rssi")?;
                 seq.serialize_element(&DevicePayload {
                     device: device.clone(),
+                })?;
+            }
+            Op::SetConnParams {
+                device,
+                profile,
+                hint,
+            } => {
+                seq.serialize_element("conn.params")?;
+                seq.serialize_element(&SetConnParamsPayload {
+                    device: device.clone(),
+                    profile: *profile,
+                    hint: *hint,
                 })?;
             }
         }
@@ -473,6 +519,16 @@ impl<'de> Deserialize<'de> for Op {
                             .ok_or_else(|| de::Error::invalid_length(1, &self))?;
                         Ok(Op::ReadRssi { device: p.device })
                     }
+                    "conn.params" => {
+                        let p: SetConnParamsPayload = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                        Ok(Op::SetConnParams {
+                            device: p.device,
+                            profile: p.profile,
+                            hint: p.hint,
+                        })
+                    }
                     _ => Err(de::Error::unknown_variant(
                         &tag,
                         &[
@@ -492,6 +548,7 @@ impl<'de> Deserialize<'de> for Op {
                             "unpair",
                             "conn.priority",
                             "rssi",
+                            "conn.params",
                         ],
                     )),
                 }

@@ -70,7 +70,9 @@ public fun remoteBleClientModule(config: RemoteBleClientConfig): Module = module
                 Capabilities.PAIRING,
                 Capabilities.CONNECTION_SLOTS,
                 Capabilities.CONN_PRIORITY,
+                Capabilities.CONN_PARAMS,
                 Capabilities.SCAN_BATCH,
+                Capabilities.RSSI,
             ),
             retryPolicyFor = config.retryPolicyFor,
         )

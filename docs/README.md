@@ -23,15 +23,15 @@ For quickstart/build commands see [`../README.md`](../README.md).
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
 
-### Proposals (not yet shipped)
+### Proposals (design records)
 
-Design proposals for features under consideration — documented for discussion, **not** part of
-the shipped system described above.
+Design records for capability extensions — each is the design of record for a feature, kept even
+after it ships (the **Status** column tracks whether it's landed and in which release).
 
 | Proposal | Covers | Status |
 |---|---|---|
-| [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | Proposed |
-| [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | Proposed (targeting 0.8.0) |
+| [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | **Implemented in 0.8.2** (coarse Android profile; `hint` reserved) |
+| [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | **Implemented in 0.8.0** (Kotlin agent + `agent-rs`) |
 
 ---
 

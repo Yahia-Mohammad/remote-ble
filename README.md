@@ -24,7 +24,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.8.1")
+    implementation("dev.warsha.remoteble:client-sdk:0.8.2")
 }
 ```
 

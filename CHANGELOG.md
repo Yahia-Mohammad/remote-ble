@@ -9,6 +9,111 @@ The **wire protocol** version is tracked separately from the library version —
 is a distinct compatibility contract for agent/client implementers. Current wire
 protocol version: **1**.
 
+## [0.8.3] - 2026-07-10
+
+> **GitHub-only agent release** — `agent-artifacts.yml` runs on the `v0.8.3` tag (agent binaries),
+> `release.yml`/Maven Central publish stays skipped. This SDK version does not appear on Central;
+> Central consumers get these changes in 0.9.0's consolidated publish.
+>
+> **Shipping CI-validated; on-radio verification batched into the next release.** Both features are
+> correct by construction and covered in CI — feature F's exactness is a property of `EngineBleBackend`'s
+> Kable suspend calls (which resume on GATT completion callbacks, and have since `d97146f` — not
+> polling), and feature C's write ordering is asserted by `BleAgentTest`
+> (`concurrentWritesToOneDeviceReachBackendInSubmissionOrder`). What CI *cannot* produce is the live
+> radio: the F read/write/notify assertions (`:e2e-runner:jvmRun`) and the C throughput number
+> (`:e2e-runner:throughputRun`, before/after the burst API) need a peripheral. Rather than hold the
+> release on limited hardware, that live pass is **deferred to the next release's batched hardware
+> round** (alongside 0.8.1/0.8.2's pending checks) — see `docs/phase7-bringup.md`. No behavior here is
+> unverifiable in principle; it just hasn't been exercised on a physical link yet.
+
+### Added
+
+- **Client-side write-without-response pipelining** — `RemotePeripheral.writeWithoutResponseBurst` /
+  `RemoteGattClient.writeWithoutResponseBurst`. Keeps up to `window` (default 8) WithoutResponse
+  writes in flight instead of paying one full client↔agent round trip per write before sending the
+  next — the fix indicated by tracing a serial WWR burst end-to-end
+  (`ai-context/0.8.3-implementation-plan.md` §2b): the dominant cost is N sequential WebSocket
+  round-trips, not the radio. **No wire change** — frames are still sent one per write, in
+  submission order; only the client's await discipline changes. Backed by a new
+  `AgentSession.dispatch(op, timeout)` primitive (send now, await the reply later) that shares its
+  send-and-track core with `request()`. Submission order is preserved **end-to-end** (see the
+  agent-side write ordering below); WWR *delivery* remains best-effort by BLE design.
+- **Agent-side per-device write ordering.** `BleAgent` runs each command on its own coroutine, so a
+  pipelined write burst could previously race into `backend.write` out of submission order (harmless
+  under the old serial-await client, exposed by the new burst API). The agent now **chains writes per
+  device** — each write awaits the prior same-device write before reaching the backend, so writes hit
+  the radio's FIFO GATT queue in submission order — while writes to other devices and non-write ops
+  stay fully concurrent. This per-device write ordering is now part of the agent conformance contract.
+- **`:e2e-runner:throughputRun` (`ThroughputMain.kt`)** — the WWR throughput/latency baseline driver
+  the burst API's design is measured against (§2a): bursts N MTU-sized WithoutResponse writes
+  serially against the `TestProfile` peripheral and reports bytes/s plus per-write latency
+  percentiles (min/p50/mean/p90/p99/max).
+- **`:e2e-runner:jvmRun` gained exact-completion assertions (feature F)**: read-exactness
+  (bump-then-reread must differ), with-response write surfaces `WRITE_FAILED` on a forced
+  peripheral error, WWR still returns `Ok` on that same forced error (documents the inherent
+  no-ATT-ack limit rather than treating it as a bug), and the notify stream is checked for
+  no-miss/no-duplicate delivery. Interactive — pauses for phone-side debug-control toggles; see
+  `docs/phase7-bringup.md`.
+
+### Fixed
+
+- **`design-decisions.md`'s "write/notify are best-effort on the real engine" boundary row was
+  stale, not a real gap.** `EngineBleBackend` has used real Kable suspend calls since `d97146f`
+  ("Prepare for open-source release"), not polling: read and write-with-response are exact (they
+  resume on Kable's GATT completion callbacks); WWR and notify-delivery are best-effort **by BLE
+  design** (neither has an ATT-level acknowledgement to plumb), not an implementation gap. Row
+  closed; `phase7-bringup.md`'s matching "reads poll / writes have no write-complete callback" prose
+  corrected to match, and its live-run transcript updated for the new assertions above.
+- **Client-side completion contract documented** (`client-sdk.md`, `getting-started.md`): a
+  delivered `Ok` is exact — the agent replies only after the real GATT completion — but a
+  `TIMEOUT`/`TRANSPORT_LOST` on a write is ambiguous, since the write may have already succeeded on
+  the radio before the Reply was lost. This is why writes/`WriteDescriptor`/`Pair` default to no
+  auto-retry and are not replayed on reconnect — a deliberate safety property, not a gap. Added a CI
+  regression test
+  (`SessionEndToEndTest.writeDropBeforeReplySurfacesTransportLostAndIsNotRetried`) asserting it.
+
+## [0.8.2] - 2026-07-09
+
+> **GitHub-only agent release** — `agent-artifacts.yml` runs on the `v0.8.2` tag (agent binaries),
+> `release.yml`/Maven Central publish stays skipped. This SDK version does not appear on Central;
+> Central consumers get these changes in 0.9.0's consolidated publish.
+>
+> **⚠️ Hardware validation pending.** `conn.params`/`conn.priority` and the `CharNode.properties`
+> on-device check have been verified against fakes + CI, **not yet on a real Android radio**. Deferred
+> to a batched hardware-rig round (alongside 0.8.3's radio-gated work). Drive it with
+> `:e2e-runner:connParamsRun` (`setConnParams` on all three profiles → `Ok` on Android; `UNSUPPORTED`
+> on iOS/JVM). Until then, treat the Android engine binding as unproven on-device.
+
+### Added
+
+- **Connection parameters over the wire** (capability `conn.params`). A new `Op.SetConnParams`
+  requests a coarse `ConnProfile` (`LOW_LATENCY` / `BALANCED` / `LOW_POWER`) — an optional,
+  currently-unused `ConnParamHint` is reserved wire space for a future fine-grained engine.
+  `RemotePeripheral.setConnParams(profile, hint)` is a RemoteBLE-specific extension beyond Kable's
+  `Peripheral` surface. Participates in reconcile-on-reconnect: the last `setConnParams` per device
+  replays after a transport reconnect so a blip can't silently revert a peripheral to a
+  battery-hungry interval. `agent-rs` mirrors the codec for byte parity; btleplug exposes no
+  interval/priority control at all, so agent-rs never advertises the capability.
+- **`conn.priority` (0.8.1) now has a real backend.** It shipped wire-only in 0.8.1 — no engine
+  implemented it, so every real agent answered `UNSUPPORTED`. Android now implements both
+  `conn.priority` and `conn.params` from the same `AndroidPeripheral.requestConnectionPriority`
+  binding (`Priority.Low/Balanced/High`); iOS and JVM/btleplug still answer `UNSUPPORTED` and don't
+  advertise either capability (no portable or platform API for either exists there).
+- **`RemotePeripheral.rssi()`'s capability is now discoverable.** The client's requested-capability
+  set never included `Capabilities.RSSI` (a 0.8.1 regression), so `session.supportsCapability(RSSI)`
+  was always `false` even against an Android/Apple agent that supports it — `rssi()` itself still
+  worked since it doesn't gate on the negotiated set. Fixed by adding `RSSI` to the requested set
+  alongside `CONN_PARAMS`.
+
+### Fixed
+
+- **`CharNode.properties` design-decisions row was stale, not a real gap.** The docs claimed
+  characteristic property bits were populated only on the macOS engine via a `propertiesOf` seam
+  that never existed; `EngineBleBackend.toNode()` has always read Kable's `properties.value`
+  directly in `commonMain`, and both the JVM/btleplug and Android engines already carry real native
+  property bits. Corrected the doc and added a regression test
+  (`EngineBleBackendJvmTest.toNodePreservesNonZeroPropertyBits`) rather than changing any behavior.
+
 ## [0.8.1] - 2026-07-09
 
 ### Added

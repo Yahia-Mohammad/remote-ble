@@ -5,6 +5,9 @@ import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ConnParamHint
+import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -68,6 +71,12 @@ class EngineBleBackend(
         // backend returns cached advertisement RSSI (or Int.MIN_VALUE), so advertise it only where
         // readRssi() below is genuinely a connected read.
         if (agentRssiSupported()) add(Capabilities.RSSI)
+        // conn.params and its coarse conn.priority alias are both driven by the same platform
+        // binding (Android's requestConnectionPriority) — advertise both from one predicate.
+        if (agentConnParamsSupported()) {
+            add(Capabilities.CONN_PARAMS)
+            add(Capabilities.CONN_PRIORITY)
+        }
     }
 
     // Plain map guarded by a multiplatform lock (kotlinx-atomicfu — java.util.concurrent has no
@@ -254,6 +263,24 @@ class EngineBleBackend(
         return rssi
     }
 
+    override suspend fun requestConnectionPriority(device: DeviceHandle, priority: ConnPriority) {
+        val peripheral = connectedPeripheral(device)
+        val accepted = applyConnParams(peripheral, priority.toConnProfile(), hint = null)
+        if (!accepted) bleError(ErrorKind.WRITE_FAILED, message = "connection priority request rejected")
+    }
+
+    override suspend fun setConnParams(device: DeviceHandle, profile: ConnProfile, hint: ConnParamHint?) {
+        val peripheral = connectedPeripheral(device)
+        val accepted = applyConnParams(peripheral, profile, hint)
+        if (!accepted) bleError(ErrorKind.WRITE_FAILED, message = "conn-params request rejected")
+    }
+
+    private fun ConnPriority.toConnProfile(): ConnProfile = when (this) {
+        ConnPriority.LOW_POWER -> ConnProfile.LOW_POWER
+        ConnPriority.BALANCED -> ConnProfile.BALANCED
+        ConnPriority.HIGH -> ConnProfile.LOW_LATENCY
+    }
+
     override suspend fun readDescriptor(device: DeviceHandle, desc: DescRef): ByteArray {
         val peripheral = connectedPeripheral(device)
         val descriptor = peripheral.findDescriptor(desc)
@@ -314,7 +341,10 @@ class EngineBleBackend(
         characteristics = characteristics.map { it.toNode() },
     )
 
-    private fun DiscoveredCharacteristic.toNode(): CharNode = CharNode(
+    // internal (not private): EngineBleBackendJvmTest exercises this directly against a fake
+    // DiscoveredCharacteristic to regression-test that property bits survive the mapping on every
+    // engine, without needing a real radio connection.
+    internal fun DiscoveredCharacteristic.toNode(): CharNode = CharNode(
         uuid = characteristicUuid.toString(),
         properties = properties.value,
         descriptors = descriptors.map { it.descriptorUuid.toString() },

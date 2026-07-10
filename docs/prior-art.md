@@ -119,12 +119,12 @@ ESPHome added a **BLE connection-parameters API** — proxies can renegotiate th
 interval mid-connection (fast during setup, slow afterward to spare a peripheral's battery on
 always-connected devices like locks). This is adjacent to RemoteBLE's Android-only
 [`conn.priority`](protocol.md#operations--op) capability, which today maps to Android's coarse
-priority buckets. Generalizing it into a cross-engine `conn.params` capability is a proposed
-extension — with the honest caveat that the engine support for fine-grained intervals on
-RemoteBLE's target platforms (`btleplug`, CoreBluetooth) is far more constrained than on an ESP32,
-so on today's engines it is realistically only the coarse Android path. See
+priority buckets. It was generalized into a cross-engine `conn.params` capability in **0.8.2** —
+with the honest caveat that the engine support for fine-grained intervals on RemoteBLE's target
+platforms (`btleplug`, CoreBluetooth) is far more constrained than on an ESP32, so on today's
+engines it is realistically only the coarse Android path (the `hint` field is reserved but unused). See
 [proposals/connection-parameters.md](proposals/connection-parameters.md) for the full
-treatment: motivation, the per-engine support matrix, the proposed op, and why it is "generalize
+treatment: motivation, the per-engine support matrix, the op, and why it is "generalize
 an existing partial capability" rather than "add a feature that works everywhere."
 
 ---

@@ -288,6 +288,11 @@ Why it works:
   **original `subId`**, and the fresh agent (empty state) starts streaming again.
 - The app's `observe` flow never re-subscribed; its pump was filtering `subId=8` the
   whole time, so notifications simply resume.
+- The replay set also carries the **last `SetConnParams` per device** (`lastConnParams`),
+  replayed *right after* that device's `Connect` (params need a live link) and before its
+  subscriptions — so a transport blip can't silently revert a peripheral to a
+  battery-hungry connection interval. Like `Connect`/`ObserveStart`, it's idempotent on
+  the agent. A device's params are dropped from the set when it's explicitly `Disconnect`ed.
 
 Contrast — a device that was **explicitly disconnected** is *not* replayed: `Disconnect`
 removed it (and its subscriptions) from the replay set, so a later reconnect leaves it

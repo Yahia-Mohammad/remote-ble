@@ -1,9 +1,12 @@
 package dev.warsha.remoteble.client
 
+import dev.warsha.remoteble.agent.AgentBackend
 import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BlackholeBackend
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.Command
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Op
@@ -186,6 +189,51 @@ class WebSocketEndToEndTest {
             } finally {
                 observer.cancel()
             }
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun connParamsReplayedAfterServerRestart() = runBlocking {
+        val port = freePort()
+        // A fresh FakeAgent per connection keeps no conn.params state of its own, so the only way
+        // a *new* agent instance sees a "conn.params" command after the restart is the session's
+        // own reconcileOnReconnect replaying it — this taps the wire to prove that, the same way
+        // activeSubscriptionResumesAfterServerRestart proves observe.start replay via the resumed
+        // notification stream.
+        val received = Channel<Op.SetConnParams>(Channel.UNLIMITED)
+        fun spyBackend() = AgentBackend { incoming, outgoing, backendScope, _, _ ->
+            val codec = CborProtocolCodec()
+            val tapped = incoming.onEach { bytes ->
+                val frame = codec.decode(bytes)
+                if (frame is Command) (frame.op as? Op.SetConnParams)?.let { received.trySend(it) }
+            }
+            FakeAgent(tapped, outgoing, backendScope, FakeAgent.Config()).start()
+        }
+
+        var server = AgentWebSocketServer(port, backend = spyBackend()).also { it.startAndAwaitReady(port) }
+        try {
+            val session = DefaultAgentSession(
+                transportTo(port, backoff = Backoff(50.milliseconds, 200.milliseconds)),
+                CborProtocolCodec(),
+                scope,
+            )
+            session.awaitConnected()
+            val peripheral = RemoteGattClient(device, session)
+            peripheral.connect()
+            peripheral.setConnParams(ConnProfile.LOW_LATENCY)
+            withTimeout(10.seconds) { received.receive() } // the initial explicit request
+
+            server.stop()
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
+            server = AgentWebSocketServer(port, backend = spyBackend()).also { it.startAndAwaitReady(port) }
+            withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+
+            val replayed = withTimeout(10.seconds) { received.receive() }
+            assertEquals(device, replayed.device)
+            assertEquals(ConnProfile.LOW_LATENCY, replayed.profile)
         } finally {
             server.stop()
         }

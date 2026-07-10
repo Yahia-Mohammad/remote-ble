@@ -26,6 +26,28 @@ data class ScanFilter(val service: String? = null, val name: String? = null)
 enum class ConnPriority { LOW_POWER, BALANCED, HIGH }
 
 /**
+ * Requested connection profile (latency vs power) — the portable primary of [Op.SetConnParams].
+ * Supersedes [ConnPriority]: an agent advertising `conn.params` implies the coarse profile behavior
+ * `conn.priority` always aimed for, with an optional [ConnParamHint] escape hatch for engines that
+ * expose finer control.
+ */
+@Serializable
+enum class ConnProfile { LOW_LATENCY, BALANCED, LOW_POWER }
+
+/**
+ * Optional fine-grained interval/latency/timeout hint accompanying a [ConnProfile]. No shipping
+ * engine honors this today (Android's `requestConnectionPriority` is coarse-only) — it is reserved
+ * wire space for a future finer-grained engine, always `null` in practice for 0.8.2.
+ */
+@Serializable
+data class ConnParamHint(
+    val minIntervalMs: Double,
+    val maxIntervalMs: Double,
+    val latency: Int,
+    val supervisionTimeoutMs: Int,
+)
+
+/**
  * A descriptor addressed by service + characteristic + descriptor UUID (+ optional
  * instance index for the rare duplicate-UUID case). Resolved on the agent, like
  * [CharRef]. Gated behind the `descriptors` capability (see [Capabilities]).
@@ -141,6 +163,15 @@ sealed interface Op {
 
     @Serializable @SerialName("rssi")
     data class ReadRssi(val device: DeviceHandle) : Op
+
+    // --- Connection parameters (capability: "conn.params") ---
+
+    @Serializable @SerialName("conn.params")
+    data class SetConnParams(
+        val device: DeviceHandle,
+        val profile: ConnProfile,
+        val hint: ConnParamHint? = null,
+    ) : Op
 }
 
 /**
@@ -163,6 +194,7 @@ inline fun Op.mapDevice(transform: (DeviceHandle) -> DeviceHandle): Op = when (t
     is Op.Unpair -> copy(device = transform(device))
     is Op.RequestConnectionPriority -> copy(device = transform(device))
     is Op.ReadRssi -> copy(device = transform(device))
+    is Op.SetConnParams -> copy(device = transform(device))
     is Op.ScanStart, is Op.ScanStop, is Op.ObserveStop -> this
 }
 
@@ -185,5 +217,5 @@ val Op.isIdempotent: Boolean
         is Op.Write, is Op.WriteDescriptor, is Op.Pair -> false
         is Op.ScanStart, is Op.ScanStop, is Op.Connect, is Op.Disconnect, is Op.Discover,
         is Op.Read, is Op.ObserveStart, is Op.ObserveStop, is Op.RequestMtu, is Op.ReadDescriptor,
-        is Op.Unpair, is Op.RequestConnectionPriority, is Op.ReadRssi -> true
+        is Op.Unpair, is Op.RequestConnectionPriority, is Op.ReadRssi, is Op.SetConnParams -> true
     }

@@ -111,6 +111,7 @@ class FakeAgent(
                 emit(AgentEvent.BondState(op.device, BleBondState.NONE))
             }
             is Op.RequestConnectionPriority -> reply(cmd.cid, OpResult.Ok())
+            is Op.SetConnParams -> reply(cmd.cid, OpResult.Ok())
             is Op.ScanStart -> {
                 reply(cmd.cid, OpResult.Ok())
                 startScan(op.scanId)

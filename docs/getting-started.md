@@ -155,6 +155,17 @@ peripheral.disconnect()
 agent-minted `handle` that `peripheralFor` needs. You never construct or parse a
 device handle yourself.
 
+**RemoteBLE extensions beyond Kable.** A few ops (pairing, RSSI, connection parameters) aren't
+on Kable's portable `Peripheral` surface, so they live as extension methods on the concrete
+`RemotePeripheral` returned for `BleMode.REMOTE` — capability-gated, like everything else:
+
+```kotlin
+val remote = peripheral as RemotePeripheral // the concrete type peripheralFor(REMOTE, …) returns
+
+// Requests a connection profile (capability: conn.params — Android agents today).
+remote.setConnParams(ConnProfile.LOW_LATENCY)
+```
+
 ---
 
 ## Part 4 — The payoff: write code that doesn't care
@@ -233,6 +244,16 @@ The split between "reached the radio and it said no" and "never reached the radi
 deliberate — see the [error taxonomy](protocol.md#errors--agenterror--errorkind). A
 failed op never poisons the session; the next request proceeds normally.
 
+**A returned success is exact; a timeout/transport-lost on a write is not "it failed."** The agent
+replies only after the real GATT completion, so `write()` returning means the peripheral actually
+acknowledged it (with-response) — never a false positive. But if the *Reply* is lost in transit, you
+see `TIMEOUT`/`TRANSPORT_LOST` even though the write may already have taken effect on the radio. That's
+why writes/`Pair` don't auto-retry and aren't replayed on reconnect (see
+[client-sdk.md](client-sdk.md#the-completion-contract-exact-on-success-ambiguous-on-lost-reply)) — a
+silent retry could double-apply. Design a read-back or an app-level idempotent retry for writes where
+that ambiguity matters, especially `WriteType.WithoutResponse` writes (an `Ok` there only ever means
+"handed to the radio," since WWR has no ATT acknowledgement at all).
+
 ---
 
 ## Part 6 — Tuning (optional)
@@ -262,6 +283,26 @@ import io.ktor.client.plugins.websocket.*
 val httpClient = HttpClient(/* your engine */) { install(WebSockets) }
 val transport = WebSocketAgentTransport(url, scope, httpClient)
 ```
+
+**Bursting write-without-response writes.** A serial loop of `peripheral.write(char, data,
+WriteType.WithoutResponse)` pays one full client↔agent round trip per write — fine for occasional
+writes, a real ceiling if you're streaming many small WWR payloads back-to-back.
+`RemotePeripheral.writeWithoutResponseBurst` pipelines them instead, keeping several in flight:
+
+```kotlin
+val results: List<Result<Unit>> = peripheral.writeWithoutResponseBurst(
+    characteristic = writable,
+    values = chunks,               // List<ByteArray>
+    window = 8,                    // default; how many writes may be in flight at once
+)
+```
+
+Frames are sent one per write, and **submission order is preserved end-to-end** — the client sends in
+order and the agent chains same-device writes so they reach the radio in order (writes to other
+devices stay concurrent). This is a client-side change plus an agent ordering guarantee, not a wire
+change. The one inherent caveat is WWR itself: `WriteType.WithoutResponse` has no ATT acknowledgement
+(see above), so a `Result.success(Unit)` means "handed to the agent/radio," not "the peripheral
+received it" — order is guaranteed, per-write *delivery* is still best-effort.
 
 ---
 

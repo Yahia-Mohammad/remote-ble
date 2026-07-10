@@ -107,6 +107,28 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun setConnParams_everyProfile_withAndWithoutHint() {
+        ConnProfile.entries.forEachIndexed { i, profile ->
+            assertRoundTrips(Command(40L + i, Op.SetConnParams(dev, profile)))
+        }
+        assertRoundTrips(
+            Command(
+                50,
+                Op.SetConnParams(
+                    dev,
+                    ConnProfile.BALANCED,
+                    hint = ConnParamHint(
+                        minIntervalMs = 20.0,
+                        maxIntervalMs = 40.0,
+                        latency = 0,
+                        supervisionTimeoutMs = 5000,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun reply_okBond_everyState() {
         BleBondState.entries.forEach { state ->
             assertRoundTrips(Reply(21, OpResult.Ok(ResultPayload.Bond(state))))

@@ -5,7 +5,9 @@ import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -33,7 +35,7 @@ class FakeBleBackend(
     // The fake implements every optional capability; tests can override to simulate a
     // narrower backend.
     override val capabilities: Set<String> =
-        setOf(Capabilities.DESCRIPTORS, Capabilities.PAIRING, Capabilities.CONN_PRIORITY),
+        setOf(Capabilities.DESCRIPTORS, Capabilities.PAIRING, Capabilities.CONN_PRIORITY, Capabilities.CONN_PARAMS),
     private val emitInterval: Duration = 10.milliseconds,
 ) : BleBackend {
 
@@ -47,6 +49,7 @@ class FakeBleBackend(
     var lastWrite: Triple<CharRef, ByteArray, Boolean>? = null
     var lastDescriptorWrite: Pair<DescRef, ByteArray>? = null
     var lastConnectionPriority: ConnPriority? = null
+    var lastConnParams: Pair<ConnProfile, ConnParamHint?>? = null
 
     override fun connectionDrops(): Flow<ConnectionDrop> = connectionDropSignals
 
@@ -116,6 +119,10 @@ class FakeBleBackend(
 
     override suspend fun requestConnectionPriority(device: DeviceHandle, priority: ConnPriority) {
         lastConnectionPriority = priority
+    }
+
+    override suspend fun setConnParams(device: DeviceHandle, profile: ConnProfile, hint: ConnParamHint?) {
+        lastConnParams = profile to hint
     }
 
     companion object {

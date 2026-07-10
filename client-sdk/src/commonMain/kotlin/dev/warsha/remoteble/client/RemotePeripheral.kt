@@ -4,9 +4,12 @@ import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
+import dev.warsha.remoteble.protocol.orThrow
 import com.juul.kable.Characteristic
 import com.juul.kable.Descriptor
 import com.juul.kable.DiscoveredService
@@ -145,6 +148,21 @@ public class RemotePeripheral(
         gatt.write(characteristic.toCharRef(), data, withResponse = writeType == WriteType.WithResponse)
     }
 
+    /**
+     * A RemoteBLE extension beyond Kable's `Peripheral` surface (0.8.3 / feature C): pipelines
+     * [values] as WithoutResponse writes to [characteristic], keeping up to [window] in flight
+     * instead of paying one client<->agent round trip per write — see
+     * [RemoteGattClient.writeWithoutResponseBurst]. Returns one [Result] per value, in submission
+     * order; a per-item failure doesn't cancel the rest of the burst.
+     */
+    public suspend fun writeWithoutResponseBurst(
+        characteristic: Characteristic,
+        values: List<ByteArray>,
+        window: Int = RemoteGattClient.DEFAULT_BURST_WINDOW,
+    ): List<Result<Unit>> =
+        gatt.writeWithoutResponseBurst(characteristic.toCharRef(), values, window)
+            .map { result -> runCatching { result.orThrow(); Unit } }
+
     override fun observe(characteristic: Characteristic, onSubscriptionAction: suspend () -> Unit): Flow<ByteArray> =
         gatt.observe(characteristic.toCharRef(), onSubscriptionAction)
 
@@ -162,6 +180,14 @@ public class RemotePeripheral(
     /** Requests a link connection priority (requires the agent's `conn.priority` capability). */
     public suspend fun requestConnectionPriority(priority: ConnPriority): Unit =
         gatt.requestConnectionPriority(priority)
+
+    /**
+     * Requests connection parameters (requires the agent's `conn.params` capability). A RemoteBLE
+     * extension beyond Kable's `Peripheral` surface — steps outside the local/remote parity
+     * guarantee the rest of this class holds to; unavailable engines answer `UNSUPPORTED`.
+     */
+    public suspend fun setConnParams(profile: ConnProfile, hint: ConnParamHint? = null): Unit =
+        gatt.setConnParams(profile, hint)
 
     /** Bond-state transitions reported by the agent (pair/unpair and OS-initiated changes). */
     public val bondState: Flow<BleBondState> = session.events()

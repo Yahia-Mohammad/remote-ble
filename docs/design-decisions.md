@@ -207,8 +207,9 @@ what the agent **negotiated**, feeding `maximumWriteValueLengthForType = negotia
 3`. On platforms that auto-negotiate (iOS), `RequestMtu` simply reports the live value
 — so the same code path *learns* the MTU everywhere instead of guessing. It falls back
 to the ATT default (23) while disconnected. Throughput coalescing of
-write-without-response bursts is intentionally deferred to hardware bring-up (it can't
-be meaningfully validated without a real radio).
+write-without-response bursts landed in 0.8.3 (`writeWithoutResponseBurst` pipelines to
+fill the in-flight window, no wire change; the agent chains writes per device so
+submission order survives to the radio — see the boundaries table below).
 
 ## Auth is a hook, not a framework
 
@@ -330,9 +331,10 @@ These are deliberate v1 cuts, each a clean extension:
 | Boundary | Where | Extension |
 |---|---|---|
 | Agent emits `DISCONNECTED` only on explicit `Disconnect` (ownership leases *do* track unsolicited drops via `ConnectionWatcher`, but no `AgentEvent` is emitted for them yet) | `BleAgent` | a `BleBackend` connection-state stream feeding spontaneous-drop events |
-| Write/notify are best-effort on the real engine | `EngineBleBackend` | engines with completion callbacks can be exact |
-| `CharNode.properties` populated only on macOS engine | `EngineBleBackend.propertiesOf` | other engines exposing property bits |
-| Throughput coalescing not implemented | — | batch write-without-response bursts (needs hardware) |
+| ~~Write/notify are best-effort on the real engine~~ — this row was stale: `EngineBleBackend` has used real Kable suspend calls since `d97146f` ("Prepare for open-source release"), not polling. **Read and write-with-response are exact** — they resume on Kable's `onCharacteristicRead`/`onCharacteristicWrite` GATT completion callbacks. **WWR and notify-delivery are best-effort by BLE design, not an implementation gap** — WWR has no ATT-level acknowledgement, and notifications (unlike indications) are unacknowledged by spec, so there's no callback to plumb even in principle. Confirmed by code inspection 0.8.3; live-radio confirmation batched into the next release's hardware round | `EngineBleBackend` | an *acknowledged-notify* (indications) capability would be a real wire feature (not this boundary) — noted as a possible future item |
+| ~~`CharNode.properties` populated only on macOS engine~~ — this row was stale: `EngineBleBackend.toNode()` reads Kable's `properties.value` directly in `commonMain` (no `propertiesOf` seam ever existed), and both the JVM/btleplug (`BtleplugCharacteristic`) and Android (`PlatformDiscoveredCharacteristic`) engines already read real native property bits, not a stub — verified 0.8.2 (see `EngineBleBackendJvmTest.toNodePreservesNonZeroPropertyBits`) | `EngineBleBackend` | — |
+| ~~Throughput coalescing not implemented~~ — landed in 0.8.3: `writeWithoutResponseBurst` pipelines WWR writes to fill the in-flight window (no wire change), and `BleAgent` chains writes **per device** so a burst reaches the radio's FIFO GATT queue in submission order despite per-command concurrency (a non-reference agent must uphold the same). Guaranteed in code + asserted in CI (`BleAgentTest`); on-radio confirmation batched into the next hardware round (plan §2d/§3) | `RemoteGattClient`, `BleAgent` | a wire batch op (`Op.WriteBatch`) only if the rig shows framing/round-trip still dominates after pipelining |
+| `conn.params`/`conn.priority` implemented Android-only; `ConnParamHint` is reserved wire space no engine honors; result is `Ok(null)` (Android reports accept/reject, not the resulting interval) | `ConnParamsSupport.*`, `EngineBleBackend` | iOS/JVM backends with real interval control (none known today — btleplug exposes none); an engine that reports the applied interval could add a `ResultPayload` for it |
 | One agent / one session | `DefaultAgentSession` | an `AgentRegistry` above the session |
 | ~~Agent is JVM-only~~ — done: `:agent` now also targets Android/iOS (Kable's native Android BLE / CoreBluetooth backends, Ktor's native-target CIO server); see [agent.md](agent.md#android--ios-a-phone-as-the-agent). Remaining cut: iOS can't run the agent backgrounded (no listening TCP server while backgrounded on iOS) | `agent/build.gradle.kts` | a background-capable iOS transport would need a fundamentally different delivery mechanism (push-triggered wake, not a held-open server socket) |
 

@@ -157,7 +157,7 @@ a successful op replies `OpResult.Ok` with no payload; failures reply `OpResult.
 | `disconnect` | `device: DeviceHandle` | Tear down the GATT link; emit `conn.state = DISCONNECTED`; start the lease release grace (§10.3). | `Ok` |
 | `discover` | `device: DeviceHandle` | Discover services + characteristics. | `Ok{ services }` (`Services`) |
 | `read` | `device`, `char: CharRef` | Read the characteristic value. | `Ok{ bytes }` (`Bytes`) |
-| `write` | `device`, `char`, `value: bytes`, `withResponse: bool` | Write. `withResponse=false` is write-without-response (best-effort; no completion guarantee). | `Ok` |
+| `write` | `device`, `char`, `value: bytes`, `withResponse: bool` | Write. `withResponse=false` is write-without-response (best-effort; no completion guarantee). The agent MUST apply writes to the **same** `device` in the order it received their `cmd`s, even when handling commands concurrently — a client may pipeline write-without-response writes without awaiting each reply, and relies on submission order reaching the radio. Writes to different devices need not be ordered. | `Ok` |
 | `mtu` | `device`, `mtu: i32` | Request an MTU change; reply the negotiated value. | `Ok{ mtu }` (`Mtu`) |
 | `observe.start` | `subId: i64`, `device`, `char` | Subscribe (CCCD); emit a `notification` event per value, tagged with `subId`. Re-issuing an active `subId` MUST replace it — **replay-safe**. | `Ok` |
 | `observe.stop` | `subId: i64` | Unsubscribe `subId` (no-op if unknown). | `Ok` |

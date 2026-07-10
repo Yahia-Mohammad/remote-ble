@@ -9,7 +9,9 @@ import dev.warsha.remoteble.client.TransportState
 import dev.warsha.remoteble.client.WebSocketAgentTransport
 import dev.warsha.remoteble.client.defaultWebSocketHttpClient
 import dev.warsha.remoteble.client.peripheralFor
+import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.CborProtocolCodec
+import dev.warsha.remoteble.protocol.ErrorKind
 import com.juul.kable.DiscoveredCharacteristic
 import com.juul.kable.ExperimentalApi
 import com.juul.kable.Peripheral
@@ -103,8 +105,19 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
         val (readable, writable, notify) = chars
 
-        report.step("Read the readable characteristic") {
-            peripheral.read(readable).toHex()
+        val baseline = report.capture("Read the readable characteristic (baseline)") {
+            peripheral.read(readable)
+        }
+
+        println()
+        println(">>> Now change the readable characteristic's value on the phone ('Bump readable value'), then press Enter <<<")
+        readlnOrNull()
+        report.step("Read exactness (F) — reflects the just-set bump, not a stale/cached value") {
+            val after = peripheral.read(readable)
+            check(!after.contentEquals(baseline)) {
+                "read returned the same bytes as the baseline after a bump — looks stale/cached, not exact"
+            }
+            after.toHex()
         }
 
         report.step("Write (with response)") {
@@ -122,10 +135,41 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
 
         println()
+        println(">>> Now toggle 'Force write error' ON on the phone, then press Enter <<<")
+        readlnOrNull()
+        report.step("Write-with-response error surfaces WRITE_FAILED (F)") {
+            val failure = runCatching {
+                peripheral.write(writable, byteArrayOf(0xEE.toByte()), WriteType.WithResponse)
+            }.exceptionOrNull()
+            val kind = (failure as? AgentException)?.error?.kind
+            check(kind == ErrorKind.WRITE_FAILED) {
+                "expected WRITE_FAILED, got ${failure?.let { it::class.simpleName } ?: "no failure"} ($kind)"
+            }
+            "WRITE_FAILED as expected"
+        }
+        report.step("WWR still returns Ok despite the same peripheral-side reject (inherent BLE limit, not a bug)") {
+            // WithoutResponse has no ATT response, so nothing can carry the peripheral's rejection
+            // back to the client — Ok here documents that limit rather than "fixing" it.
+            peripheral.write(writable, byteArrayOf(0xEE.toByte()), WriteType.WithoutResponse)
+            "Ok, as expected"
+        }
+        println()
+        println(">>> Now toggle 'Force write error' OFF on the phone, then press Enter <<<")
+        readlnOrNull()
+        report.step("Write-with-response succeeds again — a failed write never poisons the session") {
+            peripheral.write(writable, byteArrayOf(0x01, 0x02), WriteType.WithResponse)
+            null
+        }
+
+        println()
         println(">>> Now press 'Notify (counter +1)' on the phone TWICE (within 60s) <<<")
         println()
-        report.step("Observe 2 notifications") {
+        report.step("Observe 2 notifications, no miss/dup") {
             val received = withTimeout(60.seconds) { peripheral.observe(notify).take(2).toList() }
+            check(received.size == 2) { "expected 2 notifications, got ${received.size}" }
+            check(!received[0].contentEquals(received[1])) {
+                "received a duplicate notification payload — missed or duplicated delivery"
+            }
             "${received.size} received: ${received.joinToString { it.toHex() }}"
         }
 

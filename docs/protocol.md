@@ -69,6 +69,8 @@ object Capabilities {
     const val PAIRING          = "pairing"       // Op.Pair / Op.Unpair + bond-state events (backend-level)
     const val CONNECTION_SLOTS = "slots"         // AgentEvent.SlotState free/total slots (agent-level)
     const val CONN_PRIORITY    = "conn.priority" // Op.RequestConnectionPriority (backend-level, Android-only)
+    const val RSSI             = "rssi"          // Op.ReadRssi connected read (backend-level, Android/Apple)
+    const val CONN_PARAMS      = "conn.params"   // Op.SetConnParams (backend-level, Android-only); ⊃ conn.priority
     const val SCAN_BATCH       = "scan.batch"    // AgentEvent.ScanResultBatch coalescing (agent-level)
 }
 ```
@@ -115,8 +117,10 @@ GATT / scanning surface 1:1.
 | `Pair` | `pair` | `device: DeviceHandle` | `ResultPayload.Bond` (+ a `BondState` event) — **capability: `pairing`** |
 | `Unpair` | `unpair` | `device: DeviceHandle` | none (+ a `BondState` event) — **capability: `pairing`** |
 | `RequestConnectionPriority` | `conn.priority` | `device: DeviceHandle`, `priority: ConnPriority` | none — **capability: `conn.priority`** |
+| `ReadRssi` | `rssi` | `device: DeviceHandle` | `ResultPayload.Rssi` (dBm, connected) — **capability: `rssi`** |
+| `SetConnParams` | `conn.params` | `device: DeviceHandle`, `profile: ConnProfile`, `hint: ConnParamHint?` | none — **capability: `conn.params`** |
 
-The descriptor and pairing ops are gated behind their capabilities (see
+The descriptor, pairing, RSSI, and connection-parameter ops are gated behind their capabilities (see
 [Handshake & capability negotiation](#handshake--capability-negotiation)); an agent that
 doesn't advertise one answers the corresponding ops with `ErrorKind.UNSUPPORTED`. A backend
 declares what it can service via `BleBackend.capabilities`, and the agent advertises exactly
@@ -128,6 +132,16 @@ leaves the `pair`/`unpair` ops on the `BleBackend` defaults (`UNSUPPORTED`). A b
 real bonding control would override them and advertise the capability; `Pair` would then return
 `BONDING` (initiated) rather than a confirmed `BONDED` unless the backend also surfaces a
 bond-state flow.
+
+`SetConnParams` is the superset of `RequestConnectionPriority`: `conn.params` carries a portable
+`ConnProfile` (`LOW_LATENCY` / `BALANCED` / `LOW_POWER`) plus a reserved, currently-unused
+`ConnParamHint` for a future fine-grained engine, and an agent advertising it implies the coarse
+`conn.priority` behavior. In the reference agent both map to the same Android binding
+(`AndroidPeripheral.requestConnectionPriority`) and are advertised together — Android only. iOS and
+the JVM/`btleplug` backend expose no connection-parameter control and advertise neither, answering
+`UNSUPPORTED`. Likewise `rssi` is a *connected* read only on Kable's Android/Apple backends; the
+JVM/`btleplug` backend has only advertisement RSSI and doesn't advertise it (`agent-rs` mirrors all
+three ops' codecs for byte parity but, being `btleplug`, advertises none of these capabilities).
 
 Stream-opening ops (`ScanStart`, `ObserveStart`) carry the stream id (`scanId` /
 `subId`) **in the request**, so the agent tags subsequent events with it and the
@@ -281,8 +295,9 @@ agent. See the full taxonomy discussion in
 Automatic retry needs **both**. The hazard is a mutation that reached the radio and took
 effect but whose reply was lost (`TIMEOUT`/`TRANSPORT_LOST`): a blind retry would apply it
 twice. So **all writes and pairing are non-idempotent** — `Op.Write`, `Op.WriteDescriptor`,
-`Op.Pair` — while reads, discovery, connect/disconnect, scan/observe control, MTU and
-connection-priority requests are convergent or effect-free and safe to repeat. The client SDK
+`Op.Pair` — while reads, discovery, connect/disconnect, scan/observe control, MTU, RSSI reads, and
+connection-priority / connection-parameter requests are convergent or effect-free and safe to
+repeat. The client SDK
 turns this into the *default* retry policy per op — non-idempotent ops default to no retry — which
 a caller can still override per call (see [client-sdk.md](client-sdk.md#error-and-retry-policies)).
 

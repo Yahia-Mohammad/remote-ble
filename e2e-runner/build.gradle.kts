@@ -51,3 +51,31 @@ tasks.register<JavaExec>("rssiRun") {
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
     mainClass.set("dev.warsha.remoteble.e2e.RssiMainKt")
 }
+
+// Connection-parameters (B / conn.params) live check (ConnParamsMain.kt): connect to a peripheral and
+// request each ConnProfile, printing whether the agent honored it. An Android agent advertises
+// `conn.params` and accepts all three profiles; iOS/JVM agents don't advertise it and answer
+// UNSUPPORTED — the driver prints a PASS/MIXED verdict for whichever it is talking to.
+//   ./gradlew :e2e-runner:connParamsRun --args "ws://localhost:8080/agent \"Warsha HRM\" <token>"
+tasks.register<JavaExec>("connParamsRun") {
+    group = "application"
+    description = "Request each connection-parameter profile from a peripheral via a live agent (B)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.ConnParamsMainKt")
+}
+
+// Write-without-response throughput baseline (0.8.3 / C, ThroughputMain.kt): drives a serial burst
+// of MTU-sized WithoutResponse writes against the TestProfile peripheral and reports bytes/s plus
+// the per-write latency distribution — the number the coalescing design in
+// ai-context/0.8.3-implementation-plan.md is measured against.
+//   ./gradlew :e2e-runner:throughputRun --args "ws://localhost:8080/agent <token> 200"
+tasks.register<JavaExec>("throughputRun") {
+    group = "application"
+    description = "Measure write-without-response throughput/latency baseline against a live agent (0.8.3 / C)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.ThroughputMainKt")
+}

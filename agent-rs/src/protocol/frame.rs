@@ -18,11 +18,12 @@ pub mod capabilities {
     pub const PAIRING: &str = "pairing";
     pub const CONNECTION_SLOTS: &str = "slots";
     pub const CONN_PRIORITY: &str = "conn.priority";
+    pub const CONN_PARAMS: &str = "conn.params";
     pub const SCAN_BATCH: &str = "scan.batch";
     pub const IDENTIFIER_TRANSLATION: &str = "identifier.translate";
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Command {
         cid: i64,

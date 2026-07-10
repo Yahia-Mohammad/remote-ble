@@ -49,6 +49,13 @@ object Capabilities {
     const val SCAN_BATCH: String = "scan.batch"
 
     /**
+     * Connection-parameters op (`Op.SetConnParams`). Supersedes `conn.priority`: an agent
+     * advertising this implies the coarse profile behavior `conn.priority` always aimed for, plus
+     * a reserved (currently unused) fine-grained `hint` slot. Backend-level (Android-only today).
+     */
+    const val CONN_PARAMS: String = "conn.params"
+
+    /**
      * Agent-side device-handle translation: the agent rewrites every outgoing [DeviceHandle] into
      * the client's declared [IdentifierFormat] (see [ClientHello.identifierFormat]) and reverse-maps
      * incoming ops back to the real radio handle, so a remote peripheral's Kable `Identifier` works

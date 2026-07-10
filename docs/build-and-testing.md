@@ -49,9 +49,9 @@ client-sdk/src/
 
 ```sh
 ./gradlew build                      # all modules + targets compile; JVM tests run
-./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (35 tests)
+./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (39 tests)
 ./gradlew :client-sdk:jvmTest        # session / transport / kable / error-path / identifier suites
-(cd agent-rs && cargo test)          # native Rust agent: 20 unit + cross-language interop tests
+(cd agent-rs && cargo test)          # native Rust agent: 40 unit + cross-language interop tests
 agent/run-agent.sh 8080                                       # run the real macOS JVM agent (NOT :agent:jvmRun)
 agent-rs/run-agent-rs.sh 8080                                 # run the native Rust agent on macOS (Linux/Win: cargo run --bin agent-rs)
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080              # …with bearer auth
@@ -123,23 +123,27 @@ simulator toolchain is selected). To re-enable: `sudo xcode-select -s
 
 ## The test suite
 
-**95 tests, JVM-run.** The suites below total 93; the other two are the Koin graph-verify
+**140 tests, JVM-run.** The suites below total 138; the other two are the Koin graph-verify
 tests (`AgentKoinTest`, `ClientKoinTest`). The end-to-end tests stand up a real agent via the
 test-only `:client-sdk → :agent` dependency.
 
 | Module | Suite | Tests | What it proves |
 |---|---|---|---|
-| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt) | 27 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events |
+| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt) | 31 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events (`rssi`, `conn.params` with/without `hint`) |
 | `:protocol` | [`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt) | 8 | the **native Rust agent**'s exact CBOR output (definite-length, signed-byte arrays, `gattStatus`) decodes to the right Kotlin frames — cross-language wire compat |
-| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/BleAgentTest.kt) | 18 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
-| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PeripheralRegistryTest.kt) | 6 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows |
-| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/ConnectionWatcherTest.kt) | 2 | unsolicited-drop detection via `BleBackend.isConnected`: starts the release grace on a drop, leaves a live link alone |
-| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/SessionEndToEndTest.kt) | 14 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority round-trips, batched-scan flattening |
-| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt) | 7 | full op set over a real WS, restart→reconnect, subscription replay, disconnect-not-replayed, auth accept/reject |
+| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/BleAgentTest.kt) | 26 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority/conn-params/rssi dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
+| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PeripheralRegistryTest.kt) | 9 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows, unsolicited-drop propagation |
+| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/ConnectionWatcherTest.kt) | 5 | unsolicited-drop detection via `BleBackend.isConnected`/liveness probe: starts the release grace on a drop, leaves a live link alone, a throwing client can't kill the watcher |
+| `:agent` | [`HandleTranslatorTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/HandleTranslatorTest.kt) | 10 | agent-side device-handle translation into each client's `IdentifierFormat`: identity fast-paths, cross-platform rewrite + reverse-map, deterministic UUID/MAC synthesis, strict-mode + Android pass-through |
+| `:agent` | [`EngineBleBackendJvmTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/EngineBleBackendJvmTest.kt) | 4 | the JVM/`btleplug` engine advertises `descriptors` but not `rssi`/`conn.params`/`conn.priority` (degrade to `UNSUPPORTED`), and `CharNode.properties` carries real bits |
+| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/SessionEndToEndTest.kt) | 16 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority/conn-params round-trips, batched-scan flattening |
+| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt) | 12 | full op set over a real WS, restart→reconnect, subscription + conn-params replay, disconnect-not-replayed, auth accept/reject |
 | `:client-sdk` | [`BleAgentOverWebSocketTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/BleAgentOverWebSocketTest.kt) | 1 | the **production** agent handler over a real WS (stub radio) |
 | `:client-sdk` | [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt) | 5 | app code vs Kable's `Peripheral` runs unchanged remotely; observe; scan+factory; negotiated-MTU; factory threads an injected `DispatcherProvider` into the peripheral scope |
+| `:client-sdk` | [`RetryPolicyTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/RetryPolicyTest.kt) | 5 | default retry policy per op: connect retries a transient error, writes don't; per-call override + `None`; a permanent error is never retried |
 | `:client-sdk` | [`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/ErrorPathTest.kt) | 3 | write/read rejection surfaces + session stays usable; disconnect reflected in Kable state |
-| `:client-sdk` | [`RemoteAdvertisementIdentifierTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/RemoteAdvertisementIdentifierTest.kt) | 2 | reading a remote advertisement's `identifier` for a UUID handle doesn't throw (the Android MAC-validation crash) |
+| `:client-sdk` | [`RemoteAdvertisementIdentifierTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/RemoteAdvertisementIdentifierTest.kt) | 1 | reading a remote advertisement's `identifier` for a UUID handle doesn't throw (the Android MAC-validation crash) |
+| `:client-sdk` | [`RemoteIdentifierJvmTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/RemoteIdentifierJvmTest.kt) | 2 | a peripheral's `identifier` round-trips a UUID handle on a macOS host; a foreign-format handle surfaces a clear exception off-macOS |
 
 ### The test doubles
 
@@ -168,7 +172,7 @@ The fakes are first-class — they're what made hardware-free development possib
 
 ## The native Rust agent (`agent-rs`) tests
 
-Run with `cd agent-rs && cargo test` — **20 tests**, no hardware. Alongside the codec
+Run with `cd agent-rs && cargo test` — **40 tests**, no hardware. Alongside the codec
 round-trips and `PeripheralRegistry` lease/slot tests, the key suite is
 [`src/protocol/interop_tests.rs`](../agent-rs/src/protocol/interop_tests.rs): it decodes
 **byte-for-byte CBOR captured from the Kotlin codec** and asserts the reconstructed

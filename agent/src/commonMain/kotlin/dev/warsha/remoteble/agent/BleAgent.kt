@@ -25,6 +25,7 @@ import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -91,6 +92,43 @@ class BleAgent(
     private val scanJobs = mutableMapOf<Long, Job>()
     private val observeJobs = mutableMapOf<Long, Job>()
 
+    // Per-device write ordering (0.8.3 / feature C). Every command runs on its own coroutine, so a
+    // pipelined write-without-response burst would otherwise race into `backend.write` out of order
+    // and defeat the radio's FIFO GATT queue. We chain writes per real device handle: each write
+    // awaits the previous write's completion before touching the backend. The chain is *built* in
+    // the sequential decode loop ([reserveWriteTurn]), so it links writes in submission order even
+    // though the coroutines that drain it run concurrently. Only writes to the *same* device
+    // serialize — reads and writes to other devices stay fully concurrent. Guarded by [writeChain].
+    private val writeChain = Mutex()
+    private val writeChainTails = mutableMapOf<String, CompletableDeferred<Unit>>()
+
+    /** A write's slot in its device's ordering chain: await [predecessor], then complete [mine]. */
+    private class WriteTurn(val predecessor: CompletableDeferred<Unit>?, val mine: CompletableDeferred<Unit>)
+
+    /**
+     * Reserves the next turn in [realDevice]'s write chain, returning the predecessor to await (or
+     * null if none is pending) and this write's completion signal. **Must be called from the decode
+     * loop, in submission order**, so the chain reflects that order rather than coroutine-launch race.
+     */
+    private suspend fun reserveWriteTurn(realDevice: String): WriteTurn = writeChain.withLock {
+        val predecessor = writeChainTails[realDevice]?.takeUnless { it.isCompleted }
+        val mine = CompletableDeferred<Unit>()
+        writeChainTails[realDevice] = mine
+        WriteTurn(predecessor, mine)
+    }
+
+    /** Drops a device's write-chain tail once it can hold no more successors (on disconnect). */
+    private suspend fun evictWriteChain(realDevice: String) = writeChain.withLock {
+        writeChainTails.remove(realDevice)
+    }
+
+    /** Reserves a [WriteTurn] for a `Command` iff it's an [Op.Write]; other ops don't order. */
+    private suspend fun reserveWriteTurnFor(frame: Command): WriteTurn? {
+        val op = frame.op
+        if (op !is Op.Write) return null
+        return reserveWriteTurn(translator.toReal(op.device.value))
+    }
+
     // The capabilities negotiated with this client (clientWanted ∩ supported), set on the
     // handshake. Gates agent→client features the client must opt into to decode — sending an
     // event a client never negotiated would break its decode loop.
@@ -123,6 +161,7 @@ class BleAgent(
                 observer.onClientLog(clientId, "unsolicited disconnect: $handle")
                 emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED, reason = reason))
                 translator.evict(handle)
+                evictWriteChain(handle)
                 emitSlotsIfNegotiated()
             } catch (e: CancellationException) {
                 throw e
@@ -152,9 +191,12 @@ class BleAgent(
                 // are in flight; the permit is released when the command's coroutine finishes.
                 is Command -> {
                     commandLimiter.acquire()
+                    // Reserve the write's ordering turn HERE, on the sequential decode loop, so a
+                    // burst chains in submission order before the concurrent coroutines pick it up.
+                    val writeTurn = reserveWriteTurnFor(frame)
                     scope.launch {
                         try {
-                            handle(frame)
+                            handle(frame, writeTurn)
                         } finally {
                             commandLimiter.release()
                         }
@@ -174,7 +216,7 @@ class BleAgent(
         }
     }
 
-    private suspend fun handle(cmd: Command) {
+    private suspend fun handle(cmd: Command, writeTurn: WriteTurn? = null) {
         try {
             // Reverse-translate the op's client-facing handle back to the real radio handle up front,
             // so connection tracking, the registry, and the backend all deal only in real handles.
@@ -185,8 +227,16 @@ class BleAgent(
                 is Op.Discover -> reply(cmd.cid, OpResult.Ok(ResultPayload.Services(backend.discover(op.device))))
                 is Op.Read -> reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(backend.read(op.device, op.char))))
                 is Op.Write -> {
-                    backend.write(op.device, op.char, op.value, op.withResponse)
-                    reply(cmd.cid, OpResult.Ok())
+                    // Honor this write's ordering turn: wait for the prior same-device write to reach
+                    // the backend, then complete our signal for the next — even on failure/cancel, so
+                    // a rejected write never wedges the chain. See [reserveWriteTurn].
+                    try {
+                        writeTurn?.predecessor?.await()
+                        backend.write(op.device, op.char, op.value, op.withResponse)
+                        reply(cmd.cid, OpResult.Ok())
+                    } finally {
+                        writeTurn?.mine?.complete(Unit)
+                    }
                 }
                 is Op.RequestMtu -> reply(cmd.cid, OpResult.Ok(ResultPayload.Mtu(backend.requestMtu(op.device, op.mtu))))
                 is Op.ReadRssi -> reply(cmd.cid, OpResult.Ok(ResultPayload.Rssi(backend.readRssi(op.device))))
@@ -208,6 +258,10 @@ class BleAgent(
                 }
                 is Op.RequestConnectionPriority -> {
                     backend.requestConnectionPriority(op.device, op.priority)
+                    reply(cmd.cid, OpResult.Ok())
+                }
+                is Op.SetConnParams -> {
+                    backend.setConnParams(op.device, op.profile, op.hint)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.ScanStart -> {
@@ -293,6 +347,7 @@ class BleAgent(
         observer.onClientLog(clientId, "disconnected ${device.value}")
         emit(AgentEvent.ConnectionState(device, BleConnState.DISCONNECTED))
         translator.evict(device.value)
+        evictWriteChain(device.value)
         emitSlotsIfNegotiated()
         return OpResult.Ok()
     }

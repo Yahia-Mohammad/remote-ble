@@ -5,7 +5,9 @@ import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -109,6 +111,16 @@ interface BleBackend {
      */
     suspend fun readRssi(device: DeviceHandle): Int =
         bleError(ErrorKind.UNSUPPORTED, message = "connected RSSI not supported")
+
+    /**
+     * Requests connection parameters (capability: `conn.params`). Optional, like the pairing ops;
+     * the default reports [ErrorKind.UNSUPPORTED]. Supersedes [requestConnectionPriority] — a
+     * backend that implements this typically implements both from the same platform binding.
+     * [hint] is reserved wire space with no shipping engine honoring it yet; implementations may
+     * ignore it. Android-only in practice today.
+     */
+    suspend fun setConnParams(device: DeviceHandle, profile: ConnProfile, hint: ConnParamHint?): Unit =
+        bleError(ErrorKind.UNSUPPORTED, message = "connection parameters not supported")
 
     /** Checks if the peripheral is currently connected. */
     fun isConnected(device: DeviceHandle): Boolean = false

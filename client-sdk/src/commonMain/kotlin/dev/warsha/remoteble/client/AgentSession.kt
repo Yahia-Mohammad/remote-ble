@@ -23,7 +23,9 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
@@ -70,6 +72,18 @@ interface AgentSession {
      * attempt**. See [RetryPolicy].
      */
     suspend fun request(op: Op, timeout: Duration = DEFAULT_TIMEOUT, retry: RetryPolicy? = null): OpResult
+
+    /**
+     * Sends [op] and returns immediately with a [Deferred] for its eventual [OpResult], instead of
+     * suspending for the full round trip like [request]. The frame is on the wire **before this
+     * function returns** — so a caller that calls [dispatch] several times in a row from one
+     * coroutine, without awaiting in between, gets those frames sent in that same order. This is
+     * the primitive a pipelining caller needs (e.g. a write-without-response burst that wants
+     * several requests in flight without paying one round trip per write). It performs the same
+     * single send-and-track step that one iteration of [request]'s attempt loop does, minus the
+     * blocking await and the retry policy: no retry, single attempt only.
+     */
+    suspend fun dispatch(op: Op, timeout: Duration = DEFAULT_TIMEOUT): Deferred<OpResult>
 
     /**
      * Hot, shared stream of all events; consumers filter by subId/scanId. Returned as a
@@ -206,6 +220,7 @@ class DefaultAgentSession(
     private val activeConnections = mutableSetOf<DeviceHandle>()
     private val activeSubscriptions = mutableMapOf<Long, Op.ObserveStart>()
     private val activeScans = mutableMapOf<Long, Op.ScanStart>()
+    private val lastConnParams = mutableMapOf<DeviceHandle, Op.SetConnParams>()
 
     override val transportState: StateFlow<TransportState> get() = transport.state
 
@@ -271,13 +286,22 @@ class DefaultAgentSession(
         }
     }
 
-    /** One attempt at [op]: send, await the reply within [timeout], and record it for replay. */
-    private suspend fun attemptRequest(op: Op, timeout: Duration): OpResult {
-        if (transport.state.value != TransportState.CONNECTED) {
-            return OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "transport not connected"))
-        }
+    /**
+     * The shared send-and-register step behind both [attemptRequest] and [dispatch]: assigns a
+     * [cid], registers a pending slot, and puts [op]'s `Command` on the wire — **synchronously**,
+     * so successive calls from one coroutine send in call order. Returns the [cid] and the
+     * [CompletableDeferred] the reply will land in, already pre-completed with a `TRANSPORT_LOST`
+     * `Err` when the link is down or the send throws (so callers await it uniformly). Rethrows on
+     * cancellation. The caller owns the await, the per-attempt timeout, `removePending`, and
+     * [trackForReplay] — those differ between the blocking and pipelined paths.
+     */
+    private suspend fun sendCommand(op: Op): Pair<Long, CompletableDeferred<OpResult>> {
         val cid = ids.incrementAndFetch()
         val deferred = CompletableDeferred<OpResult>()
+        if (transport.state.value != TransportState.CONNECTED) {
+            deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "transport not connected")))
+            return cid to deferred
+        }
         pendingLock.withLock { pending[cid] = deferred }
         try {
             transport.send(codec.encode(Command(cid, op)))
@@ -286,8 +310,13 @@ class DefaultAgentSession(
             throw e
         } catch (e: Throwable) {
             removePending(cid)
-            return OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = e.message))
+            deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = e.message)))
         }
+        return cid to deferred
+    }
+
+    /** Awaits [deferred] within [timeout], cleans up its pending slot, and records it for replay. */
+    private suspend fun awaitReply(op: Op, cid: Long, deferred: CompletableDeferred<OpResult>, timeout: Duration): OpResult {
         val result = try {
             withTimeoutOrNull(timeout) { deferred.await() }
                 ?: OpResult.Err(AgentError(ErrorKind.TIMEOUT))
@@ -296,6 +325,20 @@ class DefaultAgentSession(
         }
         trackForReplay(op, result)
         return result
+    }
+
+    /** One attempt at [op]: send, await the reply within [timeout], and record it for replay. */
+    private suspend fun attemptRequest(op: Op, timeout: Duration): OpResult {
+        val (cid, deferred) = sendCommand(op)
+        return awaitReply(op, cid, deferred, timeout)
+    }
+
+    override suspend fun dispatch(op: Op, timeout: Duration): Deferred<OpResult> {
+        // sendCommand puts the frame on the wire before returning; the await/timeout/cleanup then
+        // runs off the caller's coroutine (on the session scope) so dispatch() returns immediately,
+        // letting the caller send its next frame without waiting on this one's Reply.
+        val (cid, deferred) = sendCommand(op)
+        return scope.async { awaitReply(op, cid, deferred, timeout) }
     }
 
     override fun events(): SharedFlow<AgentEvent> = _events.asSharedFlow()
@@ -325,11 +368,13 @@ class DefaultAgentSession(
                 is Op.Disconnect -> {
                     activeConnections -= op.device
                     activeSubscriptions.values.removeAll { it.device == op.device }
+                    lastConnParams -= op.device
                 }
                 is Op.ObserveStart -> activeSubscriptions[op.subId] = op
                 is Op.ObserveStop -> activeSubscriptions.remove(op.subId)
                 is Op.ScanStart -> activeScans[op.scanId] = op
                 is Op.ScanStop -> activeScans.remove(op.scanId)
+                is Op.SetConnParams -> lastConnParams[op.device] = op
                 else -> Unit
             }
         }
@@ -349,12 +394,18 @@ class DefaultAgentSession(
         val connections: List<DeviceHandle>
         val subscriptions: List<Op.ObserveStart>
         val scans: List<Op.ScanStart>
+        val connParams: List<Op.SetConnParams>
         replayLock.withLock {
             connections = activeConnections.toList()
             subscriptions = activeSubscriptions.values.toList()
             scans = activeScans.values.toList()
+            connParams = lastConnParams.values.toList()
         }
         connections.forEach { request(Op.Connect(it)) }
+        // After the device's Connect: params need a live link, and replaying them is idempotent
+        // like the rest of this reconcile, so a transport blip can't quietly revert a peripheral
+        // to a battery-hungry interval.
+        connParams.forEach { request(it) }
         subscriptions.forEach { request(it) }
         scans.forEach { request(it) }
     }

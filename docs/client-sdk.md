@@ -152,6 +152,38 @@ to `None`**, because re-issuing a `Write` whose reply was merely lost would appl
 a runtime gate. `timeout` on `request()` is **per attempt**; a `TRANSPORT_LOST` retry waits (up to
 the policy's delay) for the link to reconnect rather than busy-failing.
 
+### The completion contract: exact on success, ambiguous on lost-reply
+
+The agent's `EngineBleBackend` is exact on the radio — reads and with-response writes resume on the
+real GATT completion callback, not a poll (see [design-decisions.md](design-decisions.md#known-boundaries--extension-points)).
+But the client never observes that callback directly; it only learns the outcome via a `Reply(cid)`
+over the WebSocket, and the agent sends that Reply **only after `backend.write`/`backend.read`
+returns**. Two consequences follow directly from that ordering:
+
+- **A delivered `Ok` is exact, not probabilistic.** It cannot precede the agent's real completion, so
+  `write()` returning ⟺ (for with-response) the peripheral acknowledged at the ATT layer; `read()`
+  returning ⟺ the actual `onCharacteristicRead` bytes. There is no false positive to guard against.
+- **A lost Reply is irreducibly ambiguous, not a bug to fix.** If the Reply is dropped, the request
+  times out, or the transport dies in the window between the agent completing and the Reply landing,
+  the client sees `TIMEOUT` / `TRANSPORT_LOST` — **even though the write may have already succeeded on
+  the radio.** No amount of agent-side exactness removes this; it's the at-least-once/at-most-once
+  split any request/reply protocol has over an unreliable transport.
+
+This is why **writes, descriptor-writes, and `Pair` are non-idempotent and default to
+`RetryPolicies.None`** (above) and are **not** in the reconcile-on-reconnect replay set (`Connect` /
+`ObserveStart` / `Scan` / `SetConnParams` are — see `trackForReplay`): auto-retrying or replaying a
+mutating op whose Reply was merely lost risks a silent double-apply (e.g. double-dispensing,
+double-incrementing) — the exact hazard [`Op.isIdempotent`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Op.kt)'s
+KDoc warns about. A `TIMEOUT`/`TRANSPORT_LOST` on a write is the SDK deliberately refusing to guess;
+the app owns the reconcile (e.g. a read-back, or an idempotent retry it constructs itself). Idempotent
+ops (read, connect…) *do* auto-retry on transient errors, because repeating them is harmless.
+
+**Write-without-response (`withResponse = false`) has one more layer of ambiguity, inherent to BLE
+itself:** an `Ok` there means "handed to the local radio controller," not "the peripheral received
+it" — WWR has no ATT-level acknowledgement, so nothing (client, agent, or engine) can ever report
+peripheral-side rejection for it. Design idempotent writes or a read-back confirmation for WWR paths
+where that distinction matters.
+
 ### `defaultWebSocketHttpClient()` — per-platform engine
 
 [`WebSocketClient.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.kt)
@@ -182,12 +214,21 @@ Turns the byte pipe into a request/response + event API.
 interface AgentSession {
     val transportState: StateFlow<TransportState>
     suspend fun request(op: Op, timeout: Duration = DEFAULT_TIMEOUT): OpResult
+    suspend fun dispatch(op: Op, timeout: Duration = DEFAULT_TIMEOUT): Deferred<OpResult>
     fun events(): Flow<AgentEvent>     // hot, shared; consumers filter by subId/scanId
     fun nextStreamId(): Long           // session-global id for tagging streams
     fun fireAndForget(op: Op)          // best-effort teardown (scan.stop / observe.stop)
     companion object { val DEFAULT_TIMEOUT = 15.seconds }
 }
 ```
+
+**`dispatch`** (0.8.3) sends [op]'s frame and returns a `Deferred<OpResult>` immediately, instead of
+suspending for the whole round trip like `request`. The send happens *before* `dispatch` returns, so
+a caller invoking it several times in a row from one coroutine — the
+[`writeWithoutResponseBurst`](#writewithoutresponseburst--pipelining-not-a-wire-change-083--feature-c)
+use case below — gets its frames on the wire in that same order without waiting on any Reply in
+between. It's the same single-attempt send-and-track logic `request`'s per-attempt path uses
+internally, just exposed without the blocking await; ordinary callers never need `dispatch` directly.
 
 ### `DefaultAgentSession`
 
@@ -319,15 +360,16 @@ class RemoteGattClient(
     suspend fun discover(): List<ServiceNode>
     suspend fun read(char: CharRef): ByteArray
     suspend fun write(char: CharRef, value: ByteArray, withResponse: Boolean)
+    suspend fun writeWithoutResponseBurst(char: CharRef, values: List<ByteArray>, window: Int = 8): List<OpResult>
     suspend fun requestMtu(mtu: Int): Int
     fun observe(char: CharRef, onSubscription: suspend () -> Unit = {}): Flow<ByteArray>
 }
 ```
 
 Each request-style method is a one-liner: `session.request(op, timeout).orThrow()` (or
-`.payloadAs<T>()`). The interesting part is **`observe`**, which bridges the
-request side (observe.start/stop) and the event side (notifications by `subId`) inside
-a `channelFlow`:
+`.payloadAs<T>()`). **`writeWithoutResponseBurst`** is the exception — see below — and
+**`observe`** bridges the request side (observe.start/stop) and the event side (notifications by
+`subId`) inside a `channelFlow`:
 
 ```kotlin
 fun observe(char, onSubscription) = channelFlow {
@@ -349,6 +391,52 @@ Key properties:
   delivering once the session replays `ObserveStart`.
 - Cancellation issues a best-effort `ObserveStop` via `fireAndForget` (a fire-and-
   forget request with a short timeout).
+
+### `writeWithoutResponseBurst` — pipelining, not a wire change (0.8.3 / feature C)
+
+Tracing a serial WWR loop end-to-end shows the dominant cost isn't the radio — it's **N sequential
+WebSocket round trips**, one per `write()` call, because `session.request()` suspends until its
+Reply lands before the next write is even sent. `writeWithoutResponseBurst` fixes that without
+touching the wire: it uses [`AgentSession.dispatch`](#agentsession) to send up to `window` frames
+before awaiting any of their Replies, instead of one-at-a-time.
+
+```kotlin
+suspend fun writeWithoutResponseBurst(
+    char: CharRef,
+    values: List<ByteArray>,
+    window: Int = DEFAULT_BURST_WINDOW,   // 8
+): List<OpResult> {
+    val inFlight = ArrayDeque<Deferred<OpResult>>()
+    for (value in values) {
+        if (inFlight.size >= window) results += inFlight.removeFirst().await()
+        inFlight += session.dispatch(Op.Write(handle, char, value, withResponse = false), timeouts.op)
+    }
+    while (inFlight.isNotEmpty()) results += inFlight.removeFirst().await()
+    return results
+}
+```
+
+- **Submission order is preserved end-to-end.** `dispatch` sends its frame synchronously before
+  returning, and this function calls it from a single coroutine in a plain loop — so frames *land on
+  the wire* in submission order. The reference agent then upholds it on its side: although it runs
+  each `Command` on its own coroutine, it **chains writes per device** (`BleAgent` awaits the prior
+  same-device write before calling `backend.write`), so a pipelined burst reaches the radio's FIFO
+  GATT queue in submission order rather than coroutine-launch race order. Writes to *different*
+  devices and non-write ops stay fully concurrent. (This per-device write ordering is now part of the
+  agent contract — a third-party agent must uphold it too.) The ordering is guaranteed in code and
+  asserted in CI (`BleAgentTest`); end-to-end on-radio confirmation is batched into the next
+  hardware-rig round (plan §2d/§3). WWR *delivery* is still best-effort by BLE design, independent
+  of order.
+- **Bounded, not silent buffering.** At most `window` requests are ever in flight; a `window` of 1
+  degenerates to today's serial-await behavior.
+- **Independent failures.** Each value gets its own `OpResult` in submission order; one write
+  failing (e.g. a local queue-full) doesn't cancel the rest of the burst.
+- **WWR only.** With-response writes keep their per-write ack via plain `write()` — coalescing
+  isn't offered there because it would erode the one completion signal WithResponse gives you.
+
+`RemotePeripheral.writeWithoutResponseBurst(characteristic, values, window)` is the Kable-facing
+wrapper — see [`RemotePeripheral`](#remoteperipheral) — returning `List<Result<Unit>>` instead of
+`List<OpResult>`.
 
 ### `RemoteScanSource`
 
@@ -430,9 +518,13 @@ state:
 
 `read(Descriptor)`/`write(Descriptor)` and `pair()/unpair()/bondState` are supported when the
 agent advertises the `descriptors`/`pairing` capabilities (otherwise the op is answered with
-`UNSUPPORTED`). The one remaining boundary is `rssi()`, which has no wire op and throws
-`UnsupportedOperationException`. `identifier` is `lazy` and derived from the opaque agent handle
-via `deviceHandleToIdentifier` (see below) — it isn't needed to operate the peripheral.
+`UNSUPPORTED`). Two further ops sit *beyond* Kable's `Peripheral` surface (RemoteBLE extensions on
+the concrete `RemotePeripheral`, outside the local/remote parity guarantee): `rssi()` (wire op
+`Op.ReadRssi`, capability `rssi` — a live connected read on Android/Apple agents) and
+`setConnParams(profile, hint)` (wire op `Op.SetConnParams`, capability `conn.params` — Android
+agents today). Both answer `UNSUPPORTED` where the agent lacks the capability rather than throwing.
+`identifier` is `lazy` and derived from the opaque agent handle via `deviceHandleToIdentifier`
+(see below) — it isn't needed to operate the peripheral.
 
 ### `RemoteScanner` and `RemoteAdvertisement`
 

@@ -248,6 +248,15 @@ fn map_op_device(op: Op, f: impl Fn(DeviceHandle) -> DeviceHandle) -> Op {
             priority,
         },
         Op::ReadRssi { device } => Op::ReadRssi { device: f(device) },
+        Op::SetConnParams {
+            device,
+            profile,
+            hint,
+        } => Op::SetConnParams {
+            device: f(device),
+            profile,
+            hint,
+        },
         other @ (Op::ScanStart { .. } | Op::ScanStop { .. } | Op::ObserveStop { .. }) => other,
     }
 }

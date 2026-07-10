@@ -9,7 +9,9 @@ import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.Command
+import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -148,6 +150,66 @@ class BleAgentTest {
     }
 
     @Test
+    fun concurrentWritesToOneDeviceReachBackendInSubmissionOrder() = runTest {
+        // Each command runs on its own coroutine, so a pipelined WWR burst could race into
+        // backend.write out of order (0.8.3 / feature C, plan §2d). This backend delays *longer*
+        // for earlier payloads — so without the agent's per-device write chain, the later
+        // (shorter-delay) writes would land first and `recorded` would come back reversed.
+        val recorded = mutableListOf<Int>()
+        val backend = object : BleBackend by FakeBleBackend() {
+            override suspend fun write(device: DeviceHandle, char: CharRef, value: ByteArray, withResponse: Boolean) {
+                val n = value.first().toInt()
+                kotlinx.coroutines.delay((100 - n).toLong()) // earlier writes wait longer
+                recorded += n
+            }
+        }
+        val h = Harness(backgroundScope, backend)
+
+        val count = 8
+        for (n in 0 until count) {
+            h.send(n.toLong(), Op.Write(device, char, byteArrayOf(n.toByte()), withResponse = false))
+        }
+        // Await every reply so all writes have completed before asserting.
+        for (n in 0 until count) assertIs<OpResult.Ok>(h.frames.reply(n.toLong()))
+
+        assertEquals(
+            (0 until count).toList(),
+            recorded,
+            "same-device writes must reach the backend in submission order despite per-command concurrency",
+        )
+    }
+
+    @Test
+    fun writesToDifferentDevicesAreNotSerializedByTheOrderingChain() = runTest {
+        // The write chain is *per device*: a slow write to device A must not hold up a write to
+        // device B. Device A's write blocks until released; device B's must complete meanwhile.
+        val deviceB = DeviceHandle("FA:KE:0B")
+        val aStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val completed = mutableListOf<String>()
+        val backend = object : BleBackend by FakeBleBackend() {
+            override suspend fun write(device: DeviceHandle, char: CharRef, value: ByteArray, withResponse: Boolean) {
+                val isA = value.first().toInt() and 0xFF == 0xAA
+                if (isA) {
+                    aStarted.complete(Unit)
+                    release.await() // device A's write is held open
+                }
+                completed += if (isA) "A" else "B"
+            }
+        }
+        val h = Harness(backgroundScope, backend)
+
+        h.send(1, Op.Write(device, char, byteArrayOf(0xAA.toByte()), withResponse = false)) // device A, blocks
+        aStarted.await()
+        h.send(2, Op.Write(deviceB, char, byteArrayOf(0xBB.toByte()), withResponse = false)) // device B, must proceed
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+        assertEquals(listOf("B"), completed, "device B's write must complete while device A's is still blocked")
+
+        release.complete(Unit)
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+    }
+
+    @Test
     fun unsolicitedRegistryDisconnectEmitsConnectionStateEvent() = runTest {
         // Simulates ConnectionWatcher detecting a peripheral vanished without an explicit
         // Disconnect op — the registry is the only thing that can tell this connection about it
@@ -230,6 +292,24 @@ class BleAgentTest {
     fun connectionPriorityIsUnsupportedWhenBackendDoesNotImplementIt() = runTest {
         val h = Harness(backgroundScope, MinimalBackend())
         h.send(1, Op.RequestConnectionPriority(device, ConnPriority.BALANCED))
+        assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
+    }
+
+    @Test
+    fun setConnParamsRoutesToBackend() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend)
+        val hint = ConnParamHint(minIntervalMs = 20.0, maxIntervalMs = 40.0, latency = 0, supervisionTimeoutMs = 5000)
+
+        h.send(1, Op.SetConnParams(device, ConnProfile.LOW_LATENCY, hint))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+        assertEquals(ConnProfile.LOW_LATENCY to hint, backend.lastConnParams)
+    }
+
+    @Test
+    fun setConnParamsIsUnsupportedWhenBackendDoesNotImplementIt() = runTest {
+        val h = Harness(backgroundScope, MinimalBackend())
+        h.send(1, Op.SetConnParams(device, ConnProfile.BALANCED))
         assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
     }
 

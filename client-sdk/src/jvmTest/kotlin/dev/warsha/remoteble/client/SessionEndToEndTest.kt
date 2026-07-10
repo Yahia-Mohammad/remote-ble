@@ -9,7 +9,9 @@ import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.Command
+import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
+import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -189,6 +191,19 @@ class SessionEndToEndTest {
     }
 
     @Test
+    fun setConnParamsResolvesWithAndWithoutHint() = runTest {
+        val h = Harness(backgroundScope)
+        h.awaitConnected()
+        val peripheral = RemoteGattClient(device, h.session)
+
+        peripheral.setConnParams(ConnProfile.LOW_LATENCY) // resolves (no throw)
+        peripheral.setConnParams(
+            ConnProfile.BALANCED,
+            ConnParamHint(minIntervalMs = 20.0, maxIntervalMs = 40.0, latency = 0, supervisionTimeoutMs = 5000),
+        )
+    }
+
+    @Test
     fun observeStreamsNotificationsAndUnsubscribesOnCancel() = runTest {
         val h = Harness(backgroundScope)
         h.awaitConnected()
@@ -295,5 +310,39 @@ class SessionEndToEndTest {
 
         val err = assertIs<OpResult.Err>(result)
         assertEquals(ErrorKind.TRANSPORT_LOST, err.error.kind)
+    }
+
+    @Test
+    fun writeDropBeforeReplySurfacesTransportLostAndIsNotRetried() = runTest {
+        // The completion-contract safety property (client-sdk.md): a write's Reply can be lost
+        // in the window after the agent completes it but before it lands. That's ambiguous —
+        // the write may have already succeeded on the radio — so the SDK deliberately does NOT
+        // paper over it with a silent retry (Write is non-idempotent → RetryPolicies.None).
+        var commandsSeen = 0
+        val transport = InMemoryTransport()
+        val codec = CborProtocolCodec()
+        val session = DefaultAgentSession(transport.client, codec, backgroundScope)
+        backgroundScope.launch {
+            transport.agentIncoming.collect { bytes ->
+                if (codec.decode(bytes) is Command) commandsSeen++
+                // Never reply — simulates the Reply being lost, not merely slow.
+            }
+        }
+        session.transportState.first { it == TransportState.CONNECTED }
+
+        val inFlight = async {
+            session.request(Op.Write(device, char, byteArrayOf(1, 2, 3), withResponse = true))
+        }
+        runCurrent() // let the write dispatch and register as pending before we drop the link
+        transport.drop()
+
+        val result = inFlight.await()
+        val err = assertIs<OpResult.Err>(result)
+        assertEquals(ErrorKind.TRANSPORT_LOST, err.error.kind)
+        assertEquals(
+            1,
+            commandsSeen,
+            "a write whose reply is lost must not be silently retried — the app owns the reconcile",
+        )
     }
 }

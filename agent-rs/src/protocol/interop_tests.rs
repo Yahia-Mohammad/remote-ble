@@ -14,7 +14,7 @@ use super::codec::{decode_cbor, encode_cbor};
 use super::errors::{AgentError, ErrorKind};
 use super::events::{AdvertisementDto, AgentEvent, BleConnState};
 use super::frame::Frame;
-use super::op::{CharRef, ConnPriority, DeviceHandle, IdentifierFormat, Op};
+use super::op::{CharRef, ConnParamHint, ConnPriority, ConnProfile, DeviceHandle, IdentifierFormat, Op};
 use super::results::{OpResult, ResultPayload};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -158,6 +158,41 @@ fn cmd_conn_priority_enum_is_string() {
             op: Op::RequestConnectionPriority {
                 device: dev(),
                 priority: ConnPriority::High,
+            },
+        },
+    );
+}
+
+#[test]
+fn cmd_set_conn_params_no_hint() {
+    assert_kotlin_decodes_to(
+        "9f63636d64bf636369641828626f709f6b636f6e6e2e706172616d73bf66646576696365bf6576616c75657141413a42423a43433a44443a45453a4646ff6770726f66696c656b4c4f575f4c4154454e4359ffffffff",
+        Frame::Command {
+            cid: 40,
+            op: Op::SetConnParams {
+                device: dev(),
+                profile: ConnProfile::LowLatency,
+                hint: None,
+            },
+        },
+    );
+}
+
+#[test]
+fn cmd_set_conn_params_with_hint() {
+    assert_kotlin_decodes_to(
+        "9f63636d64bf636369641832626f709f6b636f6e6e2e706172616d73bf66646576696365bf6576616c75657141413a42423a43433a44443a45453a4646ff6770726f66696c656842414c414e4345446468696e74bf6d6d696e496e74657276616c4d73fb40340000000000006d6d6178496e74657276616c4d73fb4044000000000000676c6174656e637900747375706572766973696f6e54696d656f75744d73191388ffffffffff",
+        Frame::Command {
+            cid: 50,
+            op: Op::SetConnParams {
+                device: dev(),
+                profile: ConnProfile::Balanced,
+                hint: Some(ConnParamHint {
+                    min_interval_ms: 20.0,
+                    max_interval_ms: 40.0,
+                    latency: 0,
+                    supervision_timeout_ms: 5000,
+                }),
             },
         },
     );

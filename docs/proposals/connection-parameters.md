@@ -2,7 +2,8 @@
 
 [← back to index](../README.md)
 
-- **Status:** Proposed — not scheduled
+- **Status:** Implemented in 0.8.2 — `conn.params` op + Android backend shipped; the fine-grained
+  `hint` path stays reserved (no engine honors it yet), so today it's the coarse Android profile only
 - **Type:** Capability-gated protocol extension
 - **Prior art:** ESPHome Bluetooth Proxy `BLE connection parameters API` (added ~ESPHome 2026.3.0)
 - **Relates to:** existing `conn.priority` capability (Android-only); [prior-art.md](../prior-art.md#part-a--remoteble-vs-esphome-bluetooth-proxy) Part A

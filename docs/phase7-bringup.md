@@ -93,37 +93,55 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080/agent"
 ```
 
-It runs nine checks and prints `PASS`/`FAIL` per step (process exits non-zero on any failure):
+It runs a series of checks — including the 0.8.3 exact-completion assertions (F) — and prints
+`PASS`/`FAIL` per step (process exits non-zero on any failure). It now pauses at three points for a
+debug-control toggle on the phone (bump the readable value, force a write error on, force it off
+again) plus the existing notify prompt:
 
 ```
 • Transport connects ... PASS — CONNECTED
 • Scan finds the peripheral ... PASS
 • Connect + discover services ... PASS — 1 services
 • Locate profile characteristics ... PASS
-• Read the readable characteristic ... PASS — 00
+• Read the readable characteristic (baseline) ... PASS — 00
+  >>> Now change the readable characteristic's value on the phone ('Bump readable value'), then press Enter <<<
+• Read exactness (F) — reflects the just-set bump, not a stale/cached value ... PASS — 01
 • Write (with response) ... PASS
 • Write (without response) ... PASS
 • Negotiated MTU write length ... PASS — 244 bytes
+  >>> Now toggle 'Force write error' ON on the phone, then press Enter <<<
+• Write-with-response error surfaces WRITE_FAILED (F) ... PASS — WRITE_FAILED as expected
+• WWR still returns Ok despite the same peripheral-side reject (inherent BLE limit, not a bug) ... PASS — Ok, as expected
+  >>> Now toggle 'Force write error' OFF on the phone, then press Enter <<<
+• Write-with-response succeeds again — a failed write never poisons the session ... PASS
   >>> Now press 'Notify (counter +1)' on the phone TWICE (within 60s) <<<
-• Observe 2 notifications ... PASS — 2 received: 01 02
+• Observe 2 notifications, no miss/dup ... PASS — 2 received: 01 02
 • Disconnect ... PASS
-RESULT: 9 passed, 0 failed
+RESULT: 14 passed, 0 failed
 ```
 
-When prompted, press **Notify** on the phone twice. A green run proves the headline promise on real
-hardware: app code written against Kable's `Peripheral` ran unchanged against a remote agent.
+When prompted: change the readable value, toggle the write-error control on then off, and press
+**Notify** twice. A green run proves the headline promise on real hardware — app code written against
+Kable's `Peripheral` ran unchanged against a remote agent — **and** that read/write-with-response
+completion is exact while WWR/notify remain best-effort by BLE design, not by implementation gap.
 
 ## What to shake out (EngineBleBackend)
 
 This is the first time [`EngineBleBackend`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt)
-meets a real radio. Watch for its known approximations (see
+meets a real radio. There is no polling anywhere in this path — `discover`/`read`/`write`/`observe` are
+direct Kable suspend calls that resume on the real GATT completion callbacks. Watch for (see
 [design-decisions.md](design-decisions.md)):
 
-- **Reads** poll the characteristic value by reference identity (no read-complete callback) — verify
-  the value returned is the one just set on the phone.
-- **Writes** are best-effort (no write-complete callback) — confirm the phone's write log matches.
-- **Notification streaming / discovery** use bounded polling — watch for missed or duplicated
-  notifications, and tune the polling/timeouts if reads or discovery are flaky.
+- **Reads** are exact — `peripheral.read()` resumes on Kable's `onCharacteristicRead` — verify the
+  value returned is the one just set on the phone (this is confirming exactness, not "polling
+  artifacts").
+- **Writes (with response)** are exact — resume on `onCharacteristicWrite`/the ATT write response —
+  confirm the phone's write log matches. **Writes without response** resume as soon as the write is
+  handed to the local controller; there is no ATT acknowledgement to wait for (a BLE protocol property,
+  not a gap in this backend) — confirm `Ok` still returns even when the peripheral would reject it.
+- **Notification streaming** uses Kable's `observe` Flow (CCCD-enable awaited on first collect, then
+  unacknowledged pushes) — watch for missed or duplicated deliveries, but there is no polling/timeout to
+  tune here.
 - **MTU** — confirm `maximumWriteValueLengthForType` reflects a real negotiated value, not the ATT
   default of 20 (= 23 − 3).
 
@@ -135,15 +153,24 @@ Two items only a real peripheral can validate:
   confirm the agent emits a `ConnectionState(DISCONNECTED)` that drives `RemotePeripheral` to
   `State.Disconnected` (today the agent only emits on an explicit `Op.Disconnect`; a backend
   connection-state stream is the clean follow-up).
-- **Write-without-response coalescing.** Drive a burst of `WriteType.WithoutResponse` writes and
-  measure throughput; this is where any coalescing optimization is validated.
+- **Write-without-response throughput.** Drive a burst of `WriteType.WithoutResponse` writes and
+  measure throughput/latency (`:e2e-runner`'s `ThroughputMain`); this establishes the baseline any
+  coalescing design (0.8.3 feature C) is measured against.
+- **Write-without-response *ordering* under pipelining (0.8.3 / C).** After measuring the baseline,
+  drive `RemotePeripheral.writeWithoutResponseBurst` with `window > 1` and confirm the peripheral's
+  write log records the payloads in submission order. Order is *guaranteed in code* on both sides —
+  the client sends in order and the agent chains writes per device (asserted in CI by
+  `BleAgentTest.concurrentWritesToOneDeviceReachBackendInSubmissionOrder`) — so this run is
+  confirming the plan's §2d/§3 invariant end-to-end on a real radio, not probing for an unfixed gap.
 
-Also exercise the **error paths** live: **Toggle write error** on the phone and confirm a write
-surfaces `WRITE_FAILED` on the client while the session stays usable.
+The **error paths** (write-with-response `WRITE_FAILED`, WWR still `Ok` on the same reject) are now
+exercised automatically by the runner's "Force write error" prompts above, not a separate manual step.
 
 ## What a successful run proves
 
 1. The agent runs on the Mac against a real radio.
-2. `:e2e-runner` reports **9 passed, 0 failed** against your test peripheral.
-3. The `EngineBleBackend` polling/timeout behavior is confirmed (or tuned) from the live run.
-4. Both follow-ups above are verified (unsolicited drop, write-without-response throughput).
+2. `:e2e-runner` reports **14 passed, 0 failed** against your test peripheral.
+3. The `EngineBleBackend` exact-completion behavior (read, write-with-response, notify-enable) is
+   confirmed on real hardware, and the inherent WWR/notify best-effort limits are confirmed as
+   BLE-design properties, not implementation gaps.
+4. Both follow-ups above are verified (unsolicited drop, write-without-response throughput baseline).

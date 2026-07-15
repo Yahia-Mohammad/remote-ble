@@ -10,19 +10,23 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use super::backend::BleBackend;
+use super::backend::{BleBackend, StreamKey};
 use crate::protocol::{
     errors::{AgentError, ErrorKind},
     events::{AdvertisementDto, AgentEvent, BleConnState},
-    op::{CharRef, DeviceHandle},
+    op::{CharRef, DeviceHandle, ScanFilter},
     results::{CharNode, ResultPayload, ServiceNode},
 };
 use crate::registry::peripheral_lease::PeripheralRegistry;
 
 pub struct BtleplugBackend {
     adapter: Adapter,
-    active_scans: Arc<Mutex<HashMap<i64, mpsc::UnboundedSender<AgentEvent>>>>,
+    active_scans: Arc<Mutex<HashMap<StreamKey, ScanSubscription>>>,
+    /// One notification-pump task per client subscription. The physical BLE subscription is
+    /// retained until the final local consumer for the characteristic stops observing.
+    active_observations: Arc<Mutex<HashMap<StreamKey, Observation>>>,
     /// Connected devices -> the owning client's event channel, so the adapter
     /// event listener can forward an unsolicited BLE disconnect to the client.
     /// Keyed by device handle (`PeripheralId::to_string()`).
@@ -41,6 +45,17 @@ pub struct BtleplugBackend {
 /// Last-known `(local name, service UUIDs)` for a device within a scan session, used to
 /// backfill sparse advertisement packets (see [coalesce_identity]).
 type ScanIdentity = (Option<String>, Vec<String>);
+
+struct Observation {
+    device: DeviceHandle,
+    char_ref: CharRef,
+    task: JoinHandle<()>,
+}
+
+struct ScanSubscription {
+    filters: Vec<ScanFilter>,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+}
 
 /// How long [BtleplugBackend::spawn_liveness_prober]'s probe waits before treating the link
 /// as dead.
@@ -71,11 +86,13 @@ impl BtleplugBackend {
         })?;
 
         let active_scans = Arc::new(Mutex::new(HashMap::new()));
+        let active_observations = Arc::new(Mutex::new(HashMap::new()));
         let connected = Arc::new(Mutex::new(HashMap::new()));
         let scan_identity = Arc::new(Mutex::new(HashMap::new()));
         let backend = Self {
             adapter,
             active_scans,
+            active_observations,
             connected,
             registry,
             scan_identity,
@@ -172,15 +189,23 @@ impl BtleplugBackend {
                     match event {
                         btleplug::api::CentralEvent::DeviceDiscovered(id)
                         | btleplug::api::CentralEvent::DeviceUpdated(id) => {
-                            let senders: Vec<(i64, mpsc::UnboundedSender<AgentEvent>)> = {
+                            let subscribers: Vec<(StreamKey, ScanSubscription)> = {
                                 active_scans
                                     .lock()
                                     .iter()
-                                    .map(|(k, v)| (*k, v.clone()))
+                                    .map(|(key, subscription)| {
+                                        (
+                                            *key,
+                                            ScanSubscription {
+                                                filters: subscription.filters.clone(),
+                                                event_tx: subscription.event_tx.clone(),
+                                            },
+                                        )
+                                    })
                                     .collect()
                             };
 
-                            if !senders.is_empty()
+                            if !subscribers.is_empty()
                                 && let Ok(peripheral) = adapter.peripheral(&id).await
                                 && let Ok(Some(props)) = peripheral.properties().await
                             {
@@ -213,11 +238,14 @@ impl BtleplugBackend {
                                     props.local_name,
                                     id
                                 );
-                                for (scan_id, tx) in senders {
-                                    let _ = tx.send(AgentEvent::ScanResult {
-                                        scan_id,
-                                        advertisement: dto.clone(),
-                                    });
+                                for (stream, subscription) in subscribers {
+                                    if scan_matches(&subscription.filters, &dto) {
+                                        let _ =
+                                            subscription.event_tx.send(AgentEvent::ScanResult {
+                                                scan_id: stream.local_id,
+                                                advertisement: dto.clone(),
+                                            });
+                                    }
                                 }
                             }
                         }
@@ -382,13 +410,14 @@ impl BleBackend for BtleplugBackend {
 
     async fn start_scan(
         &self,
-        scan_id: i64,
+        stream: StreamKey,
+        filters: Vec<ScanFilter>,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), AgentError> {
-        tracing::info!("Received start_scan request (scan_id: {})", scan_id);
+        tracing::info!("Received start_scan request (scan_id: {})", stream.local_id);
         let is_first = {
             let mut scans = self.active_scans.lock();
-            scans.insert(scan_id, event_tx);
+            scans.insert(stream, ScanSubscription { filters, event_tx });
             scans.len() == 1
         };
 
@@ -397,7 +426,7 @@ impl BleBackend for BtleplugBackend {
             if let Err(e) = self.adapter.start_scan(BtleScanFilter::default()).await {
                 // Don't leak the registration we just made if the radio never started scanning,
                 // or a later stop_scan would never bring the map back to empty.
-                self.active_scans.lock().remove(&scan_id);
+                self.active_scans.lock().remove(&stream);
                 return Err(AgentError::new(
                     ErrorKind::GattError,
                     Some(format!("Failed to start scan: {}", e)),
@@ -407,11 +436,11 @@ impl BleBackend for BtleplugBackend {
         Ok(())
     }
 
-    async fn stop_scan(&self, scan_id: i64) -> Result<(), AgentError> {
-        tracing::info!("Received stop_scan request (scan_id: {})", scan_id);
+    async fn stop_scan(&self, stream: StreamKey) -> Result<(), AgentError> {
+        tracing::info!("Received stop_scan request (scan_id: {})", stream.local_id);
         let should_stop = {
             let mut scans = self.active_scans.lock();
-            scans.remove(&scan_id);
+            scans.remove(&stream);
             scans.is_empty()
         };
 
@@ -420,6 +449,30 @@ impl BleBackend for BtleplugBackend {
             // Last scan ended: drop the coalescing memory so identity can't bleed into a future
             // scan and the map can't grow unbounded across the process lifetime (see the field).
             self.scan_identity.lock().clear();
+        }
+        Ok(())
+    }
+
+    async fn stop_connection_streams(&self, connection: u64) -> Result<(), AgentError> {
+        let should_stop_scan = {
+            let mut scans = self.active_scans.lock();
+            scans.retain(|stream, _| stream.connection != connection);
+            scans.is_empty()
+        };
+        if should_stop_scan {
+            let _ = self.adapter.stop_scan().await;
+            self.scan_identity.lock().clear();
+        }
+
+        let observation_keys: Vec<StreamKey> = self
+            .active_observations
+            .lock()
+            .keys()
+            .filter(|stream| stream.connection == connection)
+            .copied()
+            .collect();
+        for stream in observation_keys {
+            self.stop_observe(stream).await?;
         }
         Ok(())
     }
@@ -540,24 +593,37 @@ impl BleBackend for BtleplugBackend {
     async fn request_mtu(
         &self,
         _device: &DeviceHandle,
-        mtu: i32,
+        _mtu: i32,
     ) -> Result<ResultPayload, AgentError> {
-        Ok(ResultPayload::Mtu { mtu })
+        // btleplug does not expose negotiated ATT MTU on the supported desktop backends. Echoing
+        // the requested value would falsely claim a negotiation succeeded.
+        Err(AgentError::new(
+            ErrorKind::Unsupported,
+            Some("btleplug backend cannot negotiate or report ATT MTU".into()),
+        ))
     }
 
     async fn start_observe(
         &self,
-        sub_id: i64,
+        stream: StreamKey,
         device: &DeviceHandle,
         char_ref: &CharRef,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), AgentError> {
+        // Replacing the same connection-local subscription must retire its old pump first.
+        self.stop_observe(stream).await?;
         let peripheral = self.find_peripheral(device).await?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
-        peripheral
-            .subscribe(&characteristic)
-            .await
-            .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
+        let needs_subscribe =
+            !self.active_observations.lock().values().any(|observation| {
+                observation.device == *device && observation.char_ref == *char_ref
+            });
+        if needs_subscribe {
+            peripheral
+                .subscribe(&characteristic)
+                .await
+                .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
+        }
 
         let mut notifications = peripheral
             .notifications()
@@ -565,12 +631,12 @@ impl BleBackend for BtleplugBackend {
             .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
 
         let target_uuid = characteristic.uuid;
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Some(notification) = notifications.next().await {
                 if notification.uuid == target_uuid
                     && event_tx
                         .send(AgentEvent::Notification {
-                            sub_id,
+                            sub_id: stream.local_id,
                             value: notification.value,
                         })
                         .is_err()
@@ -579,11 +645,36 @@ impl BleBackend for BtleplugBackend {
                 }
             }
         });
-
+        self.active_observations.lock().insert(
+            stream,
+            Observation {
+                device: device.clone(),
+                char_ref: char_ref.clone(),
+                task,
+            },
+        );
         Ok(())
     }
 
-    async fn stop_observe(&self, _sub_id: i64) -> Result<(), AgentError> {
+    async fn stop_observe(&self, stream: StreamKey) -> Result<(), AgentError> {
+        let observation = self.active_observations.lock().remove(&stream);
+        let Some(observation) = observation else {
+            return Ok(());
+        };
+
+        observation.task.abort();
+        let _ = observation.task.await;
+        let has_other_observer = self.active_observations.lock().values().any(|other| {
+            other.device == observation.device && other.char_ref == observation.char_ref
+        });
+        if !has_other_observer {
+            let peripheral = self.find_peripheral(&observation.device).await?;
+            let characteristic = find_characteristic(&peripheral, &observation.char_ref)?;
+            peripheral
+                .unsubscribe(&characteristic)
+                .await
+                .map_err(|e| AgentError::new(ErrorKind::GattError, Some(e.to_string())))?;
+        }
         Ok(())
     }
 }
@@ -617,10 +708,34 @@ fn coalesce_identity(
     (resolved_name, resolved_uuids)
 }
 
+/// Applies the protocol's per-subscriber scan semantics after adapter fan-out. Filters are ORed;
+/// populated fields within an individual filter are ANDed. An empty filter list (or empty filter)
+/// matches every advertisement.
+fn scan_matches(filters: &[ScanFilter], advertisement: &AdvertisementDto) -> bool {
+    filters.is_empty()
+        || filters.iter().any(|filter| {
+            let name_matches = filter
+                .name
+                .as_ref()
+                .is_none_or(|name| advertisement.name.as_deref() == Some(name.as_str()));
+            let service_matches = filter.service.as_ref().is_none_or(|service| {
+                advertisement
+                    .service_uuids
+                    .iter()
+                    .any(|uuid| uuid.eq_ignore_ascii_case(service))
+            });
+            name_matches && service_matches
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::coalesce_identity;
-    use std::collections::HashMap;
+    use super::{coalesce_identity, scan_matches};
+    use crate::protocol::{
+        events::AdvertisementDto,
+        op::{DeviceHandle, ScanFilter},
+    };
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     fn retains_last_known_name_and_uuids_when_a_later_packet_omits_them() {
@@ -632,11 +747,17 @@ mod tests {
             Some("Heart Monitor".to_string()),
             vec!["180d".to_string()],
         );
-        assert_eq!(first, (Some("Heart Monitor".to_string()), vec!["180d".to_string()]));
+        assert_eq!(
+            first,
+            (Some("Heart Monitor".to_string()), vec!["180d".to_string()])
+        );
 
         // A bare refresh: no name, no service UUIDs -> identity is backfilled.
         let second = coalesce_identity(&mut seen, "dev", None, Vec::new());
-        assert_eq!(second, (Some("Heart Monitor".to_string()), vec!["180d".to_string()]));
+        assert_eq!(
+            second,
+            (Some("Heart Monitor".to_string()), vec!["180d".to_string()])
+        );
     }
 
     #[test]
@@ -670,5 +791,48 @@ mod tests {
         // A fresh scan session: a nameless packet must NOT resurrect the previous scan's identity.
         let after = coalesce_identity(&mut seen, "dev", None, Vec::new());
         assert_eq!(after, (None, Vec::<String>::new()));
+    }
+
+    #[test]
+    fn applies_name_and_service_filters_per_subscriber() {
+        let advertisement = AdvertisementDto {
+            device: DeviceHandle {
+                value: "dev".into(),
+            },
+            name: Some("Heart Monitor".into()),
+            rssi: -55,
+            service_uuids: vec!["180D".into()],
+            manufacturer_data: BTreeMap::new(),
+        };
+
+        assert!(scan_matches(&[], &advertisement));
+        assert!(scan_matches(
+            &[ScanFilter {
+                service: Some("180d".into()),
+                name: None
+            }],
+            &advertisement
+        ));
+        assert!(scan_matches(
+            &[ScanFilter {
+                service: Some("180d".into()),
+                name: Some("Heart Monitor".into())
+            }],
+            &advertisement
+        ));
+        assert!(!scan_matches(
+            &[ScanFilter {
+                service: Some("180f".into()),
+                name: None
+            }],
+            &advertisement
+        ));
+        assert!(!scan_matches(
+            &[ScanFilter {
+                service: None,
+                name: Some("Other".into())
+            }],
+            &advertisement
+        ));
     }
 }

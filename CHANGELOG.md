@@ -9,11 +9,116 @@ The **wire protocol** version is tracked separately from the library version —
 is a distinct compatibility contract for agent/client implementers. Current wire
 protocol version: **1**.
 
+## [Unreleased]
+
+> **0.9.0 release-plan addendum:** the correctness/isolation work required by
+> [`ai-context/0.9.0-review-addendum.md`](ai-context/0.9.0-review-addendum.md) is implemented and
+> regression-tested in both agents (see **Fixed** below). The batched hardware round is deferred
+> and remains a hard gate before the later Maven Central publish; this GitHub-only release is
+> explicitly hardware-pending. Shared mode is disabled pending a safe participant model. Remaining review
+> hardening is assigned to [`0.9.1`](ai-context/0.9.1-implementation-plan.md). The scope authority is
+> [`ai-context/ROADMAP.md`](ai-context/ROADMAP.md).
+>
+> **GitHub-only release — the Maven Central publish is deferred to 0.10.0.** `agent-artifacts.yml`
+> runs on the `v0.9.0` tag (agent binaries); `release.yml`/Maven Central publish stays skipped. This
+> SDK version does not appear on Central; Central consumers get 0.8.1 through 0.9.0's accumulated
+> changes in 0.10.0's consolidated publish.
+
+### Added
+
+- **New `:log` module** — a shared, zero-dependency KMP logging facade (`Logger`, `LogLevel`,
+  `LogSink`, `PrintlnSink`, `AndroidLogSink`, `AppleLogSink`, `bytesPreview`, `RateLimitedLog`)
+  that both `:client-sdk` and `:agent` depend on. `Logger` is a global object: consumers set
+  `Logger.level` and `Logger.sink` once at startup (e.g. `Logger.sink = AndroidLogSink;
+  Logger.level = LogLevel.INFO`). Defaults silent — no consumer impact unless configured. Lazy
+  message lambdas, level check first, zero allocation below the threshold. Never logs a bearer
+  token; payload bytes only at `TRACE` (truncated). Targets JVM, Android, iOS. No wire impact,
+  no new external dependencies.
+
+- **Client SDK instrumentation.** `WebSocketAgentTransport` (transport lifecycle: connect,
+  disconnect, reconnect-backoff, gave-up), `DefaultAgentSession` (request/retry/reply, reconcile
+  summary, handshake + capability negotiation, previously-silent error paths),
+  `RemotePeripheral` (connect/disconnect/unsolicited-drop lifecycle, MTU best-effort failure,
+  WWR burst item failures).
+
+- **Kotlin agent instrumentation.** `BleAgent` (handshake, decode failures, op errors, connect
+  failure, unsolicited disconnect, scan/observe lifecycle), `AgentWebSocketServer` (client
+  connect/disconnect, 401 rejections), `PeripheralRegistry` (lease acquire/resume/release),
+  `ConnectionWatcher` (probe failures), `EngineBleBackend` (Kable state transitions),
+  `HandleTranslator` (minted/primed mappings). Read-only log-level status at `GET /api/log-level`
+  (the live `POST` toggle was removed by the 0.9.0 addendum's dashboard-mutation hardening — see
+  **Fixed**). `REMOTE_BLE_LOG` env var on `Main.kt` (default `info`).
+
+- **`agent-rs` logging polish.** `--log-level` / `REMOTE_BLE_LOG` clap flag (seeds `EnvFilter`
+  when `RUST_LOG` is unset — explicit `RUST_LOG` still wins), `--log-format json` (for
+  journald/Loki setups), per-connection `tracing` spans propagated into spawned op tasks,
+  inbound binary dump demoted to `TRACE`.
+
+- **`agent-rs` CI now runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`**
+  in `build.yml`, matching the Kotlin build/test gate.
+
+### Fixed
+
+- **Cross-client device authorization and release-surface hardening.** Both reference agents now
+  require the lease-owning client to hold a live connection before any device-bearing operation can
+  reach the backend; a scanned handle is no longer sufficient to read, write, observe, configure,
+  or disconnect another client's peripheral. The 0.9.0 source surface is now exclusive-only:
+  shared-mode configuration is rejected and its dashboard/mobile controls are removed. Dashboard
+  mutation endpoints have also been removed pending an authenticated operator plane; the remaining
+  dashboard is read-only. Covered by a two-client table-driven Kotlin suite and a Rust
+  fake-backend suite (`transport::server::tests`).
+
+- **`agent-rs` connection-scoped streams and task ownership.** Scan and observation state was
+  previously keyed process-wide by the client-generated `i64` id alone, so two clients' first scan
+  or subscription (both `1`) collided and either could stop the other's stream. IDs are now
+  internally composited with a per-connection generation (`StreamKey { connection, local_id }`);
+  the wire ID is unchanged. Command tasks are now tracked in a per-connection `JoinSet` and
+  cancelled/joined before the connection's lease-release grace is scheduled, so a slow `connect`
+  can no longer complete — and commit a lease — after its socket has already closed; that path now
+  unwinds the radio connection and returns `TRANSPORT_LOST` instead.
+
+- **`agent-rs` write ordering, observation teardown, MTU, and scan filters.** Writes to the same
+  device now reserve their position in a per-device chain on the sequential receive loop (matching
+  the Kotlin agent's existing guarantee), so a pipelined burst can no longer reach the backend out
+  of submission order. `observe.stop` now actually cancels the notification task and unsubscribes
+  (reference-counted per characteristic) instead of returning a fabricated `Ok`. `request_mtu`
+  returns `UNSUPPORTED` rather than echoing the client's requested value as if it had been
+  negotiated. Scan filters (name/service) are now evaluated per subscriber instead of ignored.
+
+- **Client SDK session/transport lifecycle.** `AgentSession` gains an explicit `close()` that
+  retires its child scope, fails pending requests, clears replay state, and closes the transport
+  before the demo `AgentConnection` closes its `HttpClient` — replacing a connection no longer
+  leaves the old transport's reconnect loop running underneath the new one.
+
+- **One release version, enforced in CI.** `scripts/check-release-version.sh` cross-checks
+  `gradle.properties`, `agent-rs/Cargo.toml`, the macOS `Info.plist`, the README dependency
+  snippet, and the Kotlin agent's `ServerHello.agentInfo` string, and now gates `build.yml`,
+  `agent-artifacts.yml`, and `release.yml` (passed the tag as the expected version) — a tag can no
+  longer publish while any component reports a different release.
+
+- **Reconcile-on-reconnect now works under identifier translation.** Previously a transport blip
+  permanently broke resume for cross-platform clients: the client replays the *translated* handles
+  it was issued, but the fresh connection's reverse map was empty and synthesis is one-way, so the
+  replayed `connect` reached the backend as an unknown device. Both agents now **re-seed** the
+  translator on the handshake by deterministically re-minting mappings for the leases the registry
+  still holds for that client (`transportGrace` warm leases), and the client now sends its hello
+  and its reconcile replay from one coroutine, hello first. No wire change. Remaining limitation
+  (documented): after an *agent restart* there is nothing to re-seed from — a translated client
+  must rescan. See docs/proposals/agent-side-identifier-translation.md §"Reconnect & reconcile".
+- **Handshake hardening — first hello wins.** `negotiated`/`translator` are published safely
+  (@Volatile) in the Kotlin agent; both agents fix negotiation at the first `ClientHello` on a
+  connection and answer repeated hellos idempotently (previously a repeated hello renegotiated —
+  and in `agent-rs` wiped the translator's reverse map, breaking op routing). `BondState` is now
+  capability-gated on emit like `SlotState`. The conformance spec gained the missing
+  `hello`/`server_hello` frame definitions and a normative §5.3 (lenient negotiation, v1 baseline
+  for pre-hello ops, first-hello-wins), with overclaims about op gating and version selection
+  corrected to match both reference implementations.
+
 ## [0.8.3] - 2026-07-10
 
 > **GitHub-only agent release** — `agent-artifacts.yml` runs on the `v0.8.3` tag (agent binaries),
 > `release.yml`/Maven Central publish stays skipped. This SDK version does not appear on Central;
-> Central consumers get these changes in 0.9.0's consolidated publish.
+> Central consumers get these changes in 0.10.0's consolidated publish.
 >
 > **Shipping CI-validated; on-radio verification batched into the next release.** Both features are
 > correct by construction and covered in CI — feature F's exactness is a property of `EngineBleBackend`'s
@@ -32,7 +137,7 @@ protocol version: **1**.
   `RemoteGattClient.writeWithoutResponseBurst`. Keeps up to `window` (default 8) WithoutResponse
   writes in flight instead of paying one full client↔agent round trip per write before sending the
   next — the fix indicated by tracing a serial WWR burst end-to-end
-  (`ai-context/0.8.3-implementation-plan.md` §2b): the dominant cost is N sequential WebSocket
+  (`ai-context/archive/0.8.3-implementation-plan.md` §2b): the dominant cost is N sequential WebSocket
   round-trips, not the radio. **No wire change** — frames are still sent one per write, in
   submission order; only the client's await discipline changes. Backed by a new
   `AgentSession.dispatch(op, timeout)` primitive (send now, await the reply later) that shares its
@@ -76,7 +181,7 @@ protocol version: **1**.
 
 > **GitHub-only agent release** — `agent-artifacts.yml` runs on the `v0.8.2` tag (agent binaries),
 > `release.yml`/Maven Central publish stays skipped. This SDK version does not appear on Central;
-> Central consumers get these changes in 0.9.0's consolidated publish.
+> Central consumers get these changes in 0.10.0's consolidated publish.
 >
 > **⚠️ Hardware validation pending.** `conn.params`/`conn.priority` and the `CharNode.properties`
 > on-device check have been verified against fakes + CI, **not yet on a real Android radio**. Deferred

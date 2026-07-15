@@ -60,8 +60,9 @@ the `PROTOCOL_VERSION` (currently **`1`**) baseline.
 On every (re)connection the client sends a `ClientHello` declaring the version range it
 speaks and the capability strings it understands. The agent replies with a `ServerHello`
 carrying the version it chose and the **negotiated capability set** —
-`clientWanted ∩ agentSupported`. Subsequent ops outside that set are answered with
-`ErrorKind.UNSUPPORTED`, so a client should gate capability-specific ops on the reply.
+`clientWanted ∩ agentSupported`. Ops the agent's backend doesn't implement are answered with
+`ErrorKind.UNSUPPORTED`; negotiation itself doesn't gate op execution, so a client should gate
+capability-specific ops on the reply rather than rely on the agent rejecting them.
 
 ```kotlin
 object Capabilities {
@@ -79,7 +80,7 @@ Capabilities are either **backend-level** (depend on the radio engine — the ba
 them via `BleBackend.capabilities`) or **agent-level** (radio-independent, implemented by the
 agent itself — `BleAgent.AGENT_CAPABILITIES`). The advertised set is the union of the two.
 
-Two deliberate properties:
+Three deliberate properties:
 
 - **Capabilities are `Set<String>`, not an enum.** An unknown capability string decodes
   harmlessly to "not understood" rather than failing CBOR, so an old peer and a new peer
@@ -90,6 +91,13 @@ Two deliberate properties:
   [`AgentSession.capabilities`](client-sdk.md) (a `StateFlow`, `null` until the reply,
   reset on each reconnect) for callers that need to gate. This keeps the session/transport
   state machines unchanged and avoids a handshake deadlock.
+- **First hello wins (per connection).** The agent honors only the *first* `ClientHello` on a
+  socket: the negotiated set and the handle-translation configuration are fixed by it. A
+  repeated hello is answered idempotently — the same `ServerHello` again — but renegotiates
+  nothing (mid-session renegotiation could un-gate event types the client's decode loop no
+  longer expects, and would discard the translator's reverse handle map). Ops that arrive
+  *before* any hello run under the v1 baseline: empty capability set, untranslated handles.
+  A reconnect is a new socket, so it negotiates from scratch.
 
 The `Hello` exchange carries **no auth credential or ownership id** — those stay on the
 WebSocket upgrade headers (`Authorization: Bearer …` and `CLIENT_ID_HEADER`).

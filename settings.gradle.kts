@@ -19,6 +19,7 @@ include(
     ":protocol",
     ":client-sdk",
     ":agent",
+    ":log",
     // Live E2E runner: drives the client SDK against a running :agent over WebSocket, exercising
     // the full op set against a test peripheral. Run with `:e2e-runner:jvmRun` (needs hardware).
     ":e2e-runner",

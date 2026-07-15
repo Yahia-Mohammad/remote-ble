@@ -33,7 +33,6 @@ type TeardownFn = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>>
 
 struct PeripheralState {
     owner_client_id: String,
-    exclusive: bool,
     connected: bool,
     /// Pending release timer, if the owner is (temporarily) gone. `None` when the
     /// owner is present.
@@ -72,6 +71,10 @@ pub struct PeripheralRegistry {
 
 impl PeripheralRegistry {
     pub fn new(config: LeaseConfig) -> Self {
+        assert!(
+            config.default_exclusive,
+            "shared peripheral mode is unavailable in RemoteBLE 0.9.0"
+        );
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -102,18 +105,15 @@ impl PeripheralRegistry {
                 state.cancel_grace();
                 return Ok(());
             }
-            // A different client. While the lease is present (incl. its grace window) an
-            // exclusive peripheral is busy; a non-exclusive one is shared without enforcement.
-            if state.exclusive {
-                return Err(AgentError::new(
-                    ErrorKind::PeripheralBusy,
-                    Some(format!(
-                        "Device {} is currently leased by client {}",
-                        device_handle, state.owner_client_id
-                    )),
-                ));
-            }
-            return Ok(());
+            // A different client. The 0.9.0 surface is exclusive-only; a participant-based
+            // shared model is deferred rather than granting an untracked guest.
+            return Err(AgentError::new(
+                ErrorKind::PeripheralBusy,
+                Some(format!(
+                    "Device {} is currently leased by client {}",
+                    device_handle, state.owner_client_id
+                )),
+            ));
         }
 
         if map.len() >= self.inner.config.max_slots {
@@ -127,7 +127,6 @@ impl PeripheralRegistry {
             device_handle.to_string(),
             PeripheralState {
                 owner_client_id: client_id.to_string(),
-                exclusive: self.inner.config.default_exclusive,
                 connected: false,
                 grace_task: None,
                 epoch: 0,
@@ -135,6 +134,34 @@ impl PeripheralRegistry {
         );
 
         Ok(())
+    }
+
+    /// Authorize a device-bearing operation that requires an active BLE connection.
+    ///
+    /// Handles are observable routing values, not credentials. A different client must not be
+    /// able to operate a peripheral merely because it learned its scanned handle. This also
+    /// rejects the legacy shared-mode guest path until a real participant model exists.
+    pub fn authorize_connected(
+        &self,
+        device_handle: &str,
+        client_id: &str,
+    ) -> Result<(), AgentError> {
+        let map = self.inner.state.lock();
+        match map.get(device_handle) {
+            None => Err(AgentError::new(
+                ErrorKind::NotConnected,
+                Some("Peripheral is not connected".into()),
+            )),
+            Some(state) if state.owner_client_id != client_id => Err(AgentError::new(
+                ErrorKind::PeripheralBusy,
+                Some("Peripheral is leased by another client".into()),
+            )),
+            Some(state) if !state.connected => Err(AgentError::new(
+                ErrorKind::NotConnected,
+                Some("Peripheral is not connected".into()),
+            )),
+            Some(_) => Ok(()),
+        }
     }
 
     /// Marks the peripheral physically connected under [client_id] and cancels any pending
@@ -159,6 +186,20 @@ impl PeripheralRegistry {
             return true;
         }
         false
+    }
+
+    /// The real handles of every lease `client_id` currently holds — live or in a grace window.
+    /// A reconnecting client's fresh connection uses this to re-seed its handle translations
+    /// (see `transport::negotiation::Negotiation::on_hello`): the warm leases are exactly the
+    /// handles whose translated forms the client may replay on reconcile.
+    pub fn held_by(&self, client_id: &str) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .iter()
+            .filter(|(_, s)| s.owner_client_id == client_id)
+            .map(|(h, _)| h.clone())
+            .collect()
     }
 
     /// The client's transport (WebSocket) dropped. Keep its peripherals' radio links **warm** and
@@ -247,6 +288,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn held_by_lists_only_that_clients_leases() {
+        let reg = PeripheralRegistry::new(LeaseConfig::default());
+        assert!(reg.acquire_lease("dev1", "clientA").is_ok());
+        reg.on_connected("dev1", "clientA");
+        assert!(reg.acquire_lease("dev2", "clientB").is_ok());
+
+        let mut held = reg.held_by("clientA");
+        held.sort();
+        assert_eq!(held, vec!["dev1".to_string()]);
+        assert!(reg.held_by("nobody").is_empty());
+    }
+
+    #[test]
     fn test_acquire_and_exclusive_conflict() {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
         assert!(reg.acquire_lease("dev1", "clientA").is_ok());
@@ -257,6 +311,28 @@ mod tests {
         // Different client rejected with PeripheralBusy
         let err = reg.acquire_lease("dev1", "clientB").unwrap_err();
         assert_eq!(err.kind, ErrorKind::PeripheralBusy);
+    }
+
+    #[test]
+    fn authorization_requires_the_owning_client_and_a_live_connection() {
+        let reg = PeripheralRegistry::new(LeaseConfig::default());
+
+        assert_eq!(
+            reg.authorize_connected("dev1", "clientA").unwrap_err().kind,
+            ErrorKind::NotConnected
+        );
+        reg.acquire_lease("dev1", "clientA").unwrap();
+        assert_eq!(
+            reg.authorize_connected("dev1", "clientA").unwrap_err().kind,
+            ErrorKind::NotConnected
+        );
+
+        reg.on_connected("dev1", "clientA");
+        assert!(reg.authorize_connected("dev1", "clientA").is_ok());
+        assert_eq!(
+            reg.authorize_connected("dev1", "clientB").unwrap_err().kind,
+            ErrorKind::PeripheralBusy
+        );
     }
 
     #[test]

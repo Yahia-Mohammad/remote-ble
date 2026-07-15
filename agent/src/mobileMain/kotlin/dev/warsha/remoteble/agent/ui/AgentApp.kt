@@ -40,7 +40,7 @@ import kotlinx.coroutines.launch
 /**
  * A native mirror of the desktop agent's HTML status dashboard (see `Dashboard.kt`): header
  * with a start/stop control and the WebSocket address, connected-clients panel,
- * peripheral-ownership panel with an exclusive/shared toggle, and a scrolling activity log.
+ * peripheral-ownership panel (exclusive-only in 0.9.0), and a scrolling activity log.
  * Polls [AgentRunner]'s in-process [AgentMonitor]/`PeripheralRegistry` every second, the same
  * cadence the HTML dashboard's own `poll()` uses — there's no HTTP round-trip since the UI and
  * server share one process here.
@@ -143,9 +143,7 @@ fun AgentApp(
                     item { Text("No activity yet.", style = MaterialTheme.typography.bodySmall) }
                 } else {
                     clientsSection(s.clients)
-                    leasesSection(s.leases) { handle, exclusive ->
-                        scope.launch { runner.registry?.setExclusive(handle, exclusive) }
-                    }
+                    leasesSection(s.leases)
                     logsSection(s.logs)
                 }
             }
@@ -252,10 +250,7 @@ private fun LazyListScope.clientsSection(clients: List<AgentMonitor.ClientDto>) 
     }
 }
 
-private fun LazyListScope.leasesSection(
-    leases: List<AgentMonitor.LeaseDto>,
-    onToggleExclusive: (handle: String, exclusive: Boolean) -> Unit,
-) {
+private fun LazyListScope.leasesSection(leases: List<AgentMonitor.LeaseDto>) {
     sectionHeader("Peripheral ownership (${leases.size})")
     if (leases.isEmpty()) {
         item { Text("No peripherals owned. Clients can still scan.") }
@@ -265,10 +260,7 @@ private fun LazyListScope.leasesSection(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("${lease.name ?: "(unnamed)"} · ${lease.handle}${if (lease.inGrace) " · releasing…" else ""}")
-                OutlinedButton(onClick = { onToggleExclusive(lease.handle, !lease.exclusive) }) {
-                    Text(if (lease.exclusive) "make shared" else "make exclusive")
-                }
+                Text("${lease.name ?: "(unnamed)"} · ${lease.handle}${if (lease.inGrace) " · releasing…" else ""} · exclusive")
             }
         }
     }

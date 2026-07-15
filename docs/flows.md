@@ -49,6 +49,17 @@ app: DefaultAgentSession(WebSocketAgentTransport("ws://host:8080/agent", …), C
 
 No frames cross the wire yet — the session is request-driven.
 
+> **Logging:** The client SDK defaults silent (`Logger.level = null`). To turn on
+> diagnostics, set `Logger.level = LogLevel.DEBUG` and `Logger.sink` before creating
+> the session:
+> ```kotlin
+> Logger.sink = PrintlnSink   // or AndroidLogSink / AppleLogSink
+> Logger.level = LogLevel.DEBUG
+>```
+> Flipping the level mid-session takes effect immediately (subsequent calls check
+> `Logger.level` live). The agents default to `INFO` (set `REMOTE_BLE_LOG=debug` to
+> override at startup; the Kotlin agent also has a live `POST /api/log-level` toggle).
+
 ---
 
 ## Scan

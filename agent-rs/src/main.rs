@@ -43,20 +43,43 @@ struct Args {
     /// format mismatch surfaces loudly on the client (dev/CI). Off by default (translation on).
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_STRICT_IDENTIFIERS")]
     strict_identifiers: bool,
+
+    /// Log level: trace, debug, info, warn, error, or off. Overridden by RUST_LOG if set.
+    #[arg(long, env = "REMOTE_BLE_LOG")]
+    log_level: Option<String>,
+
+    /// Log format: full (default) or json (for journald/Loki setups).
+    #[arg(long, default_value = "full", env = "REMOTE_BLE_LOG_FORMAT")]
+    log_format: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
+
+    let env_filter = if let Ok(filter) = EnvFilter::try_from_default_env() {
+        filter
+    } else if let Some(ref level) = args.log_level {
+        match level.to_lowercase().as_str() {
+            "off" => EnvFilter::new("off"),
+            lvl => EnvFilter::new(lvl),
+        }
+    } else {
+        EnvFilter::new("info")
+    };
+
+    let subscriber = tracing_subscriber::fmt().with_env_filter(env_filter);
+
+    if args.log_format == "json" {
+        subscriber.json().init();
+    } else {
+        subscriber.init();
+    }
+
     tracing::info!(
-        "Starting RemoteBLE Agent (Rust) v{}",
-        env!("CARGO_PKG_VERSION")
+        "Starting RemoteBLE Agent (Rust) v{} | log level: {}",
+        env!("CARGO_PKG_VERSION"),
+        args.log_level.as_deref().unwrap_or("info")
     );
 
     let lease_config = LeaseConfig {

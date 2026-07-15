@@ -27,7 +27,18 @@ permissions:
   contents: write # upload release assets
 
 jobs:
+  release-version:
+    name: Release version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Verify tag and version sources
+        run: bash scripts/check-release-version.sh "${{ github.event.inputs.tag || github.ref_name }}"
+
   jvm-agent-jar:
+    needs: release-version
     name: JVM agent fat JAR (cross-platform)
     runs-on: ubuntu-latest
     steps:
@@ -56,6 +67,7 @@ jobs:
           files: agent/build/libs/remoteble-agent-*-all.jar
 
   agent-rs-linux:
+    needs: release-version
     name: agent-rs (linux x86_64)
     runs-on: ubuntu-latest
     defaults:
@@ -98,6 +110,7 @@ jobs:
           files: agent-rs/dist/remoteble-agent-rs-linux-x86_64
 
   agent-rs-linux-arm64:
+    needs: release-version
     name: agent-rs (linux aarch64)
     runs-on: ubuntu-latest
     defaults:
@@ -143,6 +156,7 @@ jobs:
           files: agent-rs/dist/remoteble-agent-rs-linux-aarch64
 
   agent-rs-windows:
+    needs: release-version
     name: agent-rs (windows x86_64)
     runs-on: windows-latest
     defaults:

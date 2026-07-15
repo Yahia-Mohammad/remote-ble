@@ -1,6 +1,6 @@
 [package]
 name = "agent-rs"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2024"
 authors = ["Warsha BLE Team"]
 description = "Native cross-platform RemoteBLE agent written in Rust"
@@ -14,7 +14,7 @@ ciborium = "0.2"
 btleplug = "0.11"
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "1.0"
 parking_lot = "0.12"
 http = "1.1"

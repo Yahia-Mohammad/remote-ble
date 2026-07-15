@@ -68,16 +68,17 @@ impl HandleTranslator {
     }
 
     /// Apply the client's handshake: enable translation iff it negotiated the capability and its
-    /// format actually needs a rewrite. Resets any prior mapping (a fresh handshake, e.g. reconnect).
+    /// format actually needs a rewrite. The reverse map is deliberately **preserved**: its entries
+    /// only ever map a client-facing handle back to the real radio handle, which stays correct
+    /// across a reconfigure — clearing them would break op routing for every handle the client
+    /// already holds. (Translators are per-connection, so in practice this runs once per socket;
+    /// preserving the map keeps any future second caller safe by construction.)
     pub fn configure(&self, client_format: Option<IdentifierFormat>, negotiated: bool) {
         let synth = match client_format {
             Some(fmt) if negotiated && needs_rewrite(fmt, self.agent_format) => Some(fmt),
             _ => None,
         };
-        let mut inner = self.inner.lock();
-        inner.synth = synth;
-        inner.reverse.clear();
-        inner.order.clear();
+        self.inner.lock().synth = synth;
     }
 
     /// Real radio handle → the handle the client sees. Records the reverse mapping for routing.
@@ -103,6 +104,17 @@ impl HandleTranslator {
             inner.reverse.insert(client.clone(), real.to_string());
         }
         client
+    }
+
+    /// Pre-populates the reverse map for `real_handles` by re-running the deterministic
+    /// synthesis — exactly the mapping an outgoing event would record. Called on the handshake
+    /// with the real handles this client's leases still hold (a reconnect within the transport
+    /// grace), so an op replayed with a previously-issued translated handle routes again even
+    /// though this fresh connection has emitted no event for it yet. No-op when not translating.
+    pub fn prime(&self, real_handles: &[String]) {
+        for real in real_handles {
+            let _ = self.to_client(real);
+        }
     }
 
     /// Client-facing handle → the real radio handle (identity when unmapped/untranslated).
@@ -425,6 +437,60 @@ mod tests {
         assert!(emitted.contains('-'));
         assert_eq!(t.to_real(&emitted), REAL);
         assert_eq!(t.to_real("unknown"), "unknown");
+    }
+
+    #[test]
+    fn prime_reseeds_mappings_for_replayed_handles() {
+        let t = configured(
+            Some(IdentifierFormat::Uuid),
+            IdentifierFormat::BluezJson,
+            true,
+            false,
+        );
+        // A fresh connection's translator starts with an empty reverse map, so a handle
+        // issued by the previous connection can't route...
+        let issued = synthesize(IdentifierFormat::Uuid, REAL);
+        assert_eq!(t.to_real(&issued), issued);
+        // ...until prime() re-derives it from the real handles the registry kept warm.
+        t.prime(&[REAL.to_string()]);
+        assert_eq!(t.to_real(&issued), REAL);
+    }
+
+    #[test]
+    fn prime_is_identity_when_not_translating() {
+        let t = configured(
+            Some(IdentifierFormat::Uuid),
+            IdentifierFormat::BluezJson,
+            false,
+            false,
+        );
+        t.prime(&[REAL.to_string()]);
+        // Nothing recorded: an untranslated client replays real handles, which pass through.
+        assert_eq!(t.to_real(REAL), REAL);
+    }
+
+    #[test]
+    fn reconfiguring_preserves_the_reverse_map() {
+        // A reconfigure must never orphan handles the client already holds: reverse entries
+        // map a client-facing handle back to the real radio handle, which stays correct no
+        // matter what the synthesis format changes to. (The connection loop additionally
+        // enforces first-hello-wins, so production reconfigures don't happen — this pins the
+        // translator as safe on its own, without relying on that loop discipline.)
+        let t = configured(
+            Some(IdentifierFormat::Uuid),
+            IdentifierFormat::BluezJson,
+            true,
+            false,
+        );
+        let emitted = emitted_device(&t.to_client_event(scan_result(REAL)));
+        assert_eq!(t.to_real(&emitted), REAL);
+
+        t.configure(Some(IdentifierFormat::MacAddress), true);
+        assert_eq!(
+            t.to_real(&emitted),
+            REAL,
+            "reverse mapping must survive reconfigure"
+        );
     }
 
     #[test]

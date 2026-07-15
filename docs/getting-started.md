@@ -23,7 +23,7 @@ apps):
 
 ```sh
 agent/run-agent.sh 8080
-# → RemoteBLE agent listening on ws://0.0.0.0:8080/agent (no auth, shared peripherals, Kable engine on Mac OS X)
+# → RemoteBLE agent listening on ws://0.0.0.0:8080/agent (no auth, exclusive peripherals, Kable engine on Mac OS X)
 # → Status dashboard: http://localhost:8080/
 ```
 
@@ -321,12 +321,17 @@ received it" — order is guaranteed, per-write *delivery* is still best-effort.
 - **`peripheral.identifier`** is best-effort on a remote peripheral (the agent handle
   may not parse as your local platform's Kable `Identifier`) — you don't need it to
   operate the device.
-- **One agent** in v1 — there's no multi-agent registry yet. Multiple clients *can* share
-  one agent, but each peripheral is owned by one client at a time (a second client's connect
-  to an owned peripheral fails with `PERIPHERAL_BUSY`; switchable per peripheral, default block).
+- **One agent** in v1 — there's no multi-agent registry yet. Multiple clients *can* use one agent,
+  but each peripheral is owned exclusively by one client at a time (a second client's connect to an
+  owned peripheral fails with `PERIPHERAL_BUSY`). Shared mode is disabled for 0.9.0 pending a
+  participant model.
 - The reference **agent runs on macOS/Linux (JVM), Android, and iOS**; the client builds
   for JVM (tests), Android, and iOS. iOS can't run the agent backgrounded — see
   [agent.md](agent.md#android--ios-a-phone-as-the-agent).
+- **Diagnostics:** The SDK defaults silent. To turn on logging, set `Logger.level` and
+  `Logger.sink` before creating the session (see [client-sdk.md → Logging](client-sdk.md#logging)).
+  The agents default to `INFO` (`REMOTE_BLE_LOG=debug` to override; the Kotlin agent also
+  has a live dashboard toggle at `POST /api/log-level`).
 
 ---
 

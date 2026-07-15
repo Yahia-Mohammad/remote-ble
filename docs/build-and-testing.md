@@ -11,6 +11,7 @@ compile checks) and [`.github/workflows/rust.yml`](../.github/workflows/rust.yml
 
 | Module | Targets | Plugin set |
 |---|---|---|
+| [`:log`](../log/build.gradle.kts) | JVM, Android, iOS (arm64/sim) | `kotlin.multiplatform`, `android.kotlin.multiplatform.library` |
 | [`:protocol`](../protocol/build.gradle.kts) | JVM, Android, iOS (arm64/x64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library` |
 | [`:client-sdk`](../client-sdk/build.gradle.kts) | JVM (tests), Android, iOS (arm64/x64/sim) | same |
 | [`:agent`](../agent/build.gradle.kts) | JVM, Android, iOS (arm64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library`, Compose Multiplatform |

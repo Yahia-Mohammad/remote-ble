@@ -14,7 +14,9 @@ use super::codec::{decode_cbor, encode_cbor};
 use super::errors::{AgentError, ErrorKind};
 use super::events::{AdvertisementDto, AgentEvent, BleConnState};
 use super::frame::Frame;
-use super::op::{CharRef, ConnParamHint, ConnPriority, ConnProfile, DeviceHandle, IdentifierFormat, Op};
+use super::op::{
+    CharRef, ConnParamHint, ConnPriority, ConnProfile, DeviceHandle, IdentifierFormat, Op,
+};
 use super::results::{OpResult, ResultPayload};
 use std::collections::{BTreeMap, BTreeSet};
 

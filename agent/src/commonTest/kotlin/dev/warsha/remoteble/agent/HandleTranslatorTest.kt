@@ -33,6 +33,28 @@ class HandleTranslatorTest {
     private fun deviceOf(event: AgentEvent): String =
         (event as AgentEvent.ScanResult).advertisement.device.value
 
+    // ---- prime (reconnect re-seeding) ----
+
+    @Test
+    fun prime_reseedsMappingsForReplayedHandles() = runTest {
+        val t = translator(IdentifierFormat.UUID)
+        // A fresh connection's translator starts with an empty reverse map, so a handle issued
+        // by the previous connection's translator can't route...
+        val issued = HandleTranslator.synthesize(IdentifierFormat.UUID, real)
+        assertEquals(issued, t.toReal(issued))
+        // ...until prime() re-derives the mapping from the real handles the registry kept warm.
+        t.prime(listOf(real))
+        assertEquals(real, t.toReal(issued))
+    }
+
+    @Test
+    fun prime_isIdentityWhenNotTranslating() = runTest {
+        val t = translator(IdentifierFormat.UUID, negotiated = false)
+        t.prime(listOf(real))
+        // Nothing recorded: an untranslated client replays real handles, which pass through.
+        assertEquals(real, t.toReal(real))
+    }
+
     // ---- needsRewrite ----
 
     @Test

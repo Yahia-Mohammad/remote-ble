@@ -30,6 +30,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             api(project(":protocol"))
+            api(project(":log"))
             implementation(libs.kotlinx.coroutines.core)
             // WebSocket transport. The HttpClient engine is supplied per-platform via
             // the `defaultWebSocketHttpClient()` expect/actual.

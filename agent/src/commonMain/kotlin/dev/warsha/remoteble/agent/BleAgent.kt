@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
@@ -22,6 +23,7 @@ import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -83,7 +85,6 @@ class BleAgent(
     // Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
     // connections and flipped live from the dashboard; read on each forward handle translation.
     private val strictMode: StrictModeState = StrictModeState(),
-    // The handle format this agent's radio mints, so translation is skipped for a same-platform peer.
     private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
 ) {
     private val state = Mutex()
@@ -129,16 +130,28 @@ class BleAgent(
         return reserveWriteTurn(translator.toReal(op.device.value))
     }
 
-    // The capabilities negotiated with this client (clientWanted ∩ supported), set on the
-    // handshake. Gates agent→client features the client must opt into to decode — sending an
-    // event a client never negotiated would break its decode loop.
+    // The capabilities negotiated with this client (clientWanted ∩ supported), set once by the
+    // first handshake. Gates agent→client features the client must opt into to decode — sending an
+    // event a client never negotiated would break its decode loop. @Volatile: written on the
+    // collect loop, but read from concurrently launched command coroutines and from the shared
+    // ConnectionWatcher's unsolicited-disconnect callback (another thread with no happens-before
+    // edge to the hello write). A well-behaved client sends hello before any command; visibility
+    // must not depend on that.
+    @Volatile
     private var negotiated: Set<String> = emptySet()
 
-    // Per-connection device-handle translator (capability `identifier.translate`). Identity until a
-    // handshake declares the client's format; then it rewrites outgoing handles into that format and
-    // reverse-maps incoming ops. Set on the collect loop (respondHello), read from command/emit
-    // coroutines — same benign single-writer pattern as `negotiated` (the client sends hello first).
+    // Per-connection device-handle translator (capability `identifier.translate`). Identity until
+    // the first handshake declares the client's format; then it rewrites outgoing handles into that
+    // format and reverse-maps incoming ops. Written once (first hello, on the collect loop), read
+    // from command/emit coroutines and the watcher callback — @Volatile for the same reason as
+    // [negotiated]. Never swapped after that first write: replacing the instance would orphan its
+    // reverse map and break routing for handles the client already holds (see [respondHello]).
+    @Volatile
     private var translator: HandleTranslator = identityTranslator()
+
+    // Whether a ClientHello has been honored on this connection. Touched only on the sequential
+    // collect loop ([respondHello]), so it needs no synchronization of its own.
+    private var handshaken = false
 
     private fun identityTranslator(): HandleTranslator =
         HandleTranslator(clientFormat = null, agentFormat = agentFormat, capabilityNegotiated = false, strict = { false })
@@ -159,6 +172,7 @@ class BleAgent(
                 state.withLock { connected -= handle }
                 observer.onDeviceDisconnected(clientId, handle)
                 observer.onClientLog(clientId, "unsolicited disconnect: $handle")
+                Logger.info(LogTags.ENGINE) { "unsolicited disconnect [c=$clientId dev=$handle reason=${reason?.message}]" }
                 emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED, reason = reason))
                 translator.evict(handle)
                 evictWriteChain(handle)
@@ -183,6 +197,7 @@ class BleAgent(
                 throw e
             } catch (e: Throwable) {
                 observer.onClientLog(clientId, "dropped undecodable frame (${bytes.size} bytes): ${e.message}")
+                Logger.warn(LogTags.SERVER) { "dropped undecodable frame (${bytes.size} bytes) [c=$clientId]: ${e.message}" }
                 return@collect
             }
             when (frame) {
@@ -223,10 +238,20 @@ class BleAgent(
             // (mapDevice is inline, so the suspend toReal call is legal here.)
             when (val op = cmd.op.mapDevice { DeviceHandle(translator.toReal(it.value)) }) {
                 is Op.Connect -> reply(cmd.cid, connect(op.device))
-                is Op.Disconnect -> reply(cmd.cid, disconnect(op.device))
-                is Op.Discover -> reply(cmd.cid, OpResult.Ok(ResultPayload.Services(backend.discover(op.device))))
-                is Op.Read -> reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(backend.read(op.device, op.char))))
+                is Op.Disconnect -> {
+                    authorizeConnected(op.device)
+                    reply(cmd.cid, disconnect(op.device))
+                }
+                is Op.Discover -> {
+                    authorizeConnected(op.device)
+                    reply(cmd.cid, OpResult.Ok(ResultPayload.Services(backend.discover(op.device))))
+                }
+                is Op.Read -> {
+                    authorizeConnected(op.device)
+                    reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(backend.read(op.device, op.char))))
+                }
                 is Op.Write -> {
+                    authorizeConnected(op.device)
                     // Honor this write's ordering turn: wait for the prior same-device write to reach
                     // the backend, then complete our signal for the next — even on failure/cancel, so
                     // a rejected write never wedges the chain. See [reserveWriteTurn].
@@ -238,29 +263,42 @@ class BleAgent(
                         writeTurn?.mine?.complete(Unit)
                     }
                 }
-                is Op.RequestMtu -> reply(cmd.cid, OpResult.Ok(ResultPayload.Mtu(backend.requestMtu(op.device, op.mtu))))
-                is Op.ReadRssi -> reply(cmd.cid, OpResult.Ok(ResultPayload.Rssi(backend.readRssi(op.device))))
-                is Op.ReadDescriptor ->
+                is Op.RequestMtu -> {
+                    authorizeConnected(op.device)
+                    reply(cmd.cid, OpResult.Ok(ResultPayload.Mtu(backend.requestMtu(op.device, op.mtu))))
+                }
+                is Op.ReadRssi -> {
+                    authorizeConnected(op.device)
+                    reply(cmd.cid, OpResult.Ok(ResultPayload.Rssi(backend.readRssi(op.device))))
+                }
+                is Op.ReadDescriptor -> {
+                    authorizeConnected(op.device)
                     reply(cmd.cid, OpResult.Ok(ResultPayload.Bytes(backend.readDescriptor(op.device, op.desc))))
+                }
                 is Op.WriteDescriptor -> {
+                    authorizeConnected(op.device)
                     backend.writeDescriptor(op.device, op.desc, op.value)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.Pair -> {
+                    authorizeConnected(op.device)
                     val state = backend.pair(op.device)
-                    emit(AgentEvent.BondState(op.device, state))
+                    emitBondStateIfNegotiated(op.device, state)
                     reply(cmd.cid, OpResult.Ok(ResultPayload.Bond(state)))
                 }
                 is Op.Unpair -> {
+                    authorizeConnected(op.device)
                     backend.unpair(op.device)
-                    emit(AgentEvent.BondState(op.device, BleBondState.NONE))
+                    emitBondStateIfNegotiated(op.device, BleBondState.NONE)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.RequestConnectionPriority -> {
+                    authorizeConnected(op.device)
                     backend.requestConnectionPriority(op.device, op.priority)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.SetConnParams -> {
+                    authorizeConnected(op.device)
                     backend.setConnParams(op.device, op.profile, op.hint)
                     reply(cmd.cid, OpResult.Ok())
                 }
@@ -273,6 +311,7 @@ class BleAgent(
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.ObserveStart -> {
+                    authorizeConnected(op.device)
                     startObserve(op.subId, op.device, op)
                     reply(cmd.cid, OpResult.Ok())
                 }
@@ -287,10 +326,20 @@ class BleAgent(
             // A deliberate, mapped backend failure: its message is domain-level, safe to return.
             reply(cmd.cid, OpResult.Err(e.error))
         } catch (e: Throwable) {
-            // An *unexpected* failure: log the detail server-side and return a generic GATT error
-            // rather than leaking raw internal exception text to the client.
             observer.onClientLog(clientId, "op ${cmd.op::class.simpleName} failed unexpectedly: ${e.message}")
+            Logger.error(LogTags.ENGINE, e) { "op ${cmd.op::class.simpleName} failed unexpectedly [c=$clientId cid=${cmd.cid}]" }
             reply(cmd.cid, OpResult.Err(AgentError(ErrorKind.GATT_ERROR, message = "internal error")))
+        }
+    }
+
+    /** Rejects every device-bearing operation unless this connection owns a live lease. */
+    private suspend fun authorizeConnected(device: DeviceHandle) {
+        when (registry.authorizeConnected(device.value, clientKey)) {
+            PeripheralRegistry.Authorization.Granted -> Unit
+            PeripheralRegistry.Authorization.PeripheralBusy ->
+                throw AgentException(AgentError(ErrorKind.PERIPHERAL_BUSY, message = "peripheral in use"))
+            PeripheralRegistry.Authorization.NotConnected ->
+                throw AgentException(AgentError(ErrorKind.NOT_CONNECTED, message = "peripheral is not connected"))
         }
     }
 
@@ -326,12 +375,14 @@ class BleAgent(
             state.withLock { connected -= device.value } // release on failure
             registry.releaseNow(device.value, clientKey)
             observer.onClientLog(clientId, "connect failed: ${device.value} (${e.message})")
+            Logger.warn(LogTags.ENGINE) { "connect failed [c=$clientId dev=${device.value}]: ${e.message}" }
             emitSlotsIfNegotiated() // slot restored
             throw e
         }
         registry.onConnected(device.value, clientKey)
         observer.onDeviceConnected(clientId, device.value)
         observer.onClientLog(clientId, "connected ${device.value}")
+        Logger.info(LogTags.ENGINE) { "device connected [c=$clientId dev=${device.value}]" }
         emit(AgentEvent.ConnectionState(device, BleConnState.CONNECTED))
         emitSlotsIfNegotiated()
         return OpResult.Ok()
@@ -345,6 +396,7 @@ class BleAgent(
         registry.onDisconnected(device.value, clientKey)
         observer.onDeviceDisconnected(clientId, device.value)
         observer.onClientLog(clientId, "disconnected ${device.value}")
+        Logger.info(LogTags.ENGINE) { "device disconnected [c=$clientId dev=${device.value}]" }
         emit(AgentEvent.ConnectionState(device, BleConnState.DISCONNECTED))
         translator.evict(device.value)
         evictWriteChain(device.value)
@@ -360,6 +412,7 @@ class BleAgent(
         }
         state.withLock { scanJobs.put(scanId, job) }?.cancel()
         observer.onClientLog(clientId, "scan started (#$scanId${if (batched) ", batched" else ""})")
+        Logger.debug(LogTags.ENGINE) { "scan started [c=$clientId scanId=$scanId batched=$batched]" }
     }
 
     private suspend fun runPerResultScan(
@@ -371,7 +424,10 @@ class BleAgent(
             // A backend scan failure ends this stream, not the agent. Log it (don't swallow
             // silently) so the operator can see a radio that stopped scanning; the client
             // observes the absence of results and can re-issue scan.start.
-            .catch { observer.onClientLog(clientId, "scan #$scanId ended on error: ${it.message}") }
+            .catch {
+                observer.onClientLog(clientId, "scan #$scanId ended on error: ${it.message}")
+                Logger.warn(LogTags.ENGINE) { "scan ended on error [c=$clientId scanId=$scanId]: ${it.message}" }
+            }
             .collect { raw ->
                 val ad = coalesce(raw)
                 observer.onDeviceSeen(ad.device.value, ad.name)
@@ -430,7 +486,10 @@ class BleAgent(
         }
         try {
             backend.scan(op.filters)
-                .catch { observer.onClientLog(clientId, "scan #$scanId ended on error: ${it.message}") }
+                .catch {
+                    observer.onClientLog(clientId, "scan #$scanId ended on error: ${it.message}")
+                    Logger.warn(LogTags.ENGINE) { "scan ended on error [c=$clientId scanId=$scanId]: ${it.message}" }
+                }
                 .collect { raw ->
                     val ad = coalesce(raw)
                     observer.onDeviceSeen(ad.device.value, ad.name)
@@ -445,6 +504,7 @@ class BleAgent(
     private suspend fun stopScan(scanId: Long) {
         state.withLock { scanJobs.remove(scanId) }?.cancel()
         observer.onClientLog(clientId, "scan stopped (#$scanId)")
+        Logger.debug(LogTags.ENGINE) { "scan stopped [c=$clientId scanId=$scanId]" }
     }
 
     private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart) {
@@ -452,7 +512,10 @@ class BleAgent(
             .onEach { emit(AgentEvent.Notification(subId, it)) }
             // A subscription failure ends this stream, not the agent. Log it rather than
             // swallowing silently; the client sees notifications stop and can re-subscribe.
-            .catch { observer.onClientLog(clientId, "observe #$subId ended on error: ${it.message}") }
+            .catch {
+                observer.onClientLog(clientId, "observe #$subId ended on error: ${it.message}")
+                Logger.warn(LogTags.ENGINE) { "observe ended on error [c=$clientId subId=$subId]: ${it.message}" }
+            }
             .launchIn(scope)
         state.withLock { observeJobs.put(subId, job) }?.cancel()
     }
@@ -461,21 +524,64 @@ class BleAgent(
         state.withLock { observeJobs.remove(subId) }?.cancel()
     }
 
-    /** Answer the client's handshake with the negotiated capability set (intersection). */
+    /**
+     * Answer the client's handshake with the negotiated capability set (intersection).
+     *
+     * **First hello wins.** Negotiation and the translator are fixed by the first `ClientHello`
+     * on this connection; a repeated hello is answered idempotently (the same `ServerHello`) but
+     * changes nothing. Renegotiating mid-session could un-gate event types the client's decode
+     * loop no longer expects, and swapping the translator would drop the reverse map that routes
+     * handles the client already holds. A reconnect is a new socket — and thus a fresh [BleAgent] —
+     * so it negotiates from scratch as before.
+     */
     private suspend fun respondHello(hello: ClientHello) {
-        negotiated = hello.capabilities intersect capabilities
-        translator = HandleTranslator(
-            clientFormat = hello.identifierFormat,
-            agentFormat = agentFormat,
-            capabilityNegotiated = Capabilities.IDENTIFIER_TRANSLATION in negotiated,
-            strict = { strictMode.enabled },
-        )
+        val first = !handshaken
+        if (first) {
+            handshaken = true
+            negotiated = hello.capabilities intersect capabilities
+            translator = HandleTranslator(
+                clientFormat = hello.identifierFormat,
+                agentFormat = agentFormat,
+                capabilityNegotiated = Capabilities.IDENTIFIER_TRANSLATION in negotiated,
+                strict = { strictMode.enabled },
+            )
+            // A reconnecting client (same clientKey, within transportGrace) still holds handles
+            // minted by its previous connection's translator — and will replay ops with them
+            // (reconcile-on-reconnect). Synthesis is deterministic, so re-mint the mapping for
+            // every lease the registry kept warm for this client; without this the fresh reverse
+            // map couldn't route a replayed translated handle until a new scan re-emitted it.
+            translator.prime(registry.heldBy(clientKey))
+        }
         outgoing(
             codec.encode(
                 ServerHello(version = PROTOCOL_VERSION, capabilities = negotiated, agentInfo = agentInfo),
             ),
         )
-        observer.onClientLog(clientId, "handshake: v${hello.maxVersion}, capabilities=$negotiated")
+        // Log after the send so the dashboard never records a handshake the client didn't receive.
+        // The repeated-hello line keeps what the client asked for — the divergence first-hello-wins
+        // silently ignores is exactly what an operator needs to see when debugging that client.
+        if (first) {
+            observer.onClientLog(clientId, "handshake: v${hello.maxVersion}, capabilities=$negotiated")
+            Logger.info(LogTags.SERVER) { "handshake [c=$clientId]: v${hello.maxVersion}, caps=$negotiated, translate=${Capabilities.IDENTIFIER_TRANSLATION in negotiated}, fmt=${hello.identifierFormat}" }
+        } else {
+            observer.onClientLog(
+                clientId,
+                "repeated hello ignored (negotiation fixed): client asked " +
+                    "v${hello.minVersion}..${hello.maxVersion}, capabilities=${hello.capabilities}, " +
+                    "identifierFormat=${hello.identifierFormat}",
+            )
+            Logger.warn(LogTags.SERVER) { "repeated hello ignored [c=$clientId]" }
+        }
+    }
+
+    /**
+     * Emits a bond-state change — but only to a client that negotiated `pairing` (the same
+     * decode-loop rationale as [emitSlotsIfNegotiated]: an unnegotiated event type could break
+     * the client's decode loop). The solicited reply payload carries the state either way.
+     */
+    private suspend fun emitBondStateIfNegotiated(device: DeviceHandle, state: BleBondState) {
+        if (Capabilities.PAIRING !in negotiated) return
+        emit(AgentEvent.BondState(device, state))
     }
 
     /** Reports free/total connection slots — but only to a client that negotiated `slots`. */

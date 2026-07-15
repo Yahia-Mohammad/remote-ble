@@ -31,8 +31,8 @@ class RustAgentInteropTest {
 
     @Test
     fun serverHello() = assertDecodes(
-        "826c7365727665725f68656c6c6fa36776657273696f6e016c6361706162696c6974696573816b64657363726970746f7273696167656e74496e666f781852656d6f7465426c652d4167656e742d525320302e312e30",
-        ServerHello(version = 1, capabilities = setOf("descriptors"), agentInfo = "RemoteBle-Agent-RS 0.1.0"),
+        "826c7365727665725f68656c6c6fa36776657273696f6e016c6361706162696c6974696573816b64657363726970746f7273696167656e74496e666f781852656d6f7465426c652d4167656e742d525320302e392e30",
+        ServerHello(version = 1, capabilities = setOf("descriptors"), agentInfo = "RemoteBle-Agent-RS 0.9.0"),
     )
 
     @Test

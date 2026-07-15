@@ -68,15 +68,17 @@ class AgentConnection(private val scope: CoroutineScope) {
         RemotePeripheral(handle, session, name)
 
     /** Releases the socket and session. Safe to call when already idle. */
-    fun close() {
+    suspend fun close() {
+        val retiring = session.value
         session.value = null
+        retiring?.close()
         client?.close()
         client = null
         url = null
         token = null
     }
 
-    private fun obtain(url: String, token: String): AgentSession {
+    private suspend fun obtain(url: String, token: String): AgentSession {
         val current = session.value
         if (current != null && this.url == url && this.token == token &&
             current.transportState.value != TransportState.DISCONNECTED

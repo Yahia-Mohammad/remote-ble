@@ -26,13 +26,9 @@ data class AgentConfig(
     val port: Int = DEFAULT_PORT,
     val authToken: String? = null,
     val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
-    /** Whether a connected peripheral is exclusive to its client (the per-peripheral default). */
     val exclusiveByDefault: Boolean = true,
-    /** How long a peripheral may stay BLE-disconnected before its lease is released. */
     val leaseGrace: Duration = 10.seconds,
-    /** How long a dropped client's links are kept warm before its leases are released. */
     val transportGrace: Duration = 10.seconds,
-    /** How often [ConnectionWatcher] runs its active (real GATT round-trip) liveness probe. */
     val livenessProbeInterval: Duration = 15.seconds,
 ) {
     companion object {
@@ -47,10 +43,12 @@ data class AgentConfig(
  * their plain constructors; this module just resolves them via `get()`.
  */
 fun agentModule(config: AgentConfig): Module = module {
+    require(config.exclusiveByDefault) {
+        "Shared peripheral mode is unavailable in RemoteBLE 0.9.0; use exclusive ownership"
+    }
     single { config }
     single<DispatcherProvider> { DefaultDispatcherProvider }
     single { AgentMonitor() }
-    // Shared identifier strict-mode switch: one instance the BleAgents read and the dashboard flips.
     single { StrictModeState() }
     // Agent-lifetime scope: survives any single connection so leases, grace timers, and
     // post-disconnect teardown outlive the per-WebSocket scope.
@@ -63,7 +61,7 @@ fun agentModule(config: AgentConfig): Module = module {
             scope = get(qualifier = org.koin.core.qualifier.named("agent")),
             leaseGrace = config.leaseGrace,
             transportGrace = config.transportGrace,
-            defaultExclusive = config.exclusiveByDefault,
+            defaultExclusive = true,
             onRelease = { handle -> backend.disconnect(DeviceHandle(handle)) },
         )
     }
@@ -77,9 +75,7 @@ fun agentModule(config: AgentConfig): Module = module {
             lifecycleScope = get(qualifier = org.koin.core.qualifier.named("agent")),
             maxConnections = config.maxConnections,
             observer = get<AgentMonitor>(),
-            // capabilities defaults to the backend's own (EngineBleBackend → descriptors).
-            // btleplug exposes no bonding/MTU control, so pairing and conn.priority stay off.
-            agentInfo = "kable/${platformName()}",
+            agentInfo = "RemoteBLE Agent 0.9.0 (kable/${platformName()})",
             strictMode = get(),
         )
     }

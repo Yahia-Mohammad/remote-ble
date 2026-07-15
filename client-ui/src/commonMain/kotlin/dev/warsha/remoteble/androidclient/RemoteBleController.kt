@@ -132,7 +132,7 @@ class RemoteBleController(
         scanJob = null
         local.update { it.copy(isScanning = false, status = "Scan stopped.") }
         // Release the socket when fully idle; keep it alive while a device is connected.
-        if (active.value == null) agent.close()
+        if (active.value == null) scope.launch { agent.close() }
     }
 
     fun connectDevice(handle: DeviceHandle, name: String?) {
@@ -185,6 +185,6 @@ class RemoteBleController(
     /** Releases the socket and peripheral. Callers cancel [parentScope] (and thus [scope]) separately. */
     fun close() {
         active.value?.close()
-        agent.close()
+        scope.launch { agent.close() }
     }
 }

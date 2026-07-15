@@ -1,19 +1,19 @@
 name: Release
 
 # Publish :protocol + :client-sdk to Maven Central. This is MANUAL (workflow_dispatch) on purpose:
-# most releases (0.8.1 / 0.8.2 / 0.8.3 …) ship agent binaries to GitHub Releases via
+# most releases (0.8.1 / 0.8.2 / 0.8.3 / 0.9.0 …) ship agent binaries to GitHub Releases via
 # agent-artifacts.yml but are NOT published to Central — that conserves the monthly Central file
-# quota (272 files/release, 1,000/month). Only deliberate milestone publishes (e.g. 0.9.0) run this
-# workflow, consolidating the accumulated SDK changes into one Central spend.
+# quota (272 files/release, 1,000/month). Only deliberate milestone publishes (next up: 0.10.0) run
+# this workflow, consolidating the accumulated SDK changes into one Central spend.
 #
-# To publish: Actions → Release → Run workflow, supply the version tag (e.g. `v0.9.0`). The tag must
+# To publish: Actions → Release → Run workflow, supply the version tag (e.g. `v0.10.0`). The tag must
 # already exist and its VERSION_NAME (gradle.properties) is the source of truth for the artifact
 # version — the guard below refuses to publish if the tag and VERSION_NAME disagree.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version tag to publish to Maven Central (must exist, e.g. v0.9.0)"
+        description: "Version tag to publish to Maven Central (must exist, e.g. v0.10.0)"
         required: true
         type: string
 
@@ -31,14 +31,7 @@ jobs:
       # `v` against VERSION_NAME in gradle.properties.
       - name: Verify tag matches VERSION_NAME
         run: |
-          version_name="$(grep -E '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
-          tag_version="${TAG#v}"
-          echo "Tag input:     ${TAG} (version ${tag_version})"
-          echo "VERSION_NAME:  ${version_name}"
-          if [ "${tag_version}" != "${version_name}" ]; then
-            echo "::error::Tag ${TAG} does not match VERSION_NAME ${version_name} at that ref — refusing to publish."
-            exit 1
-          fi
+          bash scripts/check-release-version.sh "${TAG}"
         env:
           TAG: ${{ inputs.tag }}
 

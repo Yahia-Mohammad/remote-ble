@@ -158,10 +158,12 @@ Two items only a real peripheral can validate:
   coalescing design (0.8.3 feature C) is measured against.
 - **Write-without-response *ordering* under pipelining (0.8.3 / C).** After measuring the baseline,
   drive `RemotePeripheral.writeWithoutResponseBurst` with `window > 1` and confirm the peripheral's
-  write log records the payloads in submission order. Order is *guaranteed in code* on both sides —
-  the client sends in order and the agent chains writes per device (asserted in CI by
-  `BleAgentTest.concurrentWritesToOneDeviceReachBackendInSubmissionOrder`) — so this run is
-  confirming the plan's §2d/§3 invariant end-to-end on a real radio, not probing for an unfixed gap.
+  write log records the payloads in submission order. Both agents now guarantee this in code: the
+  Kotlin agent chains writes per device (asserted by
+  `BleAgentTest.concurrentWritesToOneDeviceReachBackendInSubmissionOrder`), and the 0.9.0 addendum
+  added the same reservation to the Rust agent (asserted by
+  `transport::server::tests::cancelled_write_reservation_unblocks_the_next_write`). Run this check
+  against both agents before tagging to confirm the guarantee holds on a real radio, not just in CI.
 
 The **error paths** (write-with-response `WRITE_FAILED`, WWR still `Ok` on the same reject) are now
 exercised automatically by the runner's "Force write error" prompts above, not a separate manual step.

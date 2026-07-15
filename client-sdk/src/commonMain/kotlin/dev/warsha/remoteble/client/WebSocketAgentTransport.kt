@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
+import dev.warsha.remoteble.log.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocketSession
@@ -116,13 +117,13 @@ class WebSocketAgentTransport(
             try {
                 openSession()
             } catch (e: Throwable) {
-                // A one-shot failure would otherwise strand a client that started before its
-                // agent: openSession() only arms the backoff loop from a post-CONNECTED drop,
-                // never from the first attempt. With reconnect enabled, keep trying in the
-                // background so the initial connect self-heals like a reconnect does.
                 if (reconnect.enabled && !closed) {
+                    Logger.warn(LogTags.TRANSPORT) {
+                        "initial connect failed, starting reconnect loop: ${e.message}"
+                    }
                     scope.launch { reconnectWithBackoff() }
                 } else {
+                    Logger.error(LogTags.TRANSPORT) { "initial connect failed (reconnect disabled): ${e.message}" }
                     throw e
                 }
             }
@@ -152,18 +153,17 @@ class WebSocketAgentTransport(
         val s = try {
             val token = authToken()
             httpClient.webSocketSession(urlString = url) {
-                // A blank provider result is treated the same as null: send no Authorization
-                // header at all (an empty `Bearer ` would just be a malformed credential). This is
-                // how an empty token means "connect unauthenticated" against a token-free agent.
                 token?.takeIf { it.isNotBlank() }?.let { header(HttpHeaders.Authorization, "Bearer $it") }
                 header(CLIENT_ID_HEADER, clientId)
             }
         } catch (e: Throwable) {
             _state.value = TransportState.DISCONNECTED
+            Logger.debug(LogTags.TRANSPORT) { "openSession failed: ${e.message}" }
             throw e
         }
         session = s
         _state.value = TransportState.CONNECTED
+        Logger.info(LogTags.TRANSPORT) { "CONNECTED [cid=$clientId]" }
         scope.launch { receiveLoop(s) }
     }
 
@@ -173,17 +173,17 @@ class WebSocketAgentTransport(
                 if (frame is Frame.Binary) incomingChannel.trySend(frame.readBytes())
             }
         } catch (_: Throwable) {
-            // fall through to disconnect handling
+            Logger.debug(LogTags.TRANSPORT) { "receive loop closed" }
         } finally {
             onDisconnected(s)
         }
     }
 
     private fun onDisconnected(closedSession: DefaultClientWebSocketSession) {
-        // Ignore stale receive loops from a session we already replaced.
         if (session !== closedSession && session != null) return
         session = null
         _state.value = TransportState.DISCONNECTED
+        Logger.info(LogTags.TRANSPORT) { "DISCONNECTED [cid=$clientId]" }
         if (reconnect.enabled && !closed) {
             scope.launch { reconnectWithBackoff() }
         }
@@ -206,11 +206,16 @@ class WebSocketAgentTransport(
                     if (closed || _state.value == TransportState.CONNECTED) return
                     openSession()
                 }
+                Logger.info(LogTags.TRANSPORT) { "reconnected after $attempt attempt(s) [cid=$clientId]" }
                 return
             } catch (_: Throwable) {
                 if (maxAttempts != null && attempt >= maxAttempts) {
+                    Logger.error(LogTags.TRANSPORT) { "reconnect gave up after $attempt attempt(s) [cid=$clientId]" }
                     if (!closed) reconnect.onGaveUp?.invoke()
                     return
+                }
+                Logger.warn(LogTags.TRANSPORT) {
+                    "reconnect attempt $attempt failed, backing off [cid=$clientId]"
                 }
             }
         }

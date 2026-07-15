@@ -74,6 +74,10 @@ On the WebSocket upgrade request:
 3. The agent MAY assign its own per-connection id for logging/monitoring; that id is internal
    and MUST NOT be used as the ownership key.
 
+This section covers the **transport-level** handshake only. The in-band **protocol** handshake —
+version and capability negotiation via the `hello` / `server_hello` frames — happens after the
+upgrade, over the established link (§5.3).
+
 ## 5. Serialization & message envelope
 
 ### 5.1 Codec
@@ -99,13 +103,15 @@ The JSON form of a `Command` is illustrative of the model (CBOR is the binary eq
 
 ### 5.2 Envelope — `Frame`
 
-Three frame types (discriminator `type`):
+Five frame types (discriminator `type`):
 
 | `type` | Direction | Fields | Meaning |
 |---|---|---|---|
 | `cmd`   | client → agent | `cid: i64`, `op: Op` | A request (§7). |
 | `reply` | agent → client | `cid: i64`, `result: OpResult` | The response to the `cmd` with the same `cid`. |
 | `event` | agent → client | `event: AgentEvent` | Unsolicited (§8). |
+| `hello` | client → agent | `minVersion: i32 = 1`, `maxVersion: i32 = 1`, `capabilities: [string] = []`, `identifierFormat?: string` | In-band handshake: the protocol-version range the client speaks and the capability strings it understands (§5.3). `identifierFormat` is one of §6.1's values. |
+| `server_hello` | agent → client | `version: i32`, `capabilities: [string]`, `agentInfo?: string` | The agent's handshake answer: the chosen version and the negotiated capability set (§5.3). `agentInfo` is an optional human-readable engine/platform label for logs. |
 
 Rules:
 - `cid` is **client-assigned** and MUST be unique among the client's in-flight requests on a
@@ -113,6 +119,55 @@ Rules:
   echo it verbatim in the matching `reply` and MUST NOT mint or reorder it.
 - The agent MUST emit **exactly one** `reply` per `cmd` it accepts. (`Event`s carry no `cid`.)
 - `Event`s are routed by ids inside the event (`scanId` / `subId` / `device`), not by `cid`.
+- The `hello` frames carry no `cid`; a `hello` is answered by a `server_hello`, not a `reply`.
+
+### 5.3 Handshake & capability negotiation (`hello` / `server_hello`)
+
+Optional features beyond the §7/§8 baseline are gated by **capability strings** agreed in the
+in-band `hello` exchange:
+
+1. The client SHOULD send a `hello` as its first frame on every connection, declaring the
+   protocol-version range it speaks and the capability strings it understands. A client
+   requesting `identifier.translate` SHOULD also declare its `identifierFormat` (§6.1).
+2. The agent MUST answer every `hello` with a `server_hello` carrying the protocol version it
+   speaks and the negotiated capability set — `clientCapabilities ∩ agentSupported`. (With only
+   protocol version 1 defined, the reference agents answer `1` unconditionally and do not yet
+   inspect the client's declared range; version *selection* becomes meaningful only when a
+   second protocol version exists. On a repeated `hello` the reply restates the first
+   negotiation regardless of the range it declares — see first-hello-wins below.)
+3. The agent MUST NOT advertise a capability it does not actually implement, and MUST NOT send
+   a capability-gated event type to a client that has not negotiated that capability — an
+   unnegotiated event type would break the client's decode loop. Negotiation does **not** gate
+   op execution: an agent MAY serve a capability-specific op the client never negotiated (both
+   reference agents do), and `UNSUPPORTED` (§9) signals only that the agent itself does not
+   implement the op — so a client MUST gate capability-specific ops on the negotiated set
+   rather than rely on rejection.
+
+Properties:
+
+- **Negotiation is lenient, not a gate.** A client MAY issue `cmd`s before — or without ever —
+  sending a `hello`. The agent MUST serve such commands at the **v1 baseline**: empty
+  capability set, untranslated handles. The baseline is read live, not latched per-command:
+  an event stream opened before the hello (e.g. a scan) starts carrying translated handles
+  once a later hello negotiates translation, so a client that interleaves commands with its
+  `hello` must tolerate the switch — or simply send the `hello` first, as the reference
+  client does.
+- **First hello wins (per connection).** The negotiated set (and the §6.1 translation
+  configuration) is fixed by the **first** `hello` the agent receives on a connection. A
+  repeated `hello` MUST be answered idempotently — a `server_hello` carrying the
+  already-negotiated set — and MUST NOT renegotiate: renegotiating mid-session could un-gate
+  event types the client's decode loop no longer expects and invalidate handle translation
+  already in force. A reconnect is a new connection and negotiates from scratch.
+- **Unknown capability strings are harmless.** Capabilities are strings, not an enum: a decoder
+  MUST accept capability strings it does not know; they simply never intersect. This is the
+  forward-compat mechanism — new optional features ship without a version bump.
+- The `hello` exchange carries **no auth credential or ownership id** — those stay on the
+  upgrade headers (§4).
+
+Capability strings are defined where their feature is specified (this spec defines
+`identifier.translate`, §6.1); the reference registry is
+[`Capabilities.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
+in `:protocol`.
 
 ## 6. Identifiers
 
@@ -129,7 +184,7 @@ platform may be unable to represent as its own local identifier. The optional, a
 `identifier.translate` capability lets the agent translate handles into the client's format:
 
 - The client MAY request `identifier.translate` and declare its local format via the
-  `ClientHello.identifierFormat` field — one of `STRING`, `UUID`, `MAC_ADDRESS`, `BLUEZ_JSON`
+  `hello` frame's `identifierFormat` field (§5.3) — one of `STRING`, `UUID`, `MAC_ADDRESS`, `BLUEZ_JSON`
   (a client that omits the field or the capability gets untranslated handles).
 - When the capability is negotiated, the agent MUST mint every **outgoing** `DeviceHandle.value`
   (in `scan.result`/`scan.batch`, `conn.state`, `bond.state`) in the client's declared format, and
@@ -141,6 +196,13 @@ platform may be unable to represent as its own local identifier. The optional, a
   capability is negotiated (a diagnostic aid to surface client/agent format mismatches). Absent the
   capability, or under strict mode, a client whose local type can't hold the format MUST fall back
   to using the handle as opaque identity.
+- **Resume interaction (leases, §10).** A reconnecting client replays ops carrying the translated
+  handles its *previous* connection was issued. Translation synthesis is one-way, so an agent that
+  implements both this capability and ownership leases MUST re-establish the reverse mappings for
+  the leases the reconnecting client still holds — the reference agents re-mint them
+  deterministically from the held real handles when the `hello` configures translation. Without
+  this, reconcile-on-reconnect silently fails for translated clients. (After an agent restart
+  there are no leases to re-seed from; a translated client must rescan — a documented limitation.)
 
 This is a backward-compatible `1.x` addition: peers that don't name the capability are unaffected.
 
@@ -229,10 +291,11 @@ stateful responsibility; an agent MUST implement it.
 - Each peripheral is **exclusive by default**: while client A holds a peripheral's lease, a
   `connect` from any other client B MUST be rejected with `PERIPHERAL_BUSY` **before** any radio
   call. `connect` by the current owner is idempotent `Ok` (§7).
-- Exclusivity MUST be switchable **per peripheral**, and the default MUST be configurable. The
-  switch is **operator-side** (agent configuration / management surface); a client MUST NOT be
-  able to change exclusivity to barge in. When a peripheral is non-exclusive ("shared"), the
-  agent MUST grant concurrent owners (the operator has accepted the collision risk).
+- For the 0.9.0 conformance surface, exclusivity MUST remain enabled. A shared-mode extension is
+  conformant only if it records every participant, scopes each participant's streams and grace,
+  fans out physical disconnects, and tears down the physical link only after the last participant
+  departs. Granting an untracked "guest" is non-conformant. The reference implementations MUST
+  use exclusive mode in 0.9.0 until that model is implemented under the 0.9.1 plan.
 
 ### 10.2 Lease model
 The lease lifecycle is uniform: an **"owner temporarily gone"** event schedules a per-lease
@@ -261,10 +324,9 @@ cannot be recognized on return; the agent MUST still release such a client's lea
 (and blocked by §10.1 until the grace elapses).
 
 ### 10.5 Configuration
-`leaseGrace`, `transportGrace`, and the default/ per-peripheral exclusivity MUST be operator
--configurable (the reference exposes `REMOTE_BLE_LEASE_GRACE_MS`, `REMOTE_BLE_TRANSPORT_GRACE_MS`,
-`REMOTE_BLE_EXCLUSIVE`, and a per-peripheral dashboard toggle). Specific knob names/UI are not
-normative; the *behaviors* above are.
+`leaseGrace` and `transportGrace` MUST be operator-configurable. A conformant implementation may
+expose ownership mode only after it implements the participant rules in §10.1. Specific knob
+names/UI are not normative; the *behaviors* above are.
 
 ## 11. Client obligations (reconnect, reconcile, timeouts)
 
@@ -302,13 +364,17 @@ These do not affect conformance; an agent MAY provide them:
 - [ ] Enforce bearer auth when configured (401 pre-upgrade) and accept the client-id header (§4).
 - [ ] Encode/decode all §6 types with the frozen `@SerialName` discriminators and `type` key (§5).
 - [ ] Echo `cid`; emit exactly one `reply` per accepted `cmd` (§5.2).
+- [ ] Answer every `hello` with the negotiated intersection; first hello wins (a repeated
+      `hello` MUST NOT renegotiate); serve pre-hello commands at the v1 baseline; never emit
+      an unnegotiated capability-gated event (§5.3).
 - [ ] Implement every `Op` with the stated semantics, payloads, and idempotency (§7).
 - [ ] Emit `scan.result` / `notification` / `conn.state` events as specified; keep BLE state
       independent of transport state (§8).
 - [ ] Use the §9 error taxonomy; never mint `TIMEOUT` / `TRANSPORT_LOST`; set `gattStatus` only
       for reached-radio kinds.
-- [ ] Enforce exclusive ownership with `PERIPHERAL_BUSY`, per-peripheral switchable, default
-      configurable; honor `leaseGrace`, `transportGrace`, and identity-based resume (§10).
+- [ ] Enforce exclusive ownership with `PERIPHERAL_BUSY`; do not expose shared mode without the
+      participant model required by §10; honor `leaseGrace`, `transportGrace`, and identity-based
+      resume (§10).
 
 **A client MUST:**
 - [ ] Treat `DeviceHandle` as opaque and obtain it from the agent (§6).

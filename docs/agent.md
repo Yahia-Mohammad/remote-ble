@@ -89,7 +89,7 @@ class AgentWebSocketServer(
     backend: AgentBackend = FakeAgentBackend(),
     authToken: String? = null,
     monitor: AgentMonitor? = null,          // optional: feeds the status dashboard
-    registry: PeripheralRegistry? = null,   // optional: powers the dashboard's exclusive/shared toggle
+    registry: PeripheralRegistry? = null,   // ownership/grace state; legacy shared toggle disabled for 0.9
     pingPeriod: Duration = 15.seconds,      // WebSocket keepalive: ping idle clients this often…
     pongTimeout: Duration = 40.seconds,     // …and close the session if no pong arrives within this
 ) {
@@ -251,8 +251,12 @@ private val observeJobs = mutableMapOf<Long, Job>()
 Cross-client ownership of the shared radio lives in one `PeripheralRegistry` injected into
 every `BleAgent`:
 
-- A peripheral is **leased to one client** while exclusive (the default; switchable per
-  peripheral). `Connect` acquires before the slot reservation, so an owned peripheral is
+> **0.9.0 release note:** the implementation described below still contains a legacy shared-mode
+> switch, but its one-owner-plus-untracked-guests model is not release-safe. The 0.9.0 addendum
+> disables that switch; a participant-based replacement is deferred to 0.9.1.
+
+- A peripheral is **leased to one client** while exclusive (the supported release mode).
+  `Connect` acquires before the slot reservation, so an owned peripheral is
   rejected with `PERIPHERAL_BUSY`.
 - The model is **uniform**: an "owner temporarily gone" event schedules a per-lease release
   timer; an "owner back" event cancels it. The cause only sets the delay and warmth.
@@ -275,9 +279,9 @@ every `BleAgent`:
 - **Resume needs identity.** Sockets get a fresh id each time, so ownership is keyed by the
   **stable client id** from the handshake (`CLIENT_ID_HEADER`); a returning client re-acquires
   its own leases. A client sending none falls back to its connection id and never resumes.
-- **The switch** is operator-side: `POST /api/peripheral/exclusive` (dashboard) or
-  `REMOTE_BLE_EXCLUSIVE` for the global default; `REMOTE_BLE_LEASE_GRACE_MS` /
-  `REMOTE_BLE_TRANSPORT_GRACE_MS` tune the windows (shown read-only on the dashboard).
+- The pre-0.9 implementation's operator switch is not part of the 0.9.0 release surface.
+  `REMOTE_BLE_LEASE_GRACE_MS` / `REMOTE_BLE_TRANSPORT_GRACE_MS` tune the windows (shown read-only
+  on the dashboard).
 
 The registry is engine-free and unit-tested with virtual time; the physical disconnect is the
 injected `onRelease` callback and `ConnectionWatcher` is the only piece that polls the radio.
@@ -537,8 +541,10 @@ The agent serves a live, mobile-friendly status page from the same Ktor server:
 updated from two sides: `AgentWebSocketServer` reports client connect/disconnect (id +
 remote address); `BleAgent` reports device lifecycle and scan-seen names through the
 `AgentObserver` hooks. Hardware is labelled from scan results and attributed to the owning
-client; when a client's socket drops, its hardware is released. It is **read-only** — it
-never touches the radio. Wiring the HTML dashboard is optional: construct
+client; when a client's socket drops, its hardware is released. The monitor itself is
+**read-only** and never touches the radio. The current dashboard bundle also mounts configuration
+mutation routes; the 0.9.0 release requires those routes to be authenticated or removed. Wiring the
+HTML dashboard is optional: construct
 `AgentWebSocketServer` without a `monitor` and the routes simply aren't installed. Its
 `snapshot(leases, settings): Snapshot` is the same call both consumers use — `snapshotJson`
 just serializes it for `/api/state`; the Android/iOS Compose UI (below) calls it directly,
@@ -565,8 +571,9 @@ Everything above — `EngineBleBackend`, `AgentWebSocketServer`, `Dashboard`, `A
 - [`ui/AgentApp.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/ui/AgentApp.kt)
   is a Compose Multiplatform mirror of the HTML dashboard — the same clients/ownership/log panels
   (one `LazyColumn`, `safeDrawingPadding` so it clears the status bar/notch under edge-to-edge),
-  the exclusive/shared toggle calling `PeripheralRegistry.setExclusive` directly, and a start/stop
-  control — polling `AgentMonitor.snapshot(...)` every second, same cadence as the HTML page. Two
+  a legacy exclusive/shared toggle calling `PeripheralRegistry.setExclusive` directly (disabled for
+  the 0.9.0 release), and a start/stop control — polling `AgentMonitor.snapshot(...)` every second,
+  same cadence as the HTML page. Two
   things the terminal agent gets for free but a phone must surface itself:
   - **Reachable address.** The UI shows `ws://<lan-ip>:<port>/agent` (or a "no Wi-Fi" notice),
     resolved per platform by the `lanIPv4Address()` `expect`/`actual` (Android: active-network
@@ -680,3 +687,55 @@ virtual-time tests for the Rust grace timers and a malformed-frame test for KMP)
 **live-radio** paths — a real adapter reset triggering re-subscribe, a real peripheral dropping
 on grace expiry, `disconnect_all` on shutdown — are deferred to a hardware bring-up round with
 the peripheral SDK.
+
+---
+
+## Logging
+
+The agent depends on the shared [`:log`](../log) module — the same `Logger` object the
+client SDK uses. The agent process initializes it at startup:
+
+```kotlin
+// Main.kt (JVM)
+Logger.sink = PrintlnSink
+Logger.level = parseLogLevel(System.getenv("REMOTE_BLE_LOG"))  // default: INFO
+```
+
+### Runtime log-level toggle
+
+The dashboard exposes `GET/POST /api/log-level` — a dropdown in the HTML page header
+that flips `Logger.level` live (no restart). Values: `trace`, `debug`, `info`, `warn`,
+`error`, `off`.
+
+### What's logged at each level
+
+| Level | Tag | What |
+|---|---|---|
+| **ERROR** | `agent/engine` | Unexpected op failure (internal error) |
+| **WARN** | `agent/server` | Undecodable frame dropped; 401 rejection; repeated hello ignored |
+| **WARN** | `agent/engine` | Connect failed; scan/observe ended on error |
+| **WARN** | `agent/watcher` | Liveness probe failed (unsolicited disconnect declared); probe tick exception |
+| **INFO** | `agent/server` | Client connected/disconnected; handshake negotiated |
+| **INFO** | `agent/engine` | Device connected/disconnected; unsolicited disconnect |
+| **INFO** | `agent/registry` | Lease acquired/resumed; lease grace expired → released |
+| **DEBUG** | `agent/engine` | Scan started/stopped; Kable connect/disconnect ok; Kable state → Disconnected (unsolicited drop) |
+| **DEBUG** | `agent/engine` | Translator primed N handle(s) |
+
+### Relationship to `AgentObserver`
+
+`AgentObserver` (the bounded, human-facing dashboard activity feed) and the `Logger`
+(the unbounded operational stream) are different products. The ~6 dashboard-relevant
+sites keep their `observer.onClientLog()` call *alongside* a `Logger` call. The logger
+is the primary operational record; the observer feeds `AgentMonitor`'s bounded
+`ArrayDeque<LogEntry>` (capped at 500) for the dashboard UI.
+
+### `agent-rs` logging
+
+The Rust agent uses `tracing`/`tracing-subscriber` (not the `:log` module — it's a
+separate codebase with its own ecosystem). It adds:
+- `--log-level` / `REMOTE_BLE_LOG` clap flag (seeds `EnvFilter` when `RUST_LOG` is unset)
+- `--log-format json` for journald/Loki
+- Per-connection `info_span!("conn", client, peer)` propagated into spawned op tasks
+
+See [agent-parity-verification.md](agent-parity-verification.md) for the full
+comparison.

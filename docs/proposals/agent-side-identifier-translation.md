@@ -128,3 +128,33 @@ What differs from the proposal above, as implemented:
   `StrictModeState`); `agent-rs` exposes it as a process flag (`--strict-identifiers` / env).
 - **Rust parity:** `agent-rs` implements the full translator (`src/translate.rs`), so both agents
   behave identically on the wire.
+
+## Reconnect & reconcile (added 2026-07-10)
+
+A gap found in review, fixed in both agents plus the client — **no wire change**:
+
+- **The gap.** The reverse map is per-connection and fills only when an *outgoing* event carries a
+  handle. Reconcile-on-reconnect replays ops with the handles the client was *previously issued* —
+  translated ones, under an active translation. On the fresh connection nothing had populated the
+  reverse map yet (synthesis is a one-way digest, so the agent cannot invert an incoming handle),
+  and the replayed `connect` reached the backend as an unknown device: **a transport blip
+  permanently broke resume for exactly the cross-platform pairings translation exists for.**
+  Compounding it, the client used to launch its hello and its reconcile replay as unordered
+  coroutines, so replayed ops could even arrive before translation was configured at all.
+- **The fix — deterministic re-seeding.** Synthesis is a pure digest of the real handle, so the
+  agent can *re-mint* (not invert). On the handshake, after configuring the translator, the agent
+  primes the reverse map from the real handles the `PeripheralRegistry` still holds for this
+  `clientKey` (`registry.heldBy(clientKey)` / `held_by(client_id)`): those warm leases —
+  live links plus the `transportGrace` window — are exactly the handles a reconciling client can
+  replay. `HandleTranslator.prime(realHandles)` re-runs the same synthesis `outgoing` would and
+  records the mappings. The client now also sends its hello and its reconcile replay from **one**
+  coroutine, hello first — frame order on the socket guarantees the agent configures (and primes)
+  translation before any replayed op arrives.
+- **Conformance note:** an agent that implements both `identifier.translate` and ownership leases
+  must re-seed on resume this way, or reconcile silently breaks for translated clients
+  (agent-proxy-spec §6.1).
+- **Remaining limitation (accepted):** after an **agent restart** there are no leases to seed from,
+  so a replayed translated handle cannot route — the client must rescan. Same-platform pairings are
+  unaffected (identity fast-path; handles pass through and stay valid wherever the OS keeps them
+  stable across agent restarts). Fixing the restart case would need the wire to carry real handles
+  back to the client (rejected in this proposal's non-goals) or persistent agent state.

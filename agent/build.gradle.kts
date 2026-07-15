@@ -52,6 +52,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             api(project(":protocol"))
+            implementation(project(":log"))
             implementation(libs.kotlinx.coroutines.core)
             // Kable core: the unified KMP BLE stack. On the JVM its backend is btleplug; on
             // Android/iOS it's the platform's own native BLE stack (no btleplug involved there).

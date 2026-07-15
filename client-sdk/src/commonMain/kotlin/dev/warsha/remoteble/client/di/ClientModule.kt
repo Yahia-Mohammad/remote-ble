@@ -6,6 +6,7 @@ import dev.warsha.remoteble.client.DefaultAgentSession
 import dev.warsha.remoteble.client.ReconnectPolicy
 import dev.warsha.remoteble.client.RetryPolicy
 import dev.warsha.remoteble.client.defaultRetryPolicyFor
+import com.juul.kable.PeripheralBuilder
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.client.RemotePeripheralFactory
 import dev.warsha.remoteble.client.RemoteScanner
@@ -32,6 +33,12 @@ public data class RemoteBleClientConfig(
     val authToken: suspend () -> String? = { null },
     val reconnect: ReconnectPolicy = ReconnectPolicy(),
     val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
+    /**
+     * Kable radio-level logging, applied only to a *local* [`Peripheral`][com.juul.kable.Peripheral]
+     * created via `peripheralFor(BleMode.LOCAL, …)`. `null` (the default) leaves Kable quiet.
+     * RemoteBLE logging (the [Logger] object) = the relay; Kable logging = the radio.
+     */
+    val kableLogging: (PeripheralBuilder.() -> Unit)? = null,
 )
 
 /**

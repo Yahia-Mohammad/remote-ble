@@ -5,6 +5,7 @@ import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.ErrorKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
@@ -29,6 +30,19 @@ class PeripheralRegistryTest {
 
         val denied = assertIs<Acquisition.Denied>(registry.acquire(p, b))
         assertEquals(a, denied.owner)
+    }
+
+    @Test
+    fun authorizationRequiresTheOwningClientAndALiveConnection() = runTest {
+        val registry = PeripheralRegistry(backgroundScope)
+
+        assertIs<PeripheralRegistry.Authorization.NotConnected>(registry.authorizeConnected(p, a))
+        registry.acquire(p, a)
+        assertIs<PeripheralRegistry.Authorization.NotConnected>(registry.authorizeConnected(p, a))
+
+        registry.onConnected(p, a)
+        assertIs<PeripheralRegistry.Authorization.Granted>(registry.authorizeConnected(p, a))
+        assertIs<PeripheralRegistry.Authorization.PeripheralBusy>(registry.authorizeConnected(p, b))
     }
 
     @Test
@@ -93,23 +107,11 @@ class PeripheralRegistryTest {
     }
 
     @Test
-    fun nonExclusivePeripheralGrantsEveryone() = runTest {
-        val registry = PeripheralRegistry(backgroundScope, defaultExclusive = false)
-        registry.acquire(p, a)
-        registry.onConnected(p, a)
-
-        assertIs<Acquisition.Granted>(registry.acquire(p, b))
-    }
-
-    @Test
-    fun switchingToSharedOpensAHeldPeripheral() = runTest {
-        val registry = PeripheralRegistry(backgroundScope) // exclusive by default
-        registry.acquire(p, a)
-        registry.onConnected(p, a)
-        assertIs<Acquisition.Denied>(registry.acquire(p, b))
-
-        registry.setExclusive(p, false) // operator opens it
-        assertIs<Acquisition.Granted>(registry.acquire(p, b))
+    fun sharedModeConfigurationIsRejected() = runTest {
+        val error = assertFailsWith<IllegalArgumentException> {
+            PeripheralRegistry(backgroundScope, defaultExclusive = false)
+        }
+        assertTrue(error.message.orEmpty().contains("Shared peripheral mode"))
     }
 
     @Test

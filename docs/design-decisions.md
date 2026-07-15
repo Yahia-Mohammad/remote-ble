@@ -249,8 +249,10 @@ bytes) keeps logs readable and avoids leaking payloads.
 ## Peripheral ownership
 
 BLE allows only one central↔peripheral link, and all clients share the agent's single
-radio. So the agent leases each peripheral to **one** client at a time (the default;
-switchable per peripheral). The shared `PeripheralRegistry` is the authority:
+radio. So the agent leases each peripheral to **one** client at a time. The shared
+`PeripheralRegistry` is the authority. The pre-0.9 implementation exposes a shared-mode switch,
+but the 2026-07-15 review found that it does not model participants safely; 0.9.0 disables that
+surface and 0.9.1 owns any full participant design.
 
 The model is **uniform**: anything that means "the owner is temporarily gone" schedules a
 per-lease release timer; anything that means "the owner is back" cancels it. The cause only
@@ -271,11 +273,9 @@ sets the delay and whether the radio link is kept warm.
   (`CLIENT_ID_HEADER`). A returning client matches its own leases; a client that sends none
   falls back to its connection id and simply never resumes. It identifies, not authenticates
   (that is the separate bearer token).
-- **The switch is operator-side.** Exclusivity defaults to block and is toggled per
-  peripheral from the dashboard (`POST /api/peripheral/exclusive`) or globally via
-  `REMOTE_BLE_EXCLUSIVE`. Both grace windows are process config (`REMOTE_BLE_LEASE_GRACE_MS` /
-  `REMOTE_BLE_TRANSPORT_GRACE_MS`), surfaced read-only on the dashboard. Clients cannot open a
-  peripheral to barge in.
+- **0.9 release policy is exclusive-only.** The legacy dashboard/config switch is removed or
+  disabled for 0.9.0. Both grace windows remain process config (`REMOTE_BLE_LEASE_GRACE_MS` /
+  `REMOTE_BLE_TRANSPORT_GRACE_MS`), surfaced read-only on the dashboard.
 
 The registry is engine-free (pure logic, virtual-time unit tests); the physical disconnect is
 an injected `onRelease` callback and `ConnectionWatcher` is the only piece that polls the radio.
@@ -321,8 +321,8 @@ history — whereas un-splitting is painful. So the bias is to defer until the p
 **The actual consumer pain is distribution, not repo layout.** The complaint "consumers must
 clone the whole repo to run an agent" is solved by *shipping the agent as a released artifact*
 (JVM fat JAR, `agent-rs` native binaries, on-device APK via GitHub Releases), which removes the
-clone-and-build step entirely without touching repo structure. That release workflow is tracked
-as remaining work in `ai-context/RELEASE_PLAN.md`.
+clone-and-build step entirely without touching repo structure. That release workflow and its current
+gates are tracked in the canonical [`ai-context/ROADMAP.md`](../ai-context/ROADMAP.md).
 
 ## Known boundaries & extension points
 

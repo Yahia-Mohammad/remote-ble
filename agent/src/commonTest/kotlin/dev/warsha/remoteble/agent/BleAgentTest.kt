@@ -104,10 +104,20 @@ class BleAgentTest {
         fun sendHello(wanted: Set<String>, identifierFormat: IdentifierFormat? = null) {
             toAgent.trySend(codec.encode(ClientHello(capabilities = wanted, identifierFormat = identifierFormat)))
         }
+
+        /** Ends this connection's incoming flow — the agent sees a transport drop. */
+        fun close() {
+            toAgent.close()
+        }
     }
 
     private suspend fun SharedFlow<Frame>.reply(cid: Long): OpResult =
         filterIsInstance<Reply>().first { it.cid == cid }.result
+
+    private suspend fun Harness.connect(cid: Long, device: DeviceHandle = this@BleAgentTest.device) {
+        send(cid, Op.Connect(device))
+        assertIs<OpResult.Ok>(frames.reply(cid))
+    }
 
     @Test
     fun malformedFrameIsSkippedAndSessionSurvives() = runTest {
@@ -165,6 +175,7 @@ class BleAgentTest {
         }
         val h = Harness(backgroundScope, backend)
 
+        h.connect(100)
         val count = 8
         for (n in 0 until count) {
             h.send(n.toLong(), Op.Write(device, char, byteArrayOf(n.toByte()), withResponse = false))
@@ -199,6 +210,8 @@ class BleAgentTest {
         }
         val h = Harness(backgroundScope, backend)
 
+        h.connect(100, device)
+        h.connect(101, deviceB)
         h.send(1, Op.Write(device, char, byteArrayOf(0xAA.toByte()), withResponse = false)) // device A, blocks
         aStarted.await()
         h.send(2, Op.Write(deviceB, char, byteArrayOf(0xBB.toByte()), withResponse = false)) // device B, must proceed
@@ -234,6 +247,7 @@ class BleAgentTest {
         val h = Harness(backgroundScope, backend)
         val desc = DescRef(service = char.service, characteristic = char.characteristic, descriptor = "2902")
 
+        h.connect(100)
         h.send(1, Op.ReadDescriptor(device, desc))
         val read = assertIs<OpResult.Ok>(h.frames.reply(1))
         assertEquals(listOf<Byte>(0x01, 0x00), assertIs<ResultPayload.Bytes>(read.payload).value.toList())
@@ -249,6 +263,7 @@ class BleAgentTest {
         // A backend that leaves the default BleBackend descriptor impls in place must
         // surface UNSUPPORTED rather than crash the op handler.
         val h = Harness(backgroundScope, MinimalBackend())
+        h.connect(100)
         h.send(1, Op.ReadDescriptor(device, DescRef("180d", "2a37", "2902")))
         assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
     }
@@ -256,7 +271,11 @@ class BleAgentTest {
     @Test
     fun pairUnpairRouteToBackendAndEmitBondState() = runTest {
         val backend = FakeBleBackend()
-        val h = Harness(backgroundScope, backend)
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.PAIRING))
+        // BondState is a capability-gated event: it is emitted only to a client that
+        // negotiated `pairing` (the reply payload carries the state regardless).
+        h.sendHello(setOf(Capabilities.PAIRING))
+        h.connect(100)
 
         h.send(1, Op.Pair(device))
         val paired = assertIs<OpResult.Ok>(h.frames.reply(1))
@@ -272,8 +291,28 @@ class BleAgentTest {
     }
 
     @Test
+    fun bondStateEventIsNotEmittedWithoutNegotiatedPairing() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.PAIRING))
+
+        // No hello: the op is still served — the solicited reply carries the bond state —
+        // but the capability-gated BondState event is suppressed.
+        h.connect(100)
+        h.send(1, Op.Pair(device))
+        val paired = assertIs<OpResult.Ok>(h.frames.reply(1))
+        assertEquals(BleBondState.BONDED, assertIs<ResultPayload.Bond>(paired.payload).state)
+
+        val event = withTimeoutOrNull(200) {
+            h.frames.filterIsInstance<Event>().map { it.event }
+                .filterIsInstance<AgentEvent.BondState>().first()
+        }
+        assertNull(event)
+    }
+
+    @Test
     fun pairIsUnsupportedWhenBackendDoesNotImplementIt() = runTest {
         val h = Harness(backgroundScope, MinimalBackend())
+        h.connect(100)
         h.send(1, Op.Pair(device))
         assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
     }
@@ -283,6 +322,7 @@ class BleAgentTest {
         val backend = FakeBleBackend()
         val h = Harness(backgroundScope, backend)
 
+        h.connect(100)
         h.send(1, Op.RequestConnectionPriority(device, ConnPriority.HIGH))
         assertIs<OpResult.Ok>(h.frames.reply(1))
         assertEquals(ConnPriority.HIGH, backend.lastConnectionPriority)
@@ -291,6 +331,7 @@ class BleAgentTest {
     @Test
     fun connectionPriorityIsUnsupportedWhenBackendDoesNotImplementIt() = runTest {
         val h = Harness(backgroundScope, MinimalBackend())
+        h.connect(100)
         h.send(1, Op.RequestConnectionPriority(device, ConnPriority.BALANCED))
         assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
     }
@@ -301,6 +342,7 @@ class BleAgentTest {
         val h = Harness(backgroundScope, backend)
         val hint = ConnParamHint(minIntervalMs = 20.0, maxIntervalMs = 40.0, latency = 0, supervisionTimeoutMs = 5000)
 
+        h.connect(100)
         h.send(1, Op.SetConnParams(device, ConnProfile.LOW_LATENCY, hint))
         assertIs<OpResult.Ok>(h.frames.reply(1))
         assertEquals(ConnProfile.LOW_LATENCY to hint, backend.lastConnParams)
@@ -309,6 +351,7 @@ class BleAgentTest {
     @Test
     fun setConnParamsIsUnsupportedWhenBackendDoesNotImplementIt() = runTest {
         val h = Harness(backgroundScope, MinimalBackend())
+        h.connect(100)
         h.send(1, Op.SetConnParams(device, ConnProfile.BALANCED))
         assertEquals(ErrorKind.UNSUPPORTED, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
     }
@@ -413,15 +456,45 @@ class BleAgentTest {
     }
 
     @Test
-    fun sharedPeripheralAllowsMultipleClients() = runTest {
-        val registry = PeripheralRegistry(backgroundScope, defaultExclusive = false)
-        val a = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientId = 1)
-        val b = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientId = 2)
+    fun nonOwnerCannotOperateAnExclusivePeripheralAfterLearningItsHandle() = runTest {
+        // A handle is observable through scan results, so every device-bearing op — not merely
+        // Connect — must go through the registry authorization gate before touching the backend.
+        val registry = PeripheralRegistry(backgroundScope)
+        val backend = FakeBleBackend()
+        val a = Harness(backgroundScope, backend, registry = registry, clientId = 1)
+        val b = Harness(backgroundScope, backend, registry = registry, clientId = 2)
+        a.connect(1)
 
-        a.send(1, Op.Connect(device))
-        assertIs<OpResult.Ok>(a.frames.reply(1))
-        b.send(1, Op.Connect(device))
-        assertIs<OpResult.Ok>(b.frames.reply(1))
+        val descriptor = DescRef(char.service, char.characteristic, "2902")
+        val unauthorizedOps = listOf<Op>(
+            Op.Discover(device),
+            Op.Read(device, char),
+            Op.Write(device, char, byteArrayOf(1), withResponse = true),
+            Op.RequestMtu(device, 247),
+            Op.ReadRssi(device),
+            Op.ReadDescriptor(device, descriptor),
+            Op.WriteDescriptor(device, descriptor, byteArrayOf(0, 0)),
+            Op.Pair(device),
+            Op.Unpair(device),
+            Op.RequestConnectionPriority(device, ConnPriority.HIGH),
+            Op.SetConnParams(device, ConnProfile.BALANCED),
+            Op.ObserveStart(subId = 9, device = device, char = char),
+            Op.Disconnect(device),
+        )
+
+        unauthorizedOps.forEachIndexed { index, op ->
+            val cid = (index + 10).toLong()
+            b.send(cid, op)
+            assertEquals(ErrorKind.PERIPHERAL_BUSY, assertIs<OpResult.Err>(b.frames.reply(cid)).error.kind)
+        }
+
+        // The denied write/disconnect are especially important: client B must not mutate the
+        // radio or tear down A's physical connection after learning the scanned handle.
+        assertNull(backend.lastWrite)
+        assertNull(backend.lastDescriptorWrite)
+        assertTrue(backend.pairCalls.isEmpty())
+        assertTrue(backend.unpairCalls.isEmpty())
+        assertTrue(backend.disconnectCalls.isEmpty())
     }
 
     @Test
@@ -589,5 +662,112 @@ class BleAgentTest {
         h.send(1, Op.ScanStart(scanId = 7))
         assertIs<OpResult.Ok>(h.frames.reply(1))
         assertEquals(realHandle.value, h.frames.firstScanResult(7).advertisement.device.value)
+    }
+
+    @Test
+    fun repeatedHelloDoesNotRenegotiateOrReplaceTheTranslator() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val h = Harness(
+            backgroundScope, backend,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION, Capabilities.CONNECTION_SLOTS),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        assertEquals(
+            setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            h.frames.filterIsInstance<ServerHello>().first().capabilities,
+        )
+
+        // Scan to mint a translated handle whose reverse mapping the translator must retain.
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+        val clientHandle = h.frames.firstScanResult(7).advertisement.device.value
+        assertNotEquals(realHandle.value, clientHandle)
+
+        // A second hello asking for a different set is answered idempotently: the ServerHello
+        // still carries the first negotiation, not a renegotiated one.
+        h.sendHello(setOf(Capabilities.CONNECTION_SLOTS))
+        val second = h.frames.filterIsInstance<ServerHello>().take(2).toList()[1]
+        assertEquals(setOf(Capabilities.IDENTIFIER_TRANSLATION), second.capabilities)
+
+        // And the handle minted before the repeated hello still routes to the real radio device —
+        // the translator (and its reverse map) was not replaced.
+        h.send(2, Op.Connect(DeviceHandle(clientHandle)))
+        assertEquals(OpResult.Ok(), h.frames.reply(2))
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun reconnectingClientsReplayedTranslatedHandleStillRoutes() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val registry = PeripheralRegistry(backgroundScope)
+
+        // First connection: negotiate translation, mint a translated handle via scan, connect.
+        val h1 = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        h1.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        h1.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h1.frames.reply(1))
+        val clientHandle = h1.frames.firstScanResult(7).advertisement.device.value
+        assertNotEquals(realHandle.value, clientHandle)
+        h1.send(2, Op.Connect(DeviceHandle(clientHandle)))
+        assertEquals(OpResult.Ok(), h1.frames.reply(2))
+
+        // The transport drops; the lease stays warm for the grace window.
+        h1.close()
+
+        // A fresh connection resumes: same clientKey, same shared registry. The client replays
+        // the handle its previous connection was issued (reconcile-on-reconnect, hello first).
+        // respondHello must prime the new translator from the warm lease so the replayed
+        // translated handle routes to the real radio device — no scan has re-emitted it here.
+        val h2 = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        h2.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        h2.send(1, Op.Connect(DeviceHandle(clientHandle)))
+        assertEquals(OpResult.Ok(), h2.frames.reply(1))
+        assertEquals(listOf(realHandle, realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun commandBeforeHelloIsBaselineAndALateHelloStillNegotiates() = runTest {
+        val h = Harness(
+            backgroundScope, FakeBleBackend(), maxConnections = 2,
+            capabilities = setOf(Capabilities.CONNECTION_SLOTS),
+        )
+
+        // An op before any hello is served under the v1 baseline: it succeeds, but no
+        // capability-gated event (SlotState) accompanies it.
+        h.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+        val slotBeforeHello = withTimeoutOrNull(200) {
+            h.frames.filterIsInstance<Event>().map { it.event }
+                .filterIsInstance<AgentEvent.SlotState>().first()
+        }
+        assertNull(slotBeforeHello)
+
+        // First-hello-wins keys off the first *hello*, not the first frame: a hello arriving
+        // after commands have already run must still negotiate.
+        h.sendHello(setOf(Capabilities.CONNECTION_SLOTS))
+        assertEquals(
+            setOf(Capabilities.CONNECTION_SLOTS),
+            h.frames.filterIsInstance<ServerHello>().first().capabilities,
+        )
+        h.send(2, Op.Disconnect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+        val slotAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.SlotState>().first()
+        assertEquals(2, slotAfterHello.free) // both slots free again — and the event now flows
     }
 }

@@ -24,7 +24,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.8.2")
+    implementation("dev.warsha.remoteble:client-sdk:0.9.0")
 }
 ```
 
@@ -45,8 +45,9 @@ dependency — see [Running the agent](#running-the-agent).
   real hardware on a lab machine; `:e2e-runner` is built for exactly this.
 - **Access remote BLE hardware** — drive a device beside another machine (a lab rig, a Raspberry Pi)
   from your laptop or CI over the network.
-- **Share one BLE device across a team** — the agent leases a peripheral to one client at a time
-  (exclusive by default, switchable to shared), so several people can use a scarce device without colliding.
+- **Coordinate one BLE device across a team** — the agent leases a peripheral exclusively to one
+  client at a time so several people can take turns without colliding. Shared mode is disabled for
+  0.9.0 pending a participant model.
 - **Add remote access to an existing local BLE system** — local-vs-remote is a factory choice
   (`peripheralFor(mode, …)`), so Kable code gains it with essentially no rewrite.
 
@@ -56,7 +57,8 @@ dependency — see [Running the agent](#running-the-agent).
 - **Multiplatform** — client on JVM/Android/iOS; agents on macOS/Linux (JVM *or* native Rust), Android, and iOS.
 - **Lightweight agent** — one self-bootstrapping script to run; the Rust agent is a single native binary, and phones run it from an app.
 - **Full GATT surface over the wire** — scan, connect, discover, read, write, observe (notify), descriptors, MTU, pairing, connection priority, connection slots, batched scan.
-- **Multi-client with peripheral ownership** — one agent serves many clients; peripherals are leased (exclusive by default, per-device shared/exclusive toggle) and ownership resumes across brief reconnects.
+- **Multi-client with exclusive peripheral ownership** — one agent serves many clients; each
+  peripheral is leased to one client at a time and ownership resumes across brief reconnects.
 - **Resilient by design** — reconcile-on-reconnect (auto-replays connections / subscriptions / scans), per-op-class timeouts, and WebSocket liveness pings.
 - **Transport-agnostic** — the transport seam is a plain byte pipe; WebSocket today, raw TCP or a cloud relay drop in without touching the session or BLE layers.
 - **Two agents, one wire contract** — a Kotlin/Kable and a native Rust/`btleplug` agent, both speaking the same versioned, capability-negotiated **CBOR** protocol (JSON for debugging), interop-tested.
@@ -88,6 +90,10 @@ Full implementation reference (APIs, internals, rationale) in [`docs/`](docs/REA
 architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 [agent](docs/agent.md), [end-to-end flows + sequence diagrams](docs/flows.md),
 [design rationale](docs/design-decisions.md), [build & testing](docs/build-and-testing.md).
+
+Release planning is maintained in [`ai-context/ROADMAP.md`](ai-context/ROADMAP.md). The 0.9.0 scope
+includes a required [code-review addendum](ai-context/0.9.0-review-addendum.md); remaining review
+hardening is scheduled in the [0.9.1 plan](ai-context/0.9.1-implementation-plan.md).
 
 ## Modules
 
@@ -238,8 +244,9 @@ Tap **Start** in the app; a laptop on the same network can then point a client (
 The agent serves a live, mobile-friendly status page at `http://<host>:8080/` (same
 port as the WebSocket endpoint) on every target, including the phone agents above. It
 shows connected RemoteBLE clients, connected hardware, and a rolling activity log,
-polling `GET /api/state` (JSON) once a second. It's read-only and never touches the
-radio. See `AgentMonitor` / `Dashboard.kt`. On Android/iOS the same data also drives a
+polling `GET /api/state` (JSON) once a second. It is read-only; configuration mutation routes are
+removed for 0.9.0 pending an authenticated operator plane. See `AgentMonitor` / `Dashboard.kt`.
+On Android/iOS the same data also drives a
 native Compose UI in the app itself — see [`docs/agent.md`](docs/agent.md#android--ios-a-phone-as-the-agent).
 
 ### Scan-only smoke test (no hardware peripheral needed)

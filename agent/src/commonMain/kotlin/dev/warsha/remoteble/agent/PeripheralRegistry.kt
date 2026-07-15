@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentError
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -28,8 +29,9 @@ import kotlinx.coroutines.sync.withLock
  *    **warm**, so a quick reconnect resumes with no re-pair/rediscover. On expiry [onRelease]
  *    tears the warm link down.
  *
- * Exclusivity is switchable per peripheral (operator-controlled; clients cannot change it),
- * defaulting to [defaultExclusive]. Engine-free and pure: timers run on [scope] so it
+ * The 0.9.0 release is exclusive-only. A multi-participant shared lease requires independent
+ * participant, stream, and grace tracking, so configuration that attempts to enable it is rejected
+ * rather than granting invisible guests. Engine-free and pure: timers run on [scope] so it
  * unit-tests with virtual time; the physical disconnect is the injected [onRelease] callback.
  *
  * [registerClient]/[onUnsolicitedDisconnect] exist because an unsolicited BLE drop is detected
@@ -44,9 +46,14 @@ class PeripheralRegistry(
     private val defaultExclusive: Boolean = true,
     private val onRelease: suspend (handle: String) -> Unit = {},
 ) {
+    init {
+        require(defaultExclusive) {
+            "Shared peripheral mode is unavailable in RemoteBLE 0.9.0; use exclusive ownership"
+        }
+    }
+
     private val mutex = Mutex()
     private val leases = mutableMapOf<String, Lease>()
-    private val exclusiveOverride = mutableMapOf<String, Boolean>()
     // clientKey -> how to push a disconnect notification to that client's live connection (with the
     // drop's reason, when known). Registered by BleAgent.start(); a reconnect's fresh registration
     // simply replaces the old.
@@ -61,6 +68,23 @@ class PeripheralRegistry(
 
         /** The peripheral is exclusively owned by [owner] (a stable client id). */
         data class Denied(val owner: String) : Acquisition
+    }
+
+    /**
+     * Result of authorizing a device-bearing operation for one stable client identity.
+     *
+     * A handle is routing data, not an authorization credential: knowing a scanned handle must not
+     * let another connection operate the peripheral. `Granted` means this client owns the lease and
+     * the physical link is live; callers may then invoke the backend without holding [mutex].
+     */
+    sealed interface Authorization {
+        data object Granted : Authorization
+
+        /** Another client owns the live or grace-window lease. */
+        data object PeripheralBusy : Authorization
+
+        /** No lease exists for this client, or its BLE link is not currently connected. */
+        data object NotConnected : Authorization
     }
 
     /** A consistent view of one peripheral's ownership, for the status dashboard. */
@@ -87,7 +111,7 @@ class PeripheralRegistry(
 
     /**
      * Reserves [handle] for [clientKey]. Grants if the peripheral is free, already owned by this
-     * client, or non-exclusive; otherwise denies with the current owner. Re-acquiring as the
+     * client; otherwise denies with the current owner. Re-acquiring as the
      * owner cancels any pending release (this is how a reconnecting client resumes its lease).
      */
     suspend fun acquire(handle: String, clientKey: String): Acquisition = mutex.withLock {
@@ -95,14 +119,31 @@ class PeripheralRegistry(
         when {
             lease == null -> {
                 leases[handle] = Lease(clientKey, connected = false, graceJob = null)
+                Logger.info(LogTags.REGISTRY) { "lease acquired [dev=$handle owner=$clientKey]" }
                 Acquisition.Granted
             }
             lease.owner == clientKey -> {
                 lease.cancelGrace()
+                Logger.info(LogTags.REGISTRY) { "lease resumed [dev=$handle owner=$clientKey]" }
                 Acquisition.Granted
             }
-            !exclusiveFor(handle) -> Acquisition.Granted // shared: ownership is not enforced
             else -> Acquisition.Denied(lease.owner)
+        }
+    }
+
+    /**
+     * Authorizes a device-bearing operation that requires an active BLE connection.
+     *
+     * This is deliberately a registry query rather than a per-[BleAgent] `connected` check: the
+     * registry is the cross-client ownership authority. It also rejects the pre-0.9 shared-mode
+     * "guest" path, whose participant lifecycle is not represented safely yet.
+     */
+    suspend fun authorizeConnected(handle: String, clientKey: String): Authorization = mutex.withLock {
+        val lease = leases[handle] ?: return@withLock Authorization.NotConnected
+        when {
+            lease.owner != clientKey -> Authorization.PeripheralBusy
+            !lease.connected -> Authorization.NotConnected
+            else -> Authorization.Granted
         }
     }
 
@@ -156,6 +197,16 @@ class PeripheralRegistry(
     suspend fun ownerOf(handle: String): String? = mutex.withLock { leases[handle]?.owner }
 
     /**
+     * The real handles of every lease [clientKey] currently holds — live or in a grace window.
+     * A reconnecting client's fresh connection uses this to re-seed its handle translations
+     * (see `BleAgent.respondHello`): the warm leases are exactly the handles whose translated
+     * forms the client may replay.
+     */
+    suspend fun heldBy(clientKey: String): Set<String> = mutex.withLock {
+        leases.filterValues { it.owner == clientKey }.keys.toSet()
+    }
+
+    /**
      * An unsolicited BLE drop — reported by [ConnectionWatcher], either from the backend's native
      * [BleBackend.connectionDrops] stream (fast, carries a [reason]) or from its cached-state /
      * active-liveness polling (fallback). Never an explicit `Disconnect` op (that already emits its
@@ -198,12 +249,6 @@ class PeripheralRegistry(
         Unit
     }
 
-    /** Operator switch: open ([exclusive] = false) or block a peripheral to multiple clients. */
-    suspend fun setExclusive(handle: String, exclusive: Boolean) = mutex.withLock {
-        exclusiveOverride[handle] = exclusive
-        Unit
-    }
-
     /** A consistent snapshot of all current leases, for status/monitoring. */
     suspend fun snapshot(): List<LeaseInfo> = mutex.withLock {
         leases.map { (handle, lease) ->
@@ -212,7 +257,7 @@ class PeripheralRegistry(
                 owner = lease.owner,
                 connected = lease.connected,
                 inGrace = lease.graceJob?.isActive == true,
-                exclusive = exclusiveFor(handle),
+                exclusive = true,
             )
         }
     }
@@ -232,13 +277,14 @@ class PeripheralRegistry(
                     false
                 }
             }
-            if (released) runCatchingNonCancellation { onRelease(handle) } // best-effort warm-link teardown
+            if (released) {
+                Logger.info(LogTags.REGISTRY) { "lease grace expired → released [dev=$handle]" }
+                runCatchingNonCancellation { onRelease(handle) } // best-effort warm-link teardown
+            }
         }
     }
 
     // Caller must hold [mutex].
-    private fun exclusiveFor(handle: String): Boolean = exclusiveOverride[handle] ?: defaultExclusive
-
     private fun Lease.cancelGrace() {
         graceJob?.cancel()
         graceJob = null

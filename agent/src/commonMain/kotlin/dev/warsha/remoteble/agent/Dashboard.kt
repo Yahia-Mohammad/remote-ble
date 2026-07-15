@@ -1,24 +1,22 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
-import io.ktor.server.request.receiveParameters
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
-import io.ktor.server.routing.post
 
 /**
  * The agent's live status dashboard: a single responsive (mobile-friendly) HTML page
  * served at `/`, backed by a JSON snapshot at `/api/state` that the page polls. Shows
  * connected RemoteBLE clients, peripheral ownership, and a rolling activity log.
  *
- * Mostly read-only; the mutations are operator switches: `POST /api/peripheral/exclusive`
- * (form: `handle`, `value`) toggles a peripheral between exclusive (one client) and shared, and
- * `POST /api/strict` (form: `value`) flips identifier strict mode agent-wide (see [StrictModeState]).
- * Neither touches the radio.
+ * Read-only status surface. Management mutations are deliberately absent in the 0.9.0 release:
+ * shared-mode and live dashboard settings are not safe to expose without an authenticated operator
+ * plane.
  */
 fun Routing.dashboardRoutes(
     monitor: AgentMonitor,
@@ -30,31 +28,13 @@ fun Routing.dashboardRoutes(
         val leases = registry?.snapshot().orEmpty()
         call.respondText(monitor.snapshotJson(leases, registry?.settings()), ContentType.Application.Json)
     }
-    post("/api/peripheral/exclusive") {
-        val params = call.receiveParameters()
-        val handle = params["handle"]
-        val value = params["value"]?.toBooleanStrictOrNull()
-        if (registry == null || handle.isNullOrBlank() || value == null) {
-            call.respond(HttpStatusCode.BadRequest)
-        } else {
-            registry.setExclusive(handle, value)
-            call.respondText("ok")
-        }
-    }
-    // Identifier strict-mode switch. GET reports the current state (404 when the feature isn't wired,
-    // so the dashboard hides its button); POST sets it and echoes the resulting value.
+    // Identifier strict-mode status. There is intentionally no mutation endpoint in 0.9.0.
     get("/api/strict") {
         if (strictMode == null) call.respond(HttpStatusCode.NotFound)
         else call.respondText(strictMode.enabled.toString())
     }
-    post("/api/strict") {
-        val value = call.receiveParameters()["value"]?.toBooleanStrictOrNull()
-        if (strictMode == null || value == null) {
-            call.respond(HttpStatusCode.BadRequest)
-        } else {
-            strictMode.enabled = value
-            call.respondText(strictMode.enabled.toString())
-        }
+    get("/api/log-level") {
+        call.respondText(Logger.level?.name?.lowercase() ?: "off")
     }
 }
 
@@ -96,12 +76,7 @@ private val DASHBOARD_HTML = """
   .row.grace { opacity:.55; }
   .tag { font-size:11px; padding:1px 6px; border-radius:10px; border:1px solid var(--border); color:var(--muted); }
   .tag.excl { color:var(--warn); border-color:var(--warn); }
-  .tag.shared { color:var(--accent2); border-color:var(--accent2); }
   .tag.grace { color:var(--warn); border-color:var(--warn); }
-  .toggle { margin-left:8px; font-size:11px; padding:2px 8px; border-radius:6px; cursor:pointer;
-    background:var(--panel); color:var(--text); border:1px solid var(--border); }
-  .toggle:hover { border-color:var(--accent2); }
-  .toggle.on { color:var(--warn); border-color:var(--warn); }
   .log { font-family:var(--mono); font-size:12.5px; }
   .log .row { padding:5px 14px; border-bottom:none; }
   .log .t { color:var(--muted); }
@@ -122,8 +97,6 @@ private val DASHBOARD_HTML = """
     <span>owned <b id="dN">0</b></span>
     <span>grace <b id="grace">—</b></span>
   </div>
-  <button class="toggle" id="strictBtn" title="Identifier strict mode: pass handles through untranslated"
-    onclick="toggleStrict()" style="display:none">strict: —</button>
 </header>
 <main>
   <section class="panel">
@@ -150,43 +123,6 @@ private val DASHBOARD_HTML = """
   function esc(s) { return (s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
   function time(ms) { return new Date(ms).toLocaleTimeString(); }
 
-  async function setExcl(handle, value) {
-    try {
-      await fetch("/api/peripheral/exclusive", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: "handle=" + encodeURIComponent(handle) + "&value=" + value,
-      });
-      poll();
-    } catch (e) { /* next poll will reconcile */ }
-  }
-
-  let strictOn = false;
-  function renderStrict() {
-    const b = ${'$'}("strictBtn");
-    b.style.display = "";
-    b.textContent = "strict: " + (strictOn ? "on" : "off");
-    b.classList.toggle("on", strictOn);
-  }
-  async function loadStrict() {
-    try {
-      const r = await fetch("/api/strict", { cache: "no-store" });
-      if (!r.ok) { ${'$'}("strictBtn").style.display = "none"; return; }
-      strictOn = (await r.text()) === "true";
-      renderStrict();
-    } catch (e) { /* leave hidden */ }
-  }
-  async function toggleStrict() {
-    try {
-      const r = await fetch("/api/strict", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: "value=" + (!strictOn),
-      });
-      if (r.ok) { strictOn = (await r.text()) === "true"; renderStrict(); }
-    } catch (e) { /* next load will reconcile */ }
-  }
-
   const short = id => (id && id.length > 8) ? id.slice(0, 8) : id;
 
   function render(s) {
@@ -198,8 +134,7 @@ private val DASHBOARD_HTML = """
     if (s.settings) {
       const sec = ms => Math.round(ms / 1000) + "s";
       ${'$'}("grace").textContent = "lease " + sec(s.settings.leaseGraceMs) +
-        " · link " + sec(s.settings.transportGraceMs) +
-        (s.settings.defaultExclusive ? "" : " · shared-default");
+        " · link " + sec(s.settings.transportGraceMs);
     }
 
     ${'$'}("clients").innerHTML = s.clients.length ? s.clients.map(c =>
@@ -210,15 +145,10 @@ private val DASHBOARD_HTML = """
 
     ${'$'}("devices").innerHTML = s.leases.length ? s.leases.map(l => {
       const state = l.inGrace ? `<span class="tag grace">releasing…</span>` : "";
-      const excl = l.exclusive
-        ? `<span class="tag excl">exclusive</span>`
-        : `<span class="tag shared">shared</span>`;
-      const next = (!l.exclusive).toString();
-      const btn = `<button class="toggle" onclick="setExcl('${'$'}{l.handle}', ${'$'}{next})">` +
-        (l.exclusive ? "make shared" : "make exclusive") + `</button>`;
+      const excl = `<span class="tag excl">exclusive</span>`;
       return `<div class="row${'$'}{l.inGrace ? " grace" : ""}"><span class="name">${'$'}{esc(l.name || "(unnamed)")}</span>` +
         `<span class="meta">${'$'}{esc(l.handle)} · via ${'$'}{esc(short(l.owner))}</span>` +
-        ` ${'$'}{state} ${'$'}{excl}<span class="ago">${'$'}{btn}</span></div>`;
+        ` ${'$'}{state} ${'$'}{excl}</div>`;
     }).join("")
       : `<div class="empty">No peripherals owned. Clients can still scan.</div>`;
 
@@ -237,7 +167,6 @@ private val DASHBOARD_HTML = """
     }
   }
   poll();
-  loadStrict();
   setInterval(poll, 1000);
 </script>
 </body>

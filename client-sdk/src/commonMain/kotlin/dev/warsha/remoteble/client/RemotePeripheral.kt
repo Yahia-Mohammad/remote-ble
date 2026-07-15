@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.client
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
@@ -81,13 +82,14 @@ public class RemotePeripheral(
     private var connectionScope: CoroutineScope? = null
 
     init {
-        // React to physical-link drops reported by the agent (independent of any
-        // IP-transport reconnect). Surfaces the drop into Kable's state machine.
         session.events()
             .filterIsInstance<AgentEvent.ConnectionState>()
             .filter { it.device == handle }
             .onEach { event ->
                 if (event.state == BleConnState.DISCONNECTED && _state.value !is State.Disconnected) {
+                    Logger.info(LogTags.PERIPHERAL) {
+                        "unsolicited disconnect [dev=${handle.value} reason=${event.reason}]"
+                    }
                     teardownConnection()
                     _state.value = State.Disconnected(null)
                 }
@@ -100,13 +102,12 @@ public class RemotePeripheral(
             initializeGattConnection()
             val connection = establishConnectionScope()
             _state.value = State.Connected(connection)
+            Logger.info(LogTags.PERIPHERAL) { "connected [dev=${handle.value}]" }
             return connection
         } catch (t: Throwable) {
             if (t !is CancellationException) {
-                // A later step (discover/mtu) may have failed after the agent already
-                // brought the link up; tell it to drop so we don't leak a half-open
-                // connection that only the agent's release grace would eventually reap.
                 runCatchingNonCancellation { gatt.disconnect() }
+                    .onFailure { Logger.debug(LogTags.PERIPHERAL) { "cleanup disconnect on connect failure: ${it.message}" } }
                 teardownConnection()
                 _state.value = State.Disconnected(null)
             }
@@ -121,10 +122,9 @@ public class RemotePeripheral(
         _state.value = State.Connecting.Services
         _services.value = gatt.discover().map { it.toDiscoveredService() }
 
-        // Learn link MTU if supported by agent/platform; fall back to ATT default
         runCatchingNonCancellation {
             negotiatedMtu.value = gatt.requestMtu(requestedMtu)
-        }
+        }.onFailure { Logger.debug(LogTags.PERIPHERAL) { "MTU request failed (best-effort): ${it.message}" } }
 
         _state.value = State.Connecting.Observes
     }
@@ -137,7 +137,9 @@ public class RemotePeripheral(
     override suspend fun disconnect() {
         _state.value = State.Disconnecting
         runCatchingNonCancellation { gatt.disconnect() }
+            .onFailure { Logger.debug(LogTags.PERIPHERAL) { "disconnect teardown failed: ${it.message}" } }
         teardownConnection()
+        Logger.info(LogTags.PERIPHERAL) { "disconnected [dev=${handle.value}]" }
         _state.value = State.Disconnected(null)
     }
 
@@ -161,7 +163,9 @@ public class RemotePeripheral(
         window: Int = RemoteGattClient.DEFAULT_BURST_WINDOW,
     ): List<Result<Unit>> =
         gatt.writeWithoutResponseBurst(characteristic.toCharRef(), values, window)
-            .map { result -> runCatching { result.orThrow(); Unit } }
+            .map { result -> runCatching { result.orThrow(); Unit }
+                .onFailure { Logger.debug(LogTags.PERIPHERAL) { "WWR burst item failed: ${it.message}" } }
+            }
 
     override fun observe(characteristic: Characteristic, onSubscriptionAction: suspend () -> Unit): Flow<ByteArray> =
         gatt.observe(characteristic.toCharRef(), onSubscriptionAction)

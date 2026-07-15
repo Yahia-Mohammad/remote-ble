@@ -7,6 +7,40 @@ on:
     branches: [main]
 
 jobs:
+  release-version:
+    name: Release version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify version sources
+        run: bash scripts/check-release-version.sh
+
+  rust:
+    name: Rust format, lint, and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('agent-rs/Cargo.lock') }}
+      - name: Format, lint, and test
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
+
   jvm-android:
     name: JVM build + test, Android klibs
     runs-on: ubuntu-latest

@@ -1,21 +1,32 @@
 use crate::protocol::{
     errors::AgentError,
     events::AgentEvent,
-    op::{CharRef, DeviceHandle},
+    op::{CharRef, DeviceHandle, ScanFilter},
     results::ResultPayload,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+
+/// Identifies a client-owned streaming resource inside the agent. Protocol stream IDs are only
+/// unique within one WebSocket connection, so the backend must never use them as global keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamKey {
+    pub connection: u64,
+    pub local_id: i64,
+}
 
 #[async_trait]
 pub trait BleBackend: Send + Sync {
     fn capabilities(&self) -> Vec<String>;
     async fn start_scan(
         &self,
-        scan_id: i64,
+        stream: StreamKey,
+        filters: Vec<ScanFilter>,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), AgentError>;
-    async fn stop_scan(&self, scan_id: i64) -> Result<(), AgentError>;
+    async fn stop_scan(&self, stream: StreamKey) -> Result<(), AgentError>;
+    /// Releases every scan/observation owned by a retired WebSocket connection.
+    async fn stop_connection_streams(&self, connection: u64) -> Result<(), AgentError>;
     async fn connect(
         &self,
         device: &DeviceHandle,
@@ -42,10 +53,10 @@ pub trait BleBackend: Send + Sync {
     ) -> Result<ResultPayload, AgentError>;
     async fn start_observe(
         &self,
-        sub_id: i64,
+        stream: StreamKey,
         device: &DeviceHandle,
         char_ref: &CharRef,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<(), AgentError>;
-    async fn stop_observe(&self, sub_id: i64) -> Result<(), AgentError>;
+    async fn stop_observe(&self, stream: StreamKey) -> Result<(), AgentError>;
 }

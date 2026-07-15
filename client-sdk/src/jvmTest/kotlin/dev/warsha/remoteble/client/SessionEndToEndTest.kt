@@ -8,6 +8,7 @@ import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
@@ -30,8 +31,14 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
@@ -65,6 +72,107 @@ class SessionEndToEndTest {
 
         suspend fun awaitConnected() {
             session.transportState.first { it == TransportState.CONNECTED }
+        }
+    }
+
+    /**
+     * A minimal transport supporting repeated connect cycles that records every frame the
+     * session sends, in order, and answers every Command with `Ok` (so ops succeed and enter
+     * the replay set). [InMemoryTransport] can't reconnect (its pipes close on drop), and this
+     * ordering property is about *what the client puts on the wire*, not agent behavior.
+     */
+    private class RecordingTransport(private val codec: CborProtocolCodec) : AgentTransport {
+        val sent = mutableListOf<dev.warsha.remoteble.protocol.Frame>()
+        private val mutableState = MutableStateFlow(TransportState.DISCONNECTED)
+        private val replies = Channel<ByteArray>(Channel.UNLIMITED)
+        override val state: StateFlow<TransportState> = mutableState.asStateFlow()
+        override val incoming: Flow<ByteArray> = replies.receiveAsFlow()
+
+        override suspend fun connect() {
+            mutableState.value = TransportState.CONNECTED
+        }
+
+        override suspend fun send(frame: ByteArray) {
+            val decoded = codec.decode(frame)
+            sent += decoded
+            if (decoded is Command) replies.trySend(codec.encode(Reply(decoded.cid, OpResult.Ok())))
+        }
+
+        override suspend fun close() {
+            mutableState.value = TransportState.DISCONNECTED
+        }
+
+        // Split (not one call): a synchronous DISCONNECTED→CONNECTED flip gets conflated
+        // away by the StateFlow — the session's collector must observe the drop first.
+        fun drop() {
+            mutableState.value = TransportState.DISCONNECTED
+        }
+
+        fun reconnect() {
+            mutableState.value = TransportState.CONNECTED
+        }
+    }
+
+    @Test
+    fun reconnectSendsHelloBeforeReplayedOps() = runTest {
+        val codec = CborProtocolCodec()
+        val transport = RecordingTransport(codec)
+        val session = DefaultAgentSession(transport, codec, backgroundScope)
+        session.transportState.first { it == TransportState.CONNECTED }
+
+        // Establish something to replay.
+        assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
+
+        transport.drop()
+        runCurrent() // the collector must observe the drop before the reconnect
+        val sentBeforeDrop = transport.sent.size
+        transport.reconnect()
+        runCurrent() // let the hello + reconcile coroutine run to completion
+
+        // Everything sent after the reconnect: the hello MUST precede the replayed Connect —
+        // a replayed op served at the agent's pre-hello baseline would carry a translated
+        // handle the agent couldn't route (the agent re-seeds its translator on the hello).
+        val afterReconnect = transport.sent.drop(sentBeforeDrop)
+        assertIs<ClientHello>(
+            afterReconnect.firstOrNull(),
+            "the reconnect's first frame must be the hello, before any replayed op",
+        )
+        assertTrue(
+            afterReconnect.drop(1).any { it is Command && it.op is Op.Connect },
+            "the replayed Connect must follow the hello",
+        )
+    }
+
+    @Test
+    fun close_retires_session_and_prevents_later_reconnect_activity() = runTest {
+        val codec = CborProtocolCodec()
+        val transport = RecordingTransport(codec)
+        val session = DefaultAgentSession(transport, codec, backgroundScope)
+        session.transportState.first { it == TransportState.CONNECTED }
+        runCurrent()
+        val sentBeforeClose = transport.sent.size
+
+        session.close()
+        transport.reconnect()
+        runCurrent()
+
+        assertEquals(sentBeforeClose, transport.sent.size, "retired session must not send a new hello or replay")
+        assertIs<OpResult.Err>(session.request(Op.Connect(device)))
+    }
+
+    @Test
+    fun repeated_session_replacement_leaves_no_retired_session_active() = runTest {
+        val codec = CborProtocolCodec()
+        repeat(100) {
+            val transport = RecordingTransport(codec)
+            val session = DefaultAgentSession(transport, codec, backgroundScope)
+            session.transportState.first { it == TransportState.CONNECTED }
+            runCurrent()
+            val sentBeforeClose = transport.sent.size
+            session.close()
+            transport.reconnect()
+            runCurrent()
+            assertEquals(sentBeforeClose, transport.sent.size)
         }
     }
 

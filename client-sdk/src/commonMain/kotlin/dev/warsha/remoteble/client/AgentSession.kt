@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.client
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.Capabilities
@@ -24,8 +25,11 @@ import kotlin.time.TimeSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
@@ -98,6 +102,9 @@ interface AgentSession {
 
     /** Best-effort, fire-and-forget op for teardown (scan.stop / observe.stop). */
     fun fireAndForget(op: Op)
+
+    /** Permanently retires this session, its transport, pending work, and reconnect activity. */
+    suspend fun close()
 
     companion object {
         val DEFAULT_TIMEOUT: Duration = 15.seconds
@@ -191,13 +198,16 @@ class DefaultAgentSession(
     private val transport: AgentTransport,
     private val codec: ProtocolCodec,
     private val scope: CoroutineScope,
-    // The capabilities this client understands, sent in every ClientHello. Defaults to
-    // empty (the v1 baseline); grows as the SDK gains descriptor/pairing support.
     private val clientCapabilities: Set<String> = emptySet(),
-    // Resolves the retry policy for each op. Default = per-op-type defaults ([defaultRetryPolicyFor]);
-    // a caller can still override any single call via request(op, retry = …).
     private val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
 ) : AgentSession {
+
+    // Do not own or cancel the caller's scope: a session gets its own child so endpoint/token
+    // replacement can await retirement before a replacement session starts reconnecting.
+    private val sessionJob = SupervisorJob(scope.coroutineContext[Job])
+    private val sessionScope = CoroutineScope(scope.coroutineContext + sessionJob)
+    private val closeLock = Mutex()
+    private var closed = false
 
     private val ids = AtomicLong(0)
     private val pending = mutableMapOf<Long, CompletableDeferred<OpResult>>()
@@ -229,13 +239,16 @@ class DefaultAgentSession(
     init {
         // Decode incoming frames: complete matching requests, fan out events, record
         // the negotiated capability set from the agent's handshake reply.
-        scope.launch {
+        sessionScope.launch {
             transport.incoming.collect { bytes ->
                 when (val frame = codec.decode(bytes)) {
                     is Reply -> complete(frame.cid, frame.result)
                     is Event -> _events.emit(frame.event)
-                    is ServerHello -> _capabilities.value = frame.capabilities
-                    is Command, is ClientHello -> Unit // a client never receives these
+                    is ServerHello -> {
+                        _capabilities.value = frame.capabilities
+                        Logger.info(LogTags.SESSION) { "agent hello — negotiated caps: ${frame.capabilities}" }
+                    }
+                    is Command, is ClientHello -> Unit
                 }
             }
         }
@@ -243,25 +256,29 @@ class DefaultAgentSession(
         // a reconnect AFTER a prior connection triggers reconcile (the first connect does
         // not — there is nothing to replay yet). Reconcile runs off the collector so a
         // slow replay can't delay reacting to a subsequent drop.
-        scope.launch {
+        sessionScope.launch {
             var everConnected = false
             transport.state.collect { state ->
                 when (state) {
                     TransportState.CONNECTED -> {
-                        // Re-handshake on every (re)connection: the agent may have restarted
-                        // or upgraded, so the negotiated set is not assumed to survive a drop.
                         _capabilities.value = null
-                        scope.launch { sendHello() }
-                        if (everConnected) scope.launch { reconcileOnReconnect() }
+                        val replay = everConnected
+                        sessionScope.launch {
+                            sendHello()
+                            if (replay) reconcileOnReconnect()
+                        }
                         everConnected = true
                     }
-                    TransportState.DISCONNECTED -> failAllPending()
+                    TransportState.DISCONNECTED -> {
+                        Logger.info(LogTags.SESSION) { "transport lost — failing in-flight requests" }
+                        failAllPending()
+                    }
                     TransportState.CONNECTING -> Unit
                 }
             }
         }
         // Establish the link once; the transport owns reconnect-with-backoff thereafter.
-        scope.launch { runCatching { transport.connect() } }
+        sessionScope.launch { runCatching { transport.connect() } }
     }
 
     override fun nextStreamId(): Long = ids.incrementAndFetch()
@@ -273,11 +290,21 @@ class DefaultAgentSession(
         while (true) {
             attempt++
             val result = attemptRequest(op, timeout)
-            if (result is OpResult.Ok) return result
+            if (result is OpResult.Ok) {
+                Logger.debug(LogTags.SESSION) { "request ok: ${op::class.simpleName} cid=${ids.load()}" }
+                return result
+            }
             val error = (result as OpResult.Err).error
-            val pause = policy.retryDelay(attempt, error, started.elapsedNow()) ?: return result
-            // For a lost link, wait (up to the chosen delay) for it to come back rather than
-            // burning the attempt on an instant TRANSPORT_LOST; other errors just back off.
+            val pause = policy.retryDelay(attempt, error, started.elapsedNow())
+            if (pause == null) {
+                Logger.debug(LogTags.SESSION) {
+                    "request failed (stop): ${op::class.simpleName} kind=${error.kind} message=${error.message}"
+                }
+                return result
+            }
+            Logger.debug(LogTags.SESSION) {
+                "request retry ${attempt}: ${op::class.simpleName} kind=${error.kind} delay=${pause}"
+            }
             if (error.kind == ErrorKind.TRANSPORT_LOST) {
                 withTimeoutOrNull(pause) { transport.state.first { it == TransportState.CONNECTED } }
             } else {
@@ -298,8 +325,13 @@ class DefaultAgentSession(
     private suspend fun sendCommand(op: Op): Pair<Long, CompletableDeferred<OpResult>> {
         val cid = ids.incrementAndFetch()
         val deferred = CompletableDeferred<OpResult>()
+        if (closeLock.withLock { closed }) {
+            deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "session closed")))
+            return cid to deferred
+        }
         if (transport.state.value != TransportState.CONNECTED) {
             deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "transport not connected")))
+            Logger.debug(LogTags.SESSION) { "sendCommand failed: transport not connected cid=$cid" }
             return cid to deferred
         }
         pendingLock.withLock { pending[cid] = deferred }
@@ -310,6 +342,7 @@ class DefaultAgentSession(
             throw e
         } catch (e: Throwable) {
             removePending(cid)
+            Logger.warn(LogTags.SESSION) { "sendCommand failed: ${e.message} cid=$cid" }
             deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = e.message)))
         }
         return cid to deferred
@@ -338,13 +371,16 @@ class DefaultAgentSession(
         // runs off the caller's coroutine (on the session scope) so dispatch() returns immediately,
         // letting the caller send its next frame without waiting on this one's Reply.
         val (cid, deferred) = sendCommand(op)
-        return scope.async { awaitReply(op, cid, deferred, timeout) }
+        return sessionScope.async { awaitReply(op, cid, deferred, timeout) }
     }
 
     override fun events(): SharedFlow<AgentEvent> = _events.asSharedFlow()
 
     override fun fireAndForget(op: Op) {
-        scope.launch { runCatchingNonCancellation { request(op, FIRE_AND_FORGET_TIMEOUT) } }
+        sessionScope.launch {
+            runCatchingNonCancellation { request(op, FIRE_AND_FORGET_TIMEOUT) }
+                .onFailure { Logger.debug(LogTags.SESSION) { "fireAndForget op=${op::class.simpleName} failed: ${it.message}" } }
+        }
     }
 
     private suspend fun complete(cid: Long, result: OpResult) {
@@ -401,13 +437,15 @@ class DefaultAgentSession(
             scans = activeScans.values.toList()
             connParams = lastConnParams.values.toList()
         }
+        val started = TimeSource.Monotonic.markNow()
         connections.forEach { request(Op.Connect(it)) }
-        // After the device's Connect: params need a live link, and replaying them is idempotent
-        // like the rest of this reconcile, so a transport blip can't quietly revert a peripheral
-        // to a battery-hungry interval.
         connParams.forEach { request(it) }
         subscriptions.forEach { request(it) }
         scans.forEach { request(it) }
+        val elapsed = started.elapsedNow()
+        Logger.info(LogTags.SESSION) {
+            "reconciled ${connections.size} conn(s), ${connParams.size} param(s), ${subscriptions.size} sub(s), ${scans.size} scan(s) in ${elapsed.inWholeMilliseconds}ms"
+        }
     }
 
     /**
@@ -417,20 +455,18 @@ class DefaultAgentSession(
      * drop path will fire and a reconnect will re-handshake.
      */
     private suspend fun sendHello() {
+        val caps = clientCapabilities + Capabilities.IDENTIFIER_TRANSLATION
+        val fmt = currentIdentifierFormat()
         runCatchingNonCancellation {
             transport.send(
                 codec.encode(
-                    ClientHello(
-                        // Always request handle translation and declare our local Identifier format:
-                        // it's purely additive (an agent that doesn't support it won't negotiate it,
-                        // leaving handles untranslated) and lets a supporting agent hand us handles
-                        // this platform can turn into a native Kable Identifier.
-                        capabilities = clientCapabilities + Capabilities.IDENTIFIER_TRANSLATION,
-                        identifierFormat = currentIdentifierFormat(),
-                    ),
+                    ClientHello(capabilities = caps, identifierFormat = fmt),
                 ),
             )
+        }.onFailure {
+            Logger.debug(LogTags.SESSION) { "sendHello failed: ${it.message}" }
         }
+        Logger.info(LogTags.SESSION) { "hello sent (caps=${caps.size}, fmt=$fmt)" }
     }
 
     private suspend fun failAllPending() {
@@ -441,6 +477,27 @@ class DefaultAgentSession(
         }
         val lost = OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST))
         drained.forEach { it.complete(lost) }
+    }
+
+    override suspend fun close() {
+        val shouldClose = closeLock.withLock {
+            if (closed) false else {
+                closed = true
+                true
+            }
+        }
+        if (!shouldClose) return
+
+        _capabilities.value = null
+        failAllPending()
+        replayLock.withLock {
+            activeConnections.clear()
+            activeSubscriptions.clear()
+            activeScans.clear()
+            lastConnParams.clear()
+        }
+        transport.close()
+        sessionJob.cancelAndJoin()
     }
 
     companion object {

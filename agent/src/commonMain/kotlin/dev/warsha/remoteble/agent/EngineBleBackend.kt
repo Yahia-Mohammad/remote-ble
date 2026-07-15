@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.Capabilities
@@ -143,9 +144,7 @@ class EngineBleBackend(
     override suspend fun connect(device: DeviceHandle) {
         val peripheral = resolve(device)
         bleOp(ErrorKind.CONNECTION_FAILED) { peripheral.connect() }
-        // Watch this connection for an unsolicited drop and surface it (with a reason) on `drops`
-        // immediately, rather than waiting for ConnectionWatcher's poll. One watcher per connect();
-        // a reconnect makes a fresh peripheral and a fresh watcher.
+        Logger.debug(LogTags.ENGINE) { "Kable connect ok [dev=${device.value}]" }
         scope.launch { watchForUnsolicitedDrop(device, peripheral) }
     }
 
@@ -159,7 +158,10 @@ class EngineBleBackend(
     private suspend fun watchForUnsolicitedDrop(device: DeviceHandle, peripheral: Peripheral) {
         val disconnected = peripheral.state.first { it is State.Disconnected } as State.Disconnected
         val stillActive = synchronized(lock) { peripherals[device] === peripheral }
-        if (stillActive) drops.tryEmit(ConnectionDrop(device, disconnected.reason()))
+        if (stillActive) {
+            Logger.debug(LogTags.ENGINE) { "Kable state → Disconnected [dev=${device.value} reason=${disconnected.status}]: unsolicited drop" }
+            drops.tryEmit(ConnectionDrop(device, disconnected.reason()))
+        }
     }
 
     /** Maps Kable's disconnect [State.Disconnected.Status] to a wire [AgentError] cause. */
@@ -170,12 +172,12 @@ class EngineBleBackend(
         val peripheral = synchronized(lock) { peripherals.remove(device) } ?: return
         try {
             peripheral.disconnect()
+            Logger.debug(LogTags.ENGINE) { "Kable disconnect ok [dev=${device.value}]" }
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
-            // Best-effort: the link is torn down regardless of how disconnect reports.
+            Logger.warn(LogTags.ENGINE) { "Kable disconnect error (best-effort) [dev=${device.value}]: ${t.message}" }
         } finally {
-            // Always release the native peripheral; a reconnect recreates a fresh one.
             runCatchingNonCancellation { peripheral.close() }
         }
     }

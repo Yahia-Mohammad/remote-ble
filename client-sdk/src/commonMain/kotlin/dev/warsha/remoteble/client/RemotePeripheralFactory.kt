@@ -4,6 +4,7 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import com.juul.kable.Advertisement
 import com.juul.kable.ExperimentalApi
 import com.juul.kable.Peripheral
+import com.juul.kable.PeripheralBuilder
 
 /** Selects whether a [Peripheral] talks to a local radio or a remote agent. */
 public enum class BleMode { LOCAL, REMOTE }
@@ -38,8 +39,9 @@ public fun peripheralFor(
     mode: BleMode,
     advertisement: Advertisement,
     session: AgentSession? = null,
+    kableLogging: (PeripheralBuilder.() -> Unit)? = null,
 ): Peripheral = when (mode) {
-    BleMode.LOCAL -> Peripheral(advertisement)
+    BleMode.LOCAL -> Peripheral(advertisement) { kableLogging?.invoke(this) }
     BleMode.REMOTE -> {
         require(advertisement is RemoteAdvertisement) { "REMOTE mode requires a RemoteAdvertisement" }
         requireNotNull(session) { "REMOTE mode requires an AgentSession" }

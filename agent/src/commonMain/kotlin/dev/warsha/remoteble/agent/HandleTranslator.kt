@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.DeviceHandle
@@ -65,6 +66,19 @@ internal class HandleTranslator(
             }
         }
         return client
+    }
+
+    /**
+     * Pre-populates the reverse map for [realHandles] by re-running the deterministic synthesis —
+     * exactly the mapping [outgoing] would record when an event carries each handle. Called on the
+     * handshake with the real handles this client's leases still hold (a reconnect within the
+     * transport grace), so an op replayed with a previously-issued translated handle routes again
+     * even though this fresh connection has emitted no event for it yet. No-op when not
+     * translating (identity/strict/same-format clients replay real handles, which pass through).
+     */
+    suspend fun prime(realHandles: Collection<String>) {
+        for (real in realHandles) toClient(real)
+        if (realHandles.isNotEmpty()) Logger.debug(LogTags.ENGINE) { "translator primed ${realHandles.size} handle(s)" }
     }
 
     /** Client-facing handle → the real radio handle (identity when unmapped/untranslated). */

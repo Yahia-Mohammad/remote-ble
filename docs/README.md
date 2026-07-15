@@ -7,6 +7,12 @@ plan.
 
 For quickstart/build commands see [`../README.md`](../README.md).
 
+Release scope is maintained separately from this implementation reference in
+[`../ai-context/ROADMAP.md`](../ai-context/ROADMAP.md). Its 0.9.0
+[review addendum](../ai-context/0.9.0-review-addendum.md) and
+[0.9.1 plan](../ai-context/0.9.1-implementation-plan.md) are the canonical implementation plans
+for the 2026-07-15 review findings.
+
 ## Documents
 
 | Document | Covers |
@@ -22,6 +28,7 @@ For quickstart/build commands see [`../README.md`](../README.md).
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
+| [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
 
 ### Proposals (design records)
 
@@ -80,10 +87,11 @@ and swapped in isolation.
 
 | Module / Project | Role | Dependencies | Targets |
 |---|---|---|---|
+| [`:log`](../log) | Shared logging facade: `Logger` (global object), `LogLevel`, `LogSink`, platform sinks, `bytesPreview`, `RateLimitedLog`. Zero external deps. | none | JVM, Android, iOS |
 | [`:protocol`](../protocol) | The wire contract + CBOR/JSON codec. Pure data, **no BLE, no network**. | kotlinx-serialization only | JVM, Android, iOS |
-| [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters. | `:protocol`, coroutines, Ktor client, Kable | JVM (tests), Android, iOS |
-| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, + a Compose Multiplatform status UI on mobile. | `:protocol`, coroutines, Ktor server, Kable, Compose Multiplatform | JVM, Android, iOS |
-| [`agent-rs`](../agent-rs) | Native cross-platform Bluetooth agent. Standalone CLI agent, same CBOR wire contract (interop-tested). Run: `run-agent-rs.sh`. | tokio, tokio-tungstenite, btleplug, serde/ciborium | macOS, Linux |
+| [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters. | `:protocol`, `:log`, coroutines, Ktor client, Kable | JVM (tests), Android, iOS |
+| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, + a Compose Multiplatform status UI on mobile. | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform | JVM, Android, iOS |
+| [`agent-rs`](../agent-rs) | Native cross-platform Bluetooth agent. Standalone CLI agent, same CBOR wire contract (interop-tested). Run: `run-agent-rs.sh`. | tokio, tokio-tungstenite, btleplug, serde/ciborium, tracing | macOS, Linux |
 
 `:protocol` is the shared contract both sides compile against. `:client-sdk` and
 `:agent` never depend on each other in production — they only meet on the wire. (A

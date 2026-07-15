@@ -670,3 +670,48 @@ The SDK never references Koin internally — the module is a convenience at the 
 root, not a dependency of the library. Override the bound `CoroutineScope` if your app owns
 a lifecycle scope (e.g. a ViewModel scope) so the session/transport coroutines die with it;
 the default is a process-lifetime supervisor scope.
+
+---
+
+## Logging
+
+The client SDK depends on the shared [`:log`](../log) module, which provides a global
+`Logger` object — a mutable minimum level gating a pluggable `LogSink`. The SDK
+**defaults silent** (`Logger.level = null`); consumers opt in with two lines:
+
+```kotlin
+import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.log.LogLevel
+import dev.warsha.remoteble.log.PrintlnSink   // or AndroidLogSink / AppleLogSink
+
+Logger.sink = PrintlnSink
+Logger.level = LogLevel.DEBUG
+```
+
+### What's logged at each level
+
+| Level | What | Where |
+|---|---|---|
+| **ERROR** | Reconnect gave up; initial connect failed (reconnect disabled) | `WebSocketAgentTransport` |
+| **WARN** | Reconnect attempt N failed (backing off); sendCommand transport error | `WebSocketAgentTransport`, `DefaultAgentSession` |
+| **INFO** | CONNECTED / DISCONNECTED; transport lost; reconciled N connections/subs/scans in Xms; hello sent; negotiated caps | `WebSocketAgentTransport`, `DefaultAgentSession`, `RemotePeripheral` |
+| **DEBUG** | Request ok / failed / retry; sendCommand not connected; fireAndForget failure; sendHello failure; MTU failure; cleanup/teardown; WWR burst item failure | `DefaultAgentSession`, `RemotePeripheral` |
+| **TRACE** | Payload bytes (truncated); per-event traffic — not used by current instrumentation (reserved for future) | — |
+
+### Properties
+
+- **Zero cost when off:** `Logger.at()` returns immediately if `level == null`; the
+  message lambda is never invoked, no allocation occurs.
+- **Runtime-switchable:** `Logger.level` is a regular `var`; changing it mid-session
+  takes effect on the next log call.
+- **Never logs secrets:** bearer tokens and `Authorization` headers are never
+  interpolated into any log message. Payload bytes are only rendered at `TRACE` and
+  truncated via `bytesPreview()`.
+- **No per-advertisement/per-notification logging at INFO+:** hot BLE paths use `TRACE`
+  only, so a busy scan adds zero sink calls at `INFO`.
+
+### Kable radio-level logging
+
+`RemoteBleClientConfig.kableLogging: (PeripheralBuilder.() -> Unit)?` is applied to a
+*local* `Peripheral` created via `peripheralFor(BleMode.LOCAL, …)`. Default `null`
+(Kable stays quiet). RemoteBLE logging = the relay; Kable logging = the radio.

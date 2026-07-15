@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.DeviceHandle
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
@@ -53,11 +54,16 @@ class ConnectionWatcher(
                 try {
                     val handle = DeviceHandle(lease.handle)
                     val alive = if (deepCheck) backend.checkLiveness(handle) else backend.isConnected(handle)
-                    if (!alive) registry.onUnsolicitedDisconnect(lease.handle, lease.owner)
+                    if (!alive) {
+                        Logger.warn(LogTags.WATCHER) {
+                            "liveness probe failed [dev=${lease.handle} deepCheck=$deepCheck] — declaring unsolicited disconnect"
+                        }
+                        registry.onUnsolicitedDisconnect(lease.handle, lease.owner)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
-                    // Best-effort: skip this lease this tick and keep watching the rest.
+                    Logger.warn(LogTags.WATCHER) { "probe tick failed for ${lease.handle}: ${t.message}" }
                 }
             }
         }
@@ -78,7 +84,7 @@ class ConnectionWatcher(
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
-                // Best-effort: skip this drop and keep collecting.
+                Logger.warn(LogTags.WATCHER) { "native drop handler failed for ${drop.device.value}: ${t.message}" }
             }
         }
     }

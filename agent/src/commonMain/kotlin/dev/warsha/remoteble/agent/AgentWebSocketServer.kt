@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -76,6 +77,7 @@ class AgentWebSocketServer(
                     if (call.request.path() == path &&
                         call.request.headers[HttpHeaders.Authorization] != "Bearer $expected"
                     ) {
+                        Logger.warn(LogTags.SERVER) { "client rejected: unauthorized (401)" }
                         call.respond(HttpStatusCode.Unauthorized)
                         finish()
                     }
@@ -91,6 +93,7 @@ class AgentWebSocketServer(
                     val clientKey = call.request.headers[CLIENT_ID_HEADER]?.takeIf { it.isNotBlank() }
                         ?: clientId.toString()
                     statusMonitor?.clientConnected(clientId, address)
+                    Logger.info(LogTags.SERVER) { "client connected [c=$clientId key=$clientKey from=$address]" }
                     try {
                         val outgoing: suspend (ByteArray) -> Unit = { send(Frame.Binary(fin = true, data = it)) }
                         val incomingFrames: Flow<ByteArray> = incoming.receiveAsFlow()
@@ -101,6 +104,7 @@ class AgentWebSocketServer(
                         backend.serve(incomingFrames, outgoing, this, clientId, clientKey).join()
                     } finally {
                         statusMonitor?.clientDisconnected(clientId)
+                        Logger.info(LogTags.SERVER) { "client disconnected [c=$clientId]" }
                     }
                 }
             }

@@ -24,7 +24,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.9.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.9.1")
 }
 ```
 
@@ -62,7 +62,7 @@ dependency — see [Running the agent](#running-the-agent).
 - **Resilient by design** — reconcile-on-reconnect (auto-replays connections / subscriptions / scans), per-op-class timeouts, and WebSocket liveness pings.
 - **Transport-agnostic** — the transport seam is a plain byte pipe; WebSocket today, raw TCP or a cloud relay drop in without touching the session or BLE layers.
 - **Two agents, one wire contract** — a Kotlin/Kable and a native Rust/`btleplug` agent, both speaking the same versioned, capability-negotiated **CBOR** protocol (JSON for debugging), interop-tested.
-- **Optional bearer-token auth** at the handshake, plus a live status dashboard (native Compose UI on the phone agents).
+- **Optional bearer-token auth** at the handshake, plus an optional status dashboard protected by a separate operator credential (native Compose UI on the phone agents).
 
 ## How it works
 
@@ -157,7 +157,7 @@ runnable agent binaries, so you don't have to clone and build:
 - **`remoteble-agent-<ver>-all.jar`** — the JVM agent, self-contained (bundles the native BLE
   libs for Linux/macOS/Windows). Runs on **Linux / Raspberry Pi** (and Windows) with a JDK 17+:
   ```sh
-  java -jar remoteble-agent-<ver>-all.jar 8080          # ws://0.0.0.0:8080/agent
+  java -jar remoteble-agent-<ver>-all.jar 8080          # ws://127.0.0.1:8080/agent
   ```
 - **`remoteble-agent-rs-<platform>`** — the native Rust agent, a single self-contained binary
   (no JVM needed), built for **`linux-x86_64`**, **`linux-aarch64`** (Raspberry Pi / ARM SBCs), and
@@ -187,9 +187,13 @@ launcher (`agent/macos-launcher/`) in such a bundle, `open`s it, and streams the
 it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows status with recent
 activity and a dashboard link.
 
-Point a client `WebSocketAgentTransport` at `ws://<host>:8080/agent`. When
-`REMOTE_BLE_TOKEN` is set, a client without the matching token is rejected at the
-handshake (`401`).
+Both desktop agents bind to loopback by default. To expose an agent on a LAN, choose an explicit
+`REMOTE_BLE_BIND`/`--bind` address and configure credentials; an open LAN listener is refused
+unless the explicitly unsafe development override is set. `REMOTE_BLE_TOKEN` is the legacy
+`default` principal. For separate clients use `REMOTE_BLE_TOKENS='lab-a=secret-a,lab-b=secret-b'`.
+The bearer secret selects the principal; `X-RemoteBle-Client` is only a bounded reconnect key
+within that principal. Deploy LAN use behind a TLS-terminating reverse proxy or VPN; direct
+`ws://` is for trusted networks/development.
 
 ### Running the native Rust agent (`agent-rs`)
 

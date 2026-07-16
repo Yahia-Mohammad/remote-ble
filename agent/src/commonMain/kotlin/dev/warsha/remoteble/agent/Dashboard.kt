@@ -2,12 +2,17 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
+import io.ktor.server.application.ApplicationCall
+import io.ktor.server.plugins.origin
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
  * The agent's live status dashboard: a single responsive (mobile-friendly) HTML page
@@ -16,26 +21,73 @@ import io.ktor.server.routing.get
  *
  * Read-only status surface. Management mutations are deliberately absent in the 0.9.0 release:
  * shared-mode and live dashboard settings are not safe to expose without an authenticated operator
- * plane.
+ * plane. Every route still requires a separate operator credential because the read surface exposes
+ * client addresses, device names/handles, ownership, and activity.
  */
-fun Routing.dashboardRoutes(
+internal fun Routing.dashboardRoutes(
     monitor: AgentMonitor,
+    operatorCredentials: ClientCredentials,
+    authLimiter: FailedAuthLimiter,
     registry: PeripheralRegistry? = null,
     strictMode: StrictModeState? = null,
 ) {
-    get("/") { call.respondText(DASHBOARD_HTML, ContentType.Text.Html) }
+    get("/") {
+        if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
+        call.respondText(DASHBOARD_HTML, ContentType.Text.Html)
+    }
     get("/api/state") {
+        if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         val leases = registry?.snapshot().orEmpty()
         call.respondText(monitor.snapshotJson(leases, registry?.settings()), ContentType.Application.Json)
     }
     // Identifier strict-mode status. There is intentionally no mutation endpoint in 0.9.0.
     get("/api/strict") {
+        if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         if (strictMode == null) call.respond(HttpStatusCode.NotFound)
         else call.respondText(strictMode.enabled.toString())
     }
     get("/api/log-level") {
+        if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         call.respondText(Logger.level?.name?.lowercase() ?: "off")
     }
+}
+
+@OptIn(ExperimentalEncodingApi::class)
+private suspend fun ApplicationCall.requireOperator(
+    credentials: ClientCredentials,
+    authLimiter: FailedAuthLimiter,
+): Boolean {
+    val authorization = request.headers[HttpHeaders.Authorization]
+    val bearer = authorization?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
+    // Browsers persist a successful same-origin Basic challenge and then attach it to the
+    // dashboard's fetches, so the protected HTML page remains usable without putting a secret in
+    // its source, URL, or local storage. Bearer is also accepted for scripted operators.
+    val basic = authorization?.takeIf { it.startsWith("Basic ") }
+        ?.removePrefix("Basic ")
+        ?.let { encoded ->
+            runCatching { Base64.decode(encoded).decodeToString() }.getOrNull()
+                ?.let { decoded ->
+                    decoded.removePrefix("operator:")
+                        .takeIf { decoded.startsWith("operator:") && it.isNotEmpty() }
+                }
+        }
+    val candidate = bearer ?: basic
+    if (candidate != null && credentials.authenticate("Bearer $candidate") != null) return true
+    // Only a *provided but wrong* credential is a brute-force attempt worth rate-limiting; a missing
+    // credential is the normal first leg of the Basic challenge and must not lock out an operator.
+    if (candidate != null) {
+        val decision = authLimiter.recordFailure(request.origin.remoteHost)
+        if (!decision.allowed) {
+            if (decision.shouldLog) {
+                Logger.warn(LogTags.SERVER) { "operator rejected: authentication rate limited (429)" }
+            }
+            respond(HttpStatusCode.TooManyRequests)
+            return false
+        }
+    }
+    response.headers.append(HttpHeaders.WWWAuthenticate, "Basic realm=\"RemoteBLE Operator\"")
+    respond(HttpStatusCode.Unauthorized)
+    return false
 }
 
 private val DASHBOARD_HTML = """

@@ -12,6 +12,26 @@ pub struct HelloRequest {
     pub identifier_format: Option<IdentifierFormat>,
 }
 
+/// The result of selecting one implementation version from a peer's advertised range. Kept
+/// separate from capability negotiation so invalid/no-overlap hellos cannot accidentally become a
+/// successful v1 handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVersionSelection {
+    Selected(i32),
+    InvalidRange,
+    NoCompatibleVersion,
+}
+
+pub fn select_protocol_version(min_version: i32, max_version: i32) -> ProtocolVersionSelection {
+    if min_version > max_version {
+        ProtocolVersionSelection::InvalidRange
+    } else if (min_version..=max_version).contains(&crate::protocol::frame::PROTOCOL_VERSION) {
+        ProtocolVersionSelection::Selected(crate::protocol::frame::PROTOCOL_VERSION)
+    } else {
+        ProtocolVersionSelection::NoCompatibleVersion
+    }
+}
+
 /// Per-connection handshake state (spec §5.3): negotiation is **fixed by the first
 /// `ClientHello`** — first hello wins. A repeated hello is answered idempotently with the first
 /// negotiation and never renegotiates: a changed set could un-gate event types the client's
@@ -106,6 +126,46 @@ mod tests {
             max_version: 1,
             wanted: wanted.iter().map(|s| s.to_string()).collect(),
             identifier_format: format,
+        }
+    }
+
+    #[test]
+    fn protocol_version_selection_rejects_invalid_and_incompatible_ranges() {
+        assert_eq!(
+            select_protocol_version(1, 1),
+            ProtocolVersionSelection::Selected(1)
+        );
+        assert_eq!(
+            select_protocol_version(2, 1),
+            ProtocolVersionSelection::InvalidRange
+        );
+        assert_eq!(
+            select_protocol_version(2, 3),
+            ProtocolVersionSelection::NoCompatibleVersion
+        );
+    }
+
+    #[test]
+    fn version_01_shared_conformance_vectors() {
+        // Kept under the Kotlin JVM test resources so both adapters consume exactly one fixture.
+        let vectors = include_str!(
+            "../../../client-sdk/src/jvmTest/resources/conformance/0.9.1-version-vectors.txt"
+        );
+        for line in vectors
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let fields: Vec<_> = line.split('|').collect();
+            assert_eq!(fields.len(), 4, "malformed vector: {line}");
+            assert_eq!(fields[0], "VERSION-01");
+            let minimum = fields[1].parse::<i32>().unwrap();
+            let maximum = fields[2].parse::<i32>().unwrap();
+            let actual = match select_protocol_version(minimum, maximum) {
+                ProtocolVersionSelection::Selected(version) => format!("selected:{version}"),
+                ProtocolVersionSelection::InvalidRange => "invalid-range".to_owned(),
+                ProtocolVersionSelection::NoCompatibleVersion => "no-compatible-version".to_owned(),
+            };
+            assert_eq!(fields[3], actual, "{line}");
         }
     }
 

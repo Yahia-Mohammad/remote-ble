@@ -4,7 +4,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 /** State of the IP link to the agent. Distinct from the physical BLE link state. */
-enum class TransportState { CONNECTING, CONNECTED, DISCONNECTED }
+enum class TransportState {
+    CONNECTING,
+    CONNECTED,
+    DISCONNECTED,
+    /** Terminal for this transport instance: the peer closed with an incompatible protocol range. */
+    INCOMPATIBLE_PROTOCOL,
+}
 
 /**
  * LAYER 1 — the pluggable seam. Byte-level, BLE-agnostic.

@@ -15,8 +15,7 @@ class LoggerTest {
 
     @AfterTest
     fun reset() {
-        Logger.level = null
-        Logger.sink = LogSink { _, _, _, _ -> }
+        Logger.configure(level = null)
         recorded.clear()
     }
 
@@ -79,6 +78,15 @@ class LoggerTest {
         Logger.debug("t") { "second" }
         assertEquals(1, recorded.size, "DEBUG after raising to ERROR was suppressed")
         assertEquals("first", recorded[0].message)
+    }
+
+    @Test
+    fun configurePublishesLevelAndSinkTogether() {
+        Logger.configure(level = LogLevel.WARN, sink = capturingSink)
+        Logger.info("t") { "suppressed" }
+        Logger.warn("t") { "recorded" }
+
+        assertEquals(listOf("recorded"), recorded.map { it.message })
     }
 
     @Test

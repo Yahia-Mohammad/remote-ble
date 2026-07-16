@@ -42,6 +42,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -85,6 +87,7 @@ class SessionEndToEndTest {
         val sent = mutableListOf<dev.warsha.remoteble.protocol.Frame>()
         private val mutableState = MutableStateFlow(TransportState.DISCONNECTED)
         private val replies = Channel<ByteArray>(Channel.UNLIMITED)
+        var failConnects = false
         override val state: StateFlow<TransportState> = mutableState.asStateFlow()
         override val incoming: Flow<ByteArray> = replies.receiveAsFlow()
 
@@ -95,7 +98,16 @@ class SessionEndToEndTest {
         override suspend fun send(frame: ByteArray) {
             val decoded = codec.decode(frame)
             sent += decoded
-            if (decoded is Command) replies.trySend(codec.encode(Reply(decoded.cid, OpResult.Ok())))
+            if (decoded is Command) {
+                val result = if (failConnects && decoded.op is Op.Connect) {
+                    // Use a non-retryable failed prerequisite so reconcile reaches its dependent
+                    // replay decision in this deterministic transport test.
+                    OpResult.Err(dev.warsha.remoteble.protocol.AgentError(ErrorKind.UNKNOWN_DEVICE))
+                } else {
+                    OpResult.Ok()
+                }
+                replies.trySend(codec.encode(Reply(decoded.cid, result)))
+            }
         }
 
         override suspend fun close() {
@@ -140,6 +152,47 @@ class SessionEndToEndTest {
         assertTrue(
             afterReconnect.drop(1).any { it is Command && it.op is Op.Connect },
             "the replayed Connect must follow the hello",
+        )
+    }
+
+    @Test
+    fun failedReconnectSkipsDependentReplayButKeepsIndependentScans() = runTest {
+        val codec = CborProtocolCodec()
+        val transport = RecordingTransport(codec)
+        val session = DefaultAgentSession(transport, codec, backgroundScope)
+        session.transportState.first { it == TransportState.CONNECTED }
+
+        assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
+        assertIs<OpResult.Ok>(session.request(Op.ObserveStart(7, device, char)))
+        assertIs<OpResult.Ok>(session.request(Op.SetConnParams(device, ConnProfile.LOW_LATENCY)))
+        assertIs<OpResult.Ok>(session.request(Op.ScanStart(9)))
+
+        transport.drop()
+        runCurrent()
+        val beforeReconnect = transport.sent.size
+        transport.failConnects = true
+        transport.reconnect()
+        advanceUntilIdle()
+        runCurrent() // run continuations scheduled by the failed reconnect reply
+        advanceTimeBy(1)
+        runCurrent()
+
+        val replay = transport.sent.drop(beforeReconnect).filterIsInstance<Command>().map { it.op }
+        assertTrue(replay.any { it is Op.Connect })
+        assertTrue(replay.any { it is Op.ScanStart }, "independent scans must replay; got $replay")
+        assertFalse(replay.any { it is Op.ObserveStart }, "subscriptions require a successful reconnect")
+        assertFalse(replay.any { it is Op.SetConnParams }, "connection parameters require a successful reconnect")
+        assertEquals(SessionReadiness.DEGRADED, session.readiness.value)
+        assertEquals(
+            ReconciliationReport(
+                connectionsAttempted = 1,
+                connectionsRestored = 0,
+                connectionsFailed = 1,
+                dependentOperationsReplayed = 0,
+                dependentOperationsSkipped = 2,
+                scansReplayed = 1,
+            ),
+            session.reconciliationReport.value,
         )
     }
 
@@ -217,6 +270,14 @@ class SessionEndToEndTest {
 
         val negotiated = h.session.capabilities.first { it != null }
         assertEquals(setOf(Capabilities.DESCRIPTORS), negotiated)
+    }
+
+    @Test
+    fun readinessBecomesReadyOnlyAfterServerHello() = runTest {
+        val h = Harness(backgroundScope)
+        h.awaitConnected()
+
+        assertEquals(SessionReadiness.READY, h.session.readiness.first { it == SessionReadiness.READY })
     }
 
     @Test
@@ -418,6 +479,19 @@ class SessionEndToEndTest {
 
         val err = assertIs<OpResult.Err>(result)
         assertEquals(ErrorKind.TRANSPORT_LOST, err.error.kind)
+    }
+
+    @Test
+    fun requestAfterIncompatibleProtocolFailsWithoutTransportRetry() = runTest {
+        val h = Harness(backgroundScope)
+        h.awaitConnected()
+        h.transport.client.mutableState.value = TransportState.INCOMPATIBLE_PROTOCOL
+        h.session.transportState.first { it == TransportState.INCOMPATIBLE_PROTOCOL }
+
+        val result = h.session.request(Op.Connect(device), timeout = 1.seconds)
+
+        val err = assertIs<OpResult.Err>(result)
+        assertEquals(ErrorKind.INCOMPATIBLE_PROTOCOL, err.error.kind)
     }
 
     @Test

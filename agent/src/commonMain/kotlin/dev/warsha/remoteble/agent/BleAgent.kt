@@ -19,15 +19,19 @@ import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.mapDevice
 import dev.warsha.remoteble.protocol.PROTOCOL_VERSION
+import dev.warsha.remoteble.protocol.ProtocolVersionSelection
 import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
+import dev.warsha.remoteble.protocol.selectProtocolVersion
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -35,13 +39,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The real agent op handler. Decodes `Command`s, drives a [BleBackend], and emits
@@ -63,6 +67,10 @@ class BleAgent(
     // Max commands executing concurrently for this client. Caps spawned coroutines so a command
     // flood can't grow memory without bound; the read loop suspends (stops decoding) once hit.
     private val maxInFlightCommands: Int = DEFAULT_MAX_INFLIGHT_COMMANDS,
+    // Streaming resources are independently bounded: their jobs persist after their start command
+    // replies, so command concurrency cannot cap them.
+    private val maxActiveScans: Int = MAX_ACTIVE_SCANS,
+    private val maxActiveObservations: Int = MAX_ACTIVE_OBSERVATIONS,
     // Per-connection id for monitoring/logs (a fresh value each socket).
     private val clientId: Long = 0L,
     private val observer: AgentObserver = AgentObserver.None,
@@ -87,6 +95,13 @@ class BleAgent(
     private val strictMode: StrictModeState = StrictModeState(),
     private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
 ) {
+    init {
+        require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
+        require(maxActiveObservations in 1..MAX_ACTIVE_OBSERVATIONS) {
+            "maxActiveObservations must be 1..$MAX_ACTIVE_OBSERVATIONS"
+        }
+    }
+
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
     private val connected = mutableSetOf<String>()
@@ -152,6 +167,13 @@ class BleAgent(
     // Whether a ClientHello has been honored on this connection. Touched only on the sequential
     // collect loop ([respondHello]), so it needs no synchronization of its own.
     private var handshaken = false
+
+    // Whether this connection's transport is still live. Flipped false the instant the main job
+    // ends (transport gone) — before the registry schedules lease grace — so a slow connect that
+    // completes after retirement is not committed onto an abandoned lease. @Volatile: written on the
+    // main job's completion callback, read from concurrently launched command coroutines.
+    @Volatile
+    private var connectionLive: Boolean = true
 
     private fun identityTranslator(): HandleTranslator =
         HandleTranslator(clientFormat = null, agentFormat = agentFormat, capabilityNegotiated = false, strict = { false })
@@ -226,6 +248,9 @@ class BleAgent(
         // yet: hand off to the registry, which keeps this client's links warm for the transport
         // grace so a brief blip can resume, then releases (and disconnects) them on expiry.
         main.invokeOnCompletion {
+            // Retire this connection before the registry schedules grace, so a connect completing
+            // in the teardown window sees a dead connection and leaves its lease to the grace path.
+            connectionLive = false
             registry.onTransportDropped(clientKey)
             registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
         }
@@ -236,7 +261,12 @@ class BleAgent(
             // Reverse-translate the op's client-facing handle back to the real radio handle up front,
             // so connection tracking, the registry, and the backend all deal only in real handles.
             // (mapDevice is inline, so the suspend toReal call is legal here.)
-            when (val op = cmd.op.mapDevice { DeviceHandle(translator.toReal(it.value)) }) {
+            val op = cmd.op.mapDevice { DeviceHandle(translator.toReal(it.value)) }
+            operationLimitError(op)?.let {
+                reply(cmd.cid, OpResult.Err(it))
+                return
+            }
+            when (op) {
                 is Op.Connect -> reply(cmd.cid, connect(op.device))
                 is Op.Disconnect -> {
                     authorizeConnected(op.device)
@@ -343,6 +373,22 @@ class BleAgent(
         }
     }
 
+    private fun operationLimitError(op: Op): AgentError? = when (op) {
+        is Op.ScanStart -> op.filters.takeIf { it.size > MAX_SCAN_FILTERS }?.let {
+            AgentError(ErrorKind.INVALID_REQUEST, message = "at most $MAX_SCAN_FILTERS scan filters are allowed")
+        }
+        is Op.Write -> op.value.takeIf { it.size > MAX_WRITE_BYTES }?.let {
+            AgentError(ErrorKind.INVALID_REQUEST, message = "write payload exceeds $MAX_WRITE_BYTES bytes")
+        }
+        is Op.WriteDescriptor -> op.value.takeIf { it.size > MAX_WRITE_BYTES }?.let {
+            AgentError(ErrorKind.INVALID_REQUEST, message = "descriptor payload exceeds $MAX_WRITE_BYTES bytes")
+        }
+        is Op.RequestMtu -> op.mtu.takeIf { it < MIN_MTU || it > MAX_MTU }?.let {
+            AgentError(ErrorKind.INVALID_REQUEST, message = "requested MTU must be between $MIN_MTU and $MAX_MTU")
+        }
+        else -> null
+    }
+
     private suspend fun connect(device: DeviceHandle): OpResult {
         // Already connected by this client: idempotent success, no cross-client check.
         if (state.withLock { device.value in connected }) return OpResult.Ok()
@@ -379,7 +425,15 @@ class BleAgent(
             emitSlotsIfNegotiated() // slot restored
             throw e
         }
-        registry.onConnected(device.value, clientKey)
+        if (!registry.onConnected(device.value, clientKey) { connectionLive }) {
+            // The transport was retired while this slow connect completed. Don't commit the lease;
+            // leave it to the transport-grace path, whose onRelease disconnects the radio on the
+            // registry scope (surviving this command coroutine's own cancellation).
+            state.withLock { connected -= device.value }
+            observer.onClientLog(clientId, "connect completed after transport loss for ${device.value}")
+            Logger.warn(LogTags.ENGINE) { "connect completed after transport retirement [c=$clientId dev=${device.value}]" }
+            return OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "connection closed before connect completed"))
+        }
         observer.onDeviceConnected(clientId, device.value)
         observer.onClientLog(clientId, "connected ${device.value}")
         Logger.info(LogTags.ENGINE) { "device connected [c=$clientId dev=${device.value}]" }
@@ -389,11 +443,10 @@ class BleAgent(
     }
 
     private suspend fun disconnect(device: DeviceHandle): OpResult {
-        backend.disconnect(device)
+        val result = runCatching { backend.disconnect(device) }
         state.withLock { connected -= device.value }
-        // Start the grace timer rather than releasing the lease now: a quick reconnect by this
-        // client keeps the peripheral; only a sustained disconnect frees it for others.
-        registry.onDisconnected(device.value, clientKey)
+        // Explicit disconnect is terminal ownership intent: it is never eligible for warm resume.
+        registry.releaseNow(device.value, clientKey)
         observer.onDeviceDisconnected(clientId, device.value)
         observer.onClientLog(clientId, "disconnected ${device.value}")
         Logger.info(LogTags.ENGINE) { "device disconnected [c=$clientId dev=${device.value}]" }
@@ -401,16 +454,25 @@ class BleAgent(
         translator.evict(device.value)
         evictWriteChain(device.value)
         emitSlotsIfNegotiated()
-        return OpResult.Ok()
+        return result.fold(onSuccess = { OpResult.Ok() }, onFailure = { throw it })
     }
 
     private suspend fun startScan(scanId: Long, op: Op.ScanStart) {
         val batched = Capabilities.SCAN_BATCH in negotiated
         val coalesce = advertisementCoalescer()
-        val job = scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             if (batched) runBatchedScan(scanId, op, coalesce) else runPerResultScan(scanId, op, coalesce)
         }
-        state.withLock { scanJobs.put(scanId, job) }?.cancel()
+        val previous = state.withLock {
+            if (scanId !in scanJobs && scanJobs.size >= maxActiveScans) {
+                throw AgentException(
+                    AgentError(ErrorKind.INVALID_REQUEST, message = "at most $maxActiveScans active scans are allowed"),
+                )
+            }
+            scanJobs.put(scanId, job)
+        }
+        previous?.cancel()
+        job.start()
         observer.onClientLog(clientId, "scan started (#$scanId${if (batched) ", batched" else ""})")
         Logger.debug(LogTags.ENGINE) { "scan started [c=$clientId scanId=$scanId batched=$batched]" }
     }
@@ -508,16 +570,44 @@ class BleAgent(
     }
 
     private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart) {
-        val job = backend.observe(device, op.char)
-            .onEach { emit(AgentEvent.Notification(subId, it)) }
-            // A subscription failure ends this stream, not the agent. Log it rather than
-            // swallowing silently; the client sees notifications stop and can re-subscribe.
-            .catch {
-                observer.onClientLog(clientId, "observe #$subId ended on error: ${it.message}")
-                Logger.warn(LogTags.ENGINE) { "observe ended on error [c=$clientId subId=$subId]: ${it.message}" }
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            backend.observe(device, op.char)
+                .onEach { value ->
+                    // Notifications are ordered payloads, not safely coalescible. If the
+                    // transport remains blocked, retire this affected stream rather than holding
+                    // an unbounded producer chain or silently discarding an arbitrary suffix.
+                    val delivered = withTimeoutOrNull(NOTIFICATION_DELIVERY_TIMEOUT) {
+                        emit(AgentEvent.Notification(subId, value))
+                        true
+                    } ?: false
+                    if (!delivered) throw NotificationOverflowException()
+                }
+                // A subscription failure ends this stream, not the agent. Log it rather than
+                // swallowing silently; the client sees notifications stop and can re-subscribe.
+                .catch {
+                    if (it is NotificationOverflowException) {
+                        observer.onClientLog(clientId, "observe #$subId terminated: client too slow")
+                        Logger.warn(LogTags.ENGINE) { "observe terminated on output overflow [c=$clientId subId=$subId]" }
+                    } else {
+                        observer.onClientLog(clientId, "observe #$subId ended on error: ${it.message}")
+                        Logger.warn(LogTags.ENGINE) { "observe ended on error [c=$clientId subId=$subId]: ${it.message}" }
+                    }
+                }
+                .collect()
+        }
+        val previous = state.withLock {
+            if (subId !in observeJobs && observeJobs.size >= maxActiveObservations) {
+                throw AgentException(
+                    AgentError(
+                        ErrorKind.INVALID_REQUEST,
+                        message = "at most $maxActiveObservations active observations are allowed",
+                    ),
+                )
             }
-            .launchIn(scope)
-        state.withLock { observeJobs.put(subId, job) }?.cancel()
+            observeJobs.put(subId, job)
+        }
+        previous?.cancel()
+        job.start()
     }
 
     private suspend fun stopObserve(subId: Long) {
@@ -554,7 +644,12 @@ class BleAgent(
         }
         outgoing(
             codec.encode(
-                ServerHello(version = PROTOCOL_VERSION, capabilities = negotiated, agentInfo = agentInfo),
+                ServerHello(
+                    version = (selectProtocolVersion(hello.minVersion, hello.maxVersion) as? ProtocolVersionSelection.Selected)
+                        ?.version ?: PROTOCOL_VERSION,
+                    capabilities = negotiated,
+                    agentInfo = agentInfo,
+                ),
             ),
         )
         // Log after the send so the dashboard never records a handshake the client didn't receive.
@@ -597,9 +692,18 @@ class BleAgent(
     // it goes on the wire (identity when translation isn't active).
     private suspend fun emit(event: AgentEvent) = outgoing(codec.encode(Event(translator.outgoing(event))))
 
+    private class NotificationOverflowException : Exception()
+
     companion object {
         const val DEFAULT_MAX_CONNECTIONS: Int = 4
         const val DEFAULT_MAX_INFLIGHT_COMMANDS: Int = 64
+        const val MAX_SCAN_FILTERS: Int = 64
+        const val MAX_ACTIVE_SCANS: Int = 16
+        const val MAX_ACTIVE_OBSERVATIONS: Int = 128
+        const val MAX_WRITE_BYTES: Int = 512
+        const val MIN_MTU: Int = 23
+        const val MAX_MTU: Int = 517
+        val NOTIFICATION_DELIVERY_TIMEOUT: Duration = 5.seconds
         val DEFAULT_SCAN_BATCH_WINDOW: Duration = 100.milliseconds
         const val DEFAULT_SCAN_BATCH_MAX_SIZE: Int = 16
 

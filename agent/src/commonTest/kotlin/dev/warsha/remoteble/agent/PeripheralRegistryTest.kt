@@ -6,6 +6,7 @@ import dev.warsha.remoteble.protocol.ErrorKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
@@ -51,7 +52,7 @@ class PeripheralRegistryTest {
         val registry = PeripheralRegistry(backgroundScope, leaseGrace = 10.seconds, onRelease = { released += it })
         registry.acquire(p, a)
         registry.onConnected(p, a)
-        registry.onDisconnected(p, a) // peripheral dropped / explicit disconnect
+        registry.onDisconnected(p, a) // unsolicited peripheral drop
 
         advanceTimeBy(9.seconds)
         runCurrent()
@@ -61,6 +62,18 @@ class PeripheralRegistryTest {
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // freed after it elapses
         assertEquals(listOf(p), released)
+    }
+
+    @Test
+    fun explicitDisconnectReleasesImmediatelyAndCannotResume() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, transportGrace = 10.seconds)
+        registry.acquire(p, a)
+        registry.onConnected(p, a)
+
+        registry.releaseNow(p, a)
+
+        assertIs<Acquisition.Granted>(registry.acquire(p, b))
+        assertTrue(registry.heldBy(a).isEmpty())
     }
 
     @Test
@@ -169,5 +182,32 @@ class PeripheralRegistryTest {
 
         assertEquals(listOf(p), newNotified, "the current registration must still fire")
         assertTrue(oldNotified.isEmpty(), "a stale unregister must not remove the newer registration")
+    }
+
+    @Test
+    fun connectCommittingWhileLiveMarksTheLeaseConnected() = runTest {
+        val registry = PeripheralRegistry(backgroundScope)
+        registry.acquire(p, a)
+
+        assertTrue(registry.onConnected(p, a) { true })
+        assertIs<Acquisition.Denied>(registry.acquire(p, b)) // a owns a live, connected lease
+    }
+
+    @Test
+    fun connectCommittingAfterRetirementLeavesTheLeaseToGraceInsteadOfResurrectingIt() = runTest {
+        // The exact race the connectionLive guard closes: a slow connect completes *after* the
+        // transport was retired and its lease grace scheduled. It must not mark the lease connected
+        // and cancel that grace (which would leak the lease with no release timer) — it must leave
+        // the pending release intact so the lease is freed on expiry.
+        val registry = PeripheralRegistry(backgroundScope, transportGrace = 5.seconds)
+        assertIs<Acquisition.Granted>(registry.acquire(p, a))
+        registry.onTransportDropped(a)
+        runCurrent() // let the transport-drop coroutine schedule the grace release
+
+        assertFalse(registry.onConnected(p, a) { false })
+
+        advanceTimeBy(6.seconds)
+        runCurrent()
+        assertIs<Acquisition.Granted>(registry.acquire(p, b)) // released by grace, not stuck connected
     }
 }

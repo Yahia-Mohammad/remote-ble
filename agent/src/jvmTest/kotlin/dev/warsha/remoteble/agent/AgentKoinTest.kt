@@ -31,4 +31,5 @@ class AgentKoinTest {
             app.close()
         }
     }
+
 }

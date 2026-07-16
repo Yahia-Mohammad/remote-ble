@@ -141,6 +141,25 @@ class KableAdapterTest {
     }
 
     @Test
+    fun structuredShutdownReleasesRemotePeripheralAndLocalState() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        try {
+            val session = connectedSession(port)
+            val peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
+            peripheral.connect()
+            assertTrue(peripheral.services.value != null)
+
+            assertEquals(RemoteShutdownResult.Completed, peripheral.shutdown())
+            assertIs<State.Disconnected>(peripheral.state.value)
+            assertEquals(null, peripheral.services.value)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
     fun factoryThreadsInjectedDispatcherIntoPeripheralScope() = runBlocking {
         val port = freePort()
         val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }

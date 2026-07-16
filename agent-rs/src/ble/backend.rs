@@ -22,7 +22,7 @@ pub trait BleBackend: Send + Sync {
         &self,
         stream: StreamKey,
         filters: Vec<ScanFilter>,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError>;
     async fn stop_scan(&self, stream: StreamKey) -> Result<(), AgentError>;
     /// Releases every scan/observation owned by a retired WebSocket connection.
@@ -30,7 +30,7 @@ pub trait BleBackend: Send + Sync {
     async fn connect(
         &self,
         device: &DeviceHandle,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError>;
     async fn disconnect(&self, device: &DeviceHandle) -> Result<(), AgentError>;
     async fn discover(&self, device: &DeviceHandle) -> Result<ResultPayload, AgentError>;
@@ -56,7 +56,7 @@ pub trait BleBackend: Send + Sync {
         stream: StreamKey,
         device: &DeviceHandle,
         char_ref: &CharRef,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError>;
     async fn stop_observe(&self, stream: StreamKey) -> Result<(), AgentError>;
 }

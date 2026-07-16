@@ -65,7 +65,7 @@ the 0.9.0 addendum requires truthful `UNSUPPORTED` behavior wherever Rust cannot
 | Client-attributable log lines | ✅ (`[c=$clientId]` prefix) | ✅ (`tracing` span fields) |
 | Default level | INFO | INFO |
 | Zero cost when off | ✅ (lazy lambda, level check first) | ✅ (`tracing` level macros) |
-| Live log-level toggle | ✅ (`POST /api/log-level` dashboard) | ❌ (startup flag only) |
+| Live log-level toggle | ❌ (`GET /api/log-level` is read-only; mutation removed for 0.9.0) | ❌ (startup flag only) |
 | Pluggable sinks | ✅ (`LogSink` — Println, Android, Apple) | ❌ (single `tracing-subscriber`) |
 | JSON log format | ❌ | ✅ (`--log-format json`) |
 | `RUST_LOG` per-module filter | N/A | ✅ (takes precedence over `--log-level`) |
@@ -239,5 +239,30 @@ alignment and permanent executable parity evidence remain scheduled for 0.9.1. S
 findings.
 
 ### Symmetric logging differences (by design)
-- Kotlin-only: dashboard log-level toggle, pluggable sinks, `RateLimitedLog`
+- Kotlin-only: pluggable sinks, `RateLimitedLog`
 - Rust-only: structured per-connection `tracing` spans, `--log-format json`, `RUST_LOG` EnvFilter
+
+---
+
+## 0.9.1 hardening parity update (2026-07-16)
+
+The 0.9.1 security/lifecycle hardening (D1–D5) added or aligned the following across **both**
+agents. These supersede the stale specifics above where they conflict.
+
+| Area | Kotlin | Rust | Notes |
+|---|---|---|---|
+| Named-principal credentials | ✅ | ✅ | `name=secret` pairs (`REMOTE_BLE_TOKENS`); `REMOTE_BLE_TOKEN` = legacy `default`; constant-time compare |
+| Principal-scoped ownership key | ✅ | ✅ | `(principal, stable client id)`; `X-RemoteBle-Client` never crosses principals |
+| Loopback-default bind + policy | ✅ | ✅ | non-loopback needs a credential or the explicit insecure-LAN override |
+| Failed-auth rate limiting | ✅ (client + operator planes) | ✅ (client plane) | fixed-memory per-peer/global limiter, LRU eviction, `429` |
+| Duplicate live session refused | ✅ (post-upgrade `1008`) | ✅ (handshake `409`) | `LEASE-DUPLICATE-01`; transport signal is implementation-specific |
+| 1 MiB inbound frame cap | ✅ | ✅ | framing-layer enforcement before decode |
+| Argument ceilings → `INVALID_REQUEST` | ✅ | ✅ | ≤64 filters, ≤512-byte writes/descriptors, **MTU 23–517** |
+| Version-range negotiation + `1002` close | ✅ | ✅ | shared `VERSION-01` fixture; client maps to `INCOMPATIBLE_PROTOCOL` |
+| Late-connect lease guard | ✅ (`connectionLive`) | ✅ (`connection_live`) | a connect completing after transport retirement can't resurrect an abandoned lease |
+| Explicit-disconnect immediate release | ✅ | ✅ | never converted to transport grace |
+
+`ErrorKind` now carries `INVALID_REQUEST` on both agents (and a client-side-only
+`INCOMPATIBLE_PROTOCOL` in the Kotlin protocol module, never sent on the wire), so the earlier
+"14 variants, identical" line is superseded by "the wire-sent kinds remain a shared set, plus the
+added `INVALID_REQUEST`."

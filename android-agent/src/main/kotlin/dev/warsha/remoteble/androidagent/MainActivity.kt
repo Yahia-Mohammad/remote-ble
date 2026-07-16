@@ -71,7 +71,9 @@ class MainActivity : ComponentActivity() {
             }
             AgentApp(
                 runner = viewModel.runner,
-                config = AgentConfig(),
+                // Phone agents are intentionally LAN-facing; AgentApp requires an auth token
+                // before it will start this plaintext listener.
+                config = AgentConfig(bindHost = "0.0.0.0"),
                 addressLabel = { port ->
                     lanIPv4Address()?.let { "ws://$it:$port/agent" }
                         ?: "No Wi-Fi — connect to a network to reach this agent"

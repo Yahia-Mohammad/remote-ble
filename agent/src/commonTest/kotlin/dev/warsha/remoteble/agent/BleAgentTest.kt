@@ -22,6 +22,7 @@ import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
+import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -59,6 +60,8 @@ class BleAgentTest {
         scope: CoroutineScope,
         backend: BleBackend,
         maxConnections: Int = 4,
+        maxActiveScans: Int = BleAgent.MAX_ACTIVE_SCANS,
+        maxActiveObservations: Int = BleAgent.MAX_ACTIVE_OBSERVATIONS,
         registry: PeripheralRegistry = PeripheralRegistry(scope),
         clientId: Long = 0L,
         capabilities: Set<String> = emptySet(),
@@ -77,11 +80,13 @@ class BleAgentTest {
             scope.launch { fromAgent.receiveAsFlow().collect { frames.emit(codec.decode(it)) } }
             BleAgent(
                 incoming = toAgent.receiveAsFlow(),
-                outgoing = { fromAgent.trySend(it); Unit },
+                outgoing = { fromAgent.send(it) },
                 scope = scope,
                 backend = backend,
                 codec = codec,
                 maxConnections = maxConnections,
+                maxActiveScans = maxActiveScans,
+                maxActiveObservations = maxActiveObservations,
                 clientId = clientId,
                 registry = registry,
                 capabilities = capabilities,
@@ -256,6 +261,45 @@ class BleAgentTest {
         assertIs<OpResult.Ok>(h.frames.reply(2))
         assertEquals(desc, backend.lastDescriptorWrite?.first)
         assertEquals(listOf<Byte>(0x00, 0x00), backend.lastDescriptorWrite?.second?.toList())
+    }
+
+    @Test
+    fun operationLimitsRejectOversizedRequestsAsInvalidWithoutCallingTheBackend() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend)
+        val desc = DescRef(service = char.service, characteristic = char.characteristic, descriptor = "2902")
+
+        h.send(1, Op.ScanStart(scanId = 1, filters = List(BleAgent.MAX_SCAN_FILTERS + 1) { ScanFilter() }))
+        h.send(2, Op.Write(device, char, ByteArray(BleAgent.MAX_WRITE_BYTES + 1), withResponse = true))
+        h.send(3, Op.WriteDescriptor(device, desc, ByteArray(BleAgent.MAX_WRITE_BYTES + 1)))
+        h.send(4, Op.RequestMtu(device, BleAgent.MAX_MTU + 1))
+
+        for (cid in 1L..4L) {
+            assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(cid)).error.kind)
+        }
+        assertNull(backend.lastWrite)
+        assertNull(backend.lastDescriptorWrite)
+    }
+
+    @Test
+    fun activeStreamLimitsRejectNewIdsButAllowSameIdReplacement() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, maxActiveScans = 1, maxActiveObservations = 1)
+
+        h.send(1, Op.ScanStart(scanId = 1))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+        h.send(2, Op.ScanStart(scanId = 2))
+        assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+        h.send(3, Op.ScanStart(scanId = 1))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+
+        h.connect(4)
+        h.send(5, Op.ObserveStart(subId = 1, device, char))
+        assertIs<OpResult.Ok>(h.frames.reply(5))
+        h.send(6, Op.ObserveStart(subId = 2, device, char))
+        assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(6)).error.kind)
+        h.send(7, Op.ObserveStart(subId = 1, device, char))
+        assertIs<OpResult.Ok>(h.frames.reply(7))
     }
 
     @Test

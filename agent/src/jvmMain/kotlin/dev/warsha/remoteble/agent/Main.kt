@@ -6,6 +6,7 @@ import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.log.PrintlnSink
 import dev.warsha.remoteble.protocol.DeviceHandle
+import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.runBlocking
@@ -13,16 +14,27 @@ import org.koin.core.context.startKoin
 
 fun main(args: Array<String>) {
     val logLevel = parseLogLevel(System.getenv("REMOTE_BLE_LOG")?.takeIf { it.isNotBlank() })
-    Logger.sink = PrintlnSink
-    Logger.level = logLevel
+    Logger.configure(level = logLevel, sink = PrintlnSink)
 
     val requestedExclusive = System.getenv("REMOTE_BLE_EXCLUSIVE")?.toBooleanStrictOrNull()
     require(requestedExclusive != false) {
         "REMOTE_BLE_EXCLUSIVE=false is unsupported in RemoteBLE 0.9.0; shared mode is disabled"
     }
+    val cli = parseCli(args)
+    val token = System.getenv("REMOTE_BLE_TOKEN")?.takeIf { it.isNotBlank() }
+    val namedCredentials = parseNamedCredentials(System.getenv("REMOTE_BLE_TOKENS"))
+    val operatorToken = System.getenv("REMOTE_BLE_OPERATOR_TOKEN")?.takeIf { it.isNotBlank() }
+    val bindHost = validateBind(
+        requested = cli.bindHost ?: System.getenv("REMOTE_BLE_BIND") ?: AgentConfig.DEFAULT_BIND_HOST,
+        hasCredential = token != null || namedCredentials.isNotEmpty(),
+        allowInsecureLan = System.getenv("REMOTE_BLE_ALLOW_INSECURE_LAN")?.toBooleanStrictOrNull() == true,
+    )
     val config = AgentConfig(
-        port = args.firstOrNull()?.toIntOrNull() ?: AgentConfig.DEFAULT_PORT,
-        authToken = System.getenv("REMOTE_BLE_TOKEN")?.takeIf { it.isNotBlank() },
+        bindHost = bindHost,
+        port = cli.port,
+        authToken = token,
+        namedCredentials = namedCredentials,
+        operatorToken = operatorToken,
         exclusiveByDefault = true,
         leaseGrace = System.getenv("REMOTE_BLE_LEASE_GRACE_MS")?.toLongOrNull()?.milliseconds
             ?: AgentConfig().leaseGrace,
@@ -38,9 +50,9 @@ fun main(args: Array<String>) {
     server.start()
     app.koin.get<ConnectionWatcher>().start()
 
-    val auth = if (config.authToken != null) "bearer-token required" else "no auth"
+    val auth = if (config.authToken != null || config.namedCredentials.isNotEmpty()) "bearer-token required" else "no auth"
     val host = System.getProperty("os.name") ?: "jvm"
-    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://0.0.0.0:${config.port}/agent ($auth, exclusive peripherals, Kable engine on $host)" }
+    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, Kable engine on $host)" }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
     Logger.info(LogTags.AGENT) { "Liveness probe: every ${config.livenessProbeInterval}" }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
@@ -60,6 +72,55 @@ fun main(args: Array<String>) {
         },
     )
     CountDownLatch(1).await()
+}
+
+private data class Cli(val bindHost: String?, val port: Int)
+
+private fun parseCli(args: Array<String>): Cli {
+    var bind: String? = null
+    var port = AgentConfig.DEFAULT_PORT
+    var index = 0
+    if (args.firstOrNull()?.toIntOrNull() != null) {
+        port = args[0].toInt()
+        index = 1
+    }
+    while (index < args.size) {
+        when (args[index]) {
+            "--bind" -> bind = args.getOrNull(++index) ?: error("--bind requires an address")
+            "--port" -> port = args.getOrNull(++index)?.toIntOrNull() ?: error("--port requires a valid port")
+            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind")
+        }
+        index++
+    }
+    require(port in 1..65535) { "port must be between 1 and 65535" }
+    return Cli(bind, port)
+}
+
+private fun validateBind(requested: String, hasCredential: Boolean, allowInsecureLan: Boolean): String {
+    val address = runCatching { InetAddress.getByName(requested) }
+        .getOrElse { error("invalid bind address $requested: ${it.message}") }
+    require(!address.isMulticastAddress) { "refusing multicast bind address $requested" }
+    if (!address.isLoopbackAddress && !hasCredential && !allowInsecureLan) {
+        error("non-loopback bind requires REMOTE_BLE_TOKEN; set REMOTE_BLE_ALLOW_INSECURE_LAN=true only for local development")
+    }
+    if (!address.isLoopbackAddress && !hasCredential) {
+        Logger.warn(LogTags.AGENT) { "starting unauthenticated non-loopback listener because insecure development override is enabled" }
+    }
+    return address.hostAddress
+}
+
+/** Parses `principal=secret,other=secret`; names are never written to the log. */
+private fun parseNamedCredentials(raw: String?): Map<String, String> {
+    if (raw.isNullOrBlank()) return emptyMap()
+    return raw.split(',').associate { item ->
+        val separator = item.indexOf('=')
+        require(separator > 0 && separator < item.length - 1) {
+            "REMOTE_BLE_TOKENS entries must use principal=secret"
+        }
+        item.substring(0, separator) to item.substring(separator + 1)
+    }.also { parsed ->
+        require(parsed.size == raw.split(',').size) { "REMOTE_BLE_TOKENS contains duplicate principals" }
+    }
 }
 
 private fun parseLogLevel(raw: String?): LogLevel? = when (raw?.lowercase()) {

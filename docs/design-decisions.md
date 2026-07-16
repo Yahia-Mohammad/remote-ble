@@ -211,6 +211,11 @@ write-without-response bursts landed in 0.8.3 (`writeWithoutResponseBurst` pipel
 fill the in-flight window, no wire change; the agent chains writes per device so
 submission order survives to the radio — see the boundaries table below).
 
+On the agent side an `RequestMtu` outside the ATT range **23–517** is an argument error: both
+agents reject it as `INVALID_REQUEST` before the backend call, rather than as `UNSUPPORTED` (a
+too-large MTU is a bad argument, not a missing capability — the same distinction the other operation
+ceilings draw).
+
 ## Auth is a hook, not a framework
 
 A single bearer token: the client supplies it via a **suspend provider**
@@ -254,25 +259,22 @@ radio. So the agent leases each peripheral to **one** client at a time. The shar
 but the 2026-07-15 review found that it does not model participants safely; 0.9.0 disables that
 surface and 0.9.1 owns any full participant design.
 
-The model is **uniform**: anything that means "the owner is temporarily gone" schedules a
-per-lease release timer; anything that means "the owner is back" cancels it. The cause only
-sets the delay and whether the radio link is kept warm.
+Transport loss and radio loss are resumable grace cases; an explicit disconnect is not.
 
 - **Acquire on connect.** A second client's `connect` to an owned peripheral is rejected
   with `PERIPHERAL_BUSY` before any radio call. Re-connecting as the owner is idempotent.
-- **BLE disconnect → `leaseGrace` (10s).** An explicit `Disconnect` *or* an unsolicited drop
-  (caught by `ConnectionWatcher` polling `connectionState`) schedules release; the link is
-  already down, so this just frees ownership after the window. Debounces flaps.
+- **Explicit disconnect → immediate release.** `Disconnect` disconnects the radio and drops the
+  lease at once; a later connect is a new connection.
+- **Unsolicited BLE disconnect → `leaseGrace` (10s).** A drop caught by `ConnectionWatcher`
+  schedules release, debouncing radio flaps without treating an operator disconnect as resumable.
 - **Transport drop → `transportGrace` (10s), link kept warm.** When a client's WebSocket
   drops, `BleAgent`'s job-completion teardown hands off to the registry, which leaves the
   radio link **up** and schedules release. A reconnect within the window **resumes** with no
   re-pair/rediscover; on expiry `onRelease` tears the warm link down. This is why a brief IP
   blip no longer costs the BLE connection.
-- **Resume needs identity.** Each socket gets a fresh monotonic id, so ownership is instead
-  keyed by a **stable client id** the SDK generates once and sends on every (re)connect
-  (`CLIENT_ID_HEADER`). A returning client matches its own leases; a client that sends none
-  falls back to its connection id and simply never resumes. It identifies, not authenticates
-  (that is the separate bearer token).
+- **Resume needs authenticated identity.** Each socket gets a fresh monotonic id; ownership is
+  keyed by the verified credential principal plus the stable client id the SDK sends on every
+  reconnect (`CLIENT_ID_HEADER`). A stable ID never crosses a principal boundary.
 - **0.9 release policy is exclusive-only.** The legacy dashboard/config switch is removed or
   disabled for 0.9.0. Both grace windows remain process config (`REMOTE_BLE_LEASE_GRACE_MS` /
   `REMOTE_BLE_TRANSPORT_GRACE_MS`), surfaced read-only on the dashboard.

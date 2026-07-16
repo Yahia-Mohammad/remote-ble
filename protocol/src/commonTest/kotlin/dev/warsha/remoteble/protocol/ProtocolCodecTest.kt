@@ -12,6 +12,22 @@ import kotlin.test.assertTrue
  */
 class ProtocolCodecTest {
 
+    @Test
+    fun protocolVersionSelectionRejectsInvalidAndIncompatibleRanges() {
+        assertEquals(
+            ProtocolVersionSelection.Selected(PROTOCOL_VERSION),
+            selectProtocolVersion(minVersion = 1, maxVersion = 1),
+        )
+        assertEquals(
+            ProtocolVersionSelection.InvalidRange,
+            selectProtocolVersion(minVersion = 2, maxVersion = 1),
+        )
+        assertEquals(
+            ProtocolVersionSelection.NoCompatibleVersion,
+            selectProtocolVersion(minVersion = 2, maxVersion = 3),
+        )
+    }
+
     private val codecs: List<ProtocolCodec> = listOf(CborProtocolCodec(), JsonProtocolCodec())
 
     private fun assertRoundTrips(frame: Frame) {

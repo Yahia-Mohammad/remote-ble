@@ -21,12 +21,15 @@ sequenceDiagram
     App->>Session: new DefaultAgentSession(transport, codec, scope)
     Session->>Transport: connect()
     Transport->>Agent: WS upgrade (Authorization: Bearer …)
-    alt token valid (or no auth)
+    alt credential valid (or no auth)
         Agent-->>Transport: 101 Switching Protocols
         Note over Transport: state CONNECTING → CONNECTED
-    else token missing/wrong
+    else credential missing/wrong
         Agent-->>Transport: 401 Unauthorized
         Note over Transport: state → DISCONNECTED, backoff retry
+    else too many failed attempts
+        Agent-->>Transport: 429 Too Many Requests
+        Note over Transport: same DISCONNECTED + backoff path
     end
 ```
 
@@ -46,6 +49,9 @@ app: DefaultAgentSession(WebSocketAgentTransport("ws://host:8080/agent", …), C
    the backoff loop retries until connected or the policy gives up. A throwing `authToken`
    provider (e.g. a refresh failure) lands the same way. `request()` short-circuits to
    `Err(TRANSPORT_LOST)` while not CONNECTED (unless a `RetryPolicy` waits out the reconnect).
+   Repeated wrong-credential attempts from one peer are rate-limited to `429` (the agent's
+   fixed-memory `FailedAuthLimiter`); the client treats it identically to `401` — a failed upgrade
+   that folds into the same backoff.
 
 No frames cross the wire yet — the session is request-driven.
 
@@ -58,7 +64,8 @@ No frames cross the wire yet — the session is request-driven.
 >```
 > Flipping the level mid-session takes effect immediately (subsequent calls check
 > `Logger.level` live). The agents default to `INFO` (set `REMOTE_BLE_LOG=debug` to
-> override at startup; the Kotlin agent also has a live `POST /api/log-level` toggle).
+> override at startup; the Kotlin agent exposes the current level read-only at
+> `GET /api/log-level`, operator-gated — management mutations are out of scope for 0.9.x).
 
 ---
 

@@ -64,11 +64,11 @@ Source: [`agent/src/`](../agent/src)
 | [`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) | Thread-safe live state (clients/hardware/logs) + a `Snapshot` served as JSON (HTML dashboard) or read directly (Compose UI) |
 | [`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt) | The status dashboard HTML page + `/` and `/api/state` routes |
 | [`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/remoteble/agent/Main.kt) | The runnable JVM (macOS/Linux) agent entrypoint (launched via `agent/run-agent.sh`) |
-| [`AgentRunner.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/AgentRunner.kt) | The Android/iOS composition root — start/stop the same Koin graph interactively (see [below](#android--ios-a-phone-as-the-agent)) |
+| [`AgentRunner.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/AgentRunner.kt) | The Android/iOS composition root — serialized `STOPPED → STARTING → RUNNING → STOPPING` Koin-graph lifecycle, observable state, and structured stop result (see [below](#android--ios-a-phone-as-the-agent)) |
 | [`ui/AgentApp.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/ui/AgentApp.kt) | The Compose Multiplatform mirror of the HTML dashboard |
 | [`AgentService.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AgentService.kt) | Android foreground service keeping the process alive while backgrounded; observes `AgentRunner.running` and self-stops |
 | [`IosAgentEntry.kt`](../agent/src/iosMain/kotlin/dev/warsha/remoteble/agent/IosAgentEntry.kt) | iOS entry point (`IosAgentSession`): owns the runner + idle-timer observer; `dispose()` on view teardown |
-| `PlatformName` / `LanAddress` / `TokenStore` (`expect`/`actual`) | Per-platform bits the mobile UI needs: the host label (`agentInfo`), the LAN IPv4 for the `ws://` address, and auth-token persistence (Android DataStore / iOS `NSUserDefaults`) |
+| `PlatformName` / `LanAddress` / `TokenStore` (`expect`/`actual`) | Per-platform bits the mobile UI needs: the host label (`agentInfo`), the LAN IPv4 for the `ws://` address, and development-only auth-token persistence (Android DataStore / iOS `NSUserDefaults`; not a protected production credential store) |
 | [`AndroidAgentContext.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AndroidAgentContext.kt) | Holds the application `Context` the Android `actual`s (LAN address, token store) need |
 
 ---
@@ -149,15 +149,29 @@ class BleAgentBackend(
 
 ### Authentication
 
-When `authToken` is set, an `ApplicationCallPipeline.Plugins` interceptor gates the
-endpoint **before the WebSocket handshake completes**: a request whose
-`Authorization` header is not exactly `Bearer <token>` gets `401 Unauthorized` and
-the upgrade never succeeds — so the client never reaches CONNECTED. This is cleaner
-than accepting the socket and then closing it (which would make the client flap
-CONNECTED→DISCONNECTED). The matching client credential is `WebSocketAgentTransport.authToken`.
+Credentials are **named principals** — a set of `name=secret` bearer pairs (`ClientCredentials`).
+`REMOTE_BLE_TOKEN` remains the legacy alias for a `default` principal; `REMOTE_BLE_TOKENS` supplies
+`name=secret,other=secret` pairs. When any credential is configured, an
+`ApplicationCallPipeline.Plugins` interceptor gates the endpoint **before the WebSocket handshake
+completes**: a request whose `Authorization` header is not exactly `Bearer <secret>` for some
+credential gets `401 Unauthorized` and the upgrade never succeeds — so the client never reaches
+CONNECTED (cleaner than accepting the socket and then closing it, which would make the client flap
+CONNECTED→DISCONNECTED). Secrets are compared in constant time, and the verified credential's name
+becomes the connection's **principal**, which scopes peripheral ownership: `X-RemoteBle-Client` is
+only a reconnect key *within* a principal, never across principals. The matching client credential
+is `WebSocketAgentTransport.authToken`.
 
-The SDK owns no identity system beyond this shared bearer token; it is a hook, not a
-framework.
+Repeated failed upgrades are bounded by a fixed-memory `FailedAuthLimiter` (per-peer and global
+ceilings with least-recently-seen eviction, so spoofed source addresses can't grow an unbounded
+map); a peer past its ceiling gets `429 Too Many Requests`, with rate-limited denial logs. Only one
+live WebSocket generation is permitted per `(principal, stable client id)` — a duplicate is refused
+(conformance `LEASE-DUPLICATE-01`).
+
+Desktop/headless agents **bind loopback by default**; a non-loopback bind requires at least one
+credential (or the explicit `REMOTE_BLE_ALLOW_INSECURE_LAN` development override, which logs a
+prominent unencrypted-service warning). The supported encrypted deployment is a TLS-terminating
+reverse proxy or VPN with a local-only upstream. The SDK owns no identity system beyond these
+bearer credentials; it is a hook, not a framework.
 
 ---
 
@@ -488,6 +502,7 @@ fun main(args: Array<String>) {
     val config = AgentConfig(
         port = args.firstOrNull()?.toIntOrNull() ?: AgentConfig.DEFAULT_PORT,
         authToken = System.getenv("REMOTE_BLE_TOKEN")?.takeIf { it.isNotBlank() }, // optional bearer auth
+        operatorToken = System.getenv("REMOTE_BLE_OPERATOR_TOKEN")?.takeIf { it.isNotBlank() },
     )
     val app = startKoin { modules(agentModule(config)) }
     app.koin.get<AgentWebSocketServer>().start()
@@ -499,6 +514,7 @@ fun main(args: Array<String>) {
 ```sh
 agent/run-agent.sh 8080                          # open endpoint
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080  # require a bearer token
+REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080
 ```
 
 > **Run it with `agent/run-agent.sh`, not `./gradlew :agent:jvmRun`.** A bare JVM process is
@@ -513,8 +529,9 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080  # require a bearer token
 > 🟢/🟡 dot + recent activity, polling the dashboard below) so it's visible at a glance
 > that the agent is running, without needing `ps` or a browser tab.
 
-The endpoint and the **status dashboard** share the port: `ws://<host>:8080/agent` for
-clients, `http://<host>:8080/` for the dashboard.
+The endpoint and optional **status dashboard** share the port: `ws://<host>:8080/agent` for
+clients and `http://<host>:8080/` for the dashboard. The dashboard is disabled unless the
+separate `REMOTE_BLE_OPERATOR_TOKEN` is configured; it must not reuse any client credential.
 
 The object graph (`AgentMonitor`, `EngineBleBackend` → `BleAgentBackend` →
 `AgentWebSocketServer`, plus `ConnectionWatcher`) is assembled by Koin in
@@ -530,22 +547,30 @@ root touches a DI container, mirroring the optional `remoteBleClientModule` on t
 [`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) ·
 [`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt)
 
-The agent serves a live, mobile-friendly status page from the same Ktor server:
+When `REMOTE_BLE_OPERATOR_TOKEN` (or `AgentConfig.operatorToken`) is configured, the agent serves
+a live, mobile-friendly status page from the same Ktor server. Without that separate credential,
+the HTTP dashboard routes are not mounted.
 
 - `GET /` — a single self-contained HTML page (no build step, no external assets) that polls
   `/api/state` once a second and renders three panels: **connected clients**, **connected
   hardware**, and a rolling **activity log**.
 - `GET /api/state` — a JSON snapshot from `AgentMonitor`.
 
+Every dashboard route requires the operator credential, never a client credential. A browser uses
+the standard Basic-auth prompt with username `operator` and the operator token as its password;
+scripts may send `Authorization: Bearer <operator-token>`. This protects client addresses, device
+names/handles, ownership, and activity from LAN readers. Wrong-credential attempts (not the normal
+first-leg challenge) are throttled by a dedicated `FailedAuthLimiter`, so the management plane is
+brute-force-bounded independently of the client-upgrade plane.
+
 `AgentMonitor` is a thread-safe (atomicfu-locked, not JVM `synchronized`), in-memory store
 updated from two sides: `AgentWebSocketServer` reports client connect/disconnect (id +
 remote address); `BleAgent` reports device lifecycle and scan-seen names through the
 `AgentObserver` hooks. Hardware is labelled from scan results and attributed to the owning
 client; when a client's socket drops, its hardware is released. The monitor itself is
-**read-only** and never touches the radio. The current dashboard bundle also mounts configuration
-mutation routes; the 0.9.0 release requires those routes to be authenticated or removed. Wiring the
-HTML dashboard is optional: construct
-`AgentWebSocketServer` without a `monitor` and the routes simply aren't installed. Its
+**read-only** and never touches the radio. Dashboard mutation routes are absent. Wiring the HTML
+dashboard is optional: construct `AgentWebSocketServer` without a `monitor`, or without a separate
+operator credential, and the routes simply aren't installed. Its
 `snapshot(leases, settings): Snapshot` is the same call both consumers use — `snapshotJson`
 just serializes it for `/api/state`; the Android/iOS Compose UI (below) calls it directly,
 no HTTP round-trip needed since it shares the process with the server.
@@ -655,7 +680,10 @@ hold for **both** unless noted.
   it on "owner back". On expiry the lease is freed **and** the warm radio link is torn down via
   an injected teardown (KMP `onRelease`, Rust `set_teardown` → `BleBackend::disconnect`). This is
   what reclaims connections, slots, and pump tasks after a drop — see
-  [Peripheral ownership](#peripheral-ownership).
+  [Peripheral ownership](#peripheral-ownership). A `connect` that completes *after* its transport
+  was retired is generation-bound: it will not resurrect the abandoned lease (KMP re-checks a
+  `connectionLive` flag when committing; Rust checks `connection_live`), so the grace path still
+  releases it instead of leaking a peripheral held by a dead connection.
 
 **Availability — dead clients are detected fast.**
 - *WebSocket liveness pings.* Each connection is pinged on an interval (default 15s) and closed
@@ -665,11 +693,23 @@ hold for **both** unless noted.
   (KMP: Ktor `WebSockets { pingPeriodMillis/timeoutMillis }`; Rust: a ping arm in the send task.)
 
 **Resource bounds — one client can't exhaust the host.**
+- *Bounded inbound frames.* An encoded WebSocket frame above **1 MiB** is rejected before decoding
+  (Ktor `maxFrameSize` / tungstenite `WebSocketConfig` at the framing layer, plus an app-level
+  guard), closing the connection with a stable reason rather than buffering unbounded input.
 - *Bounded outbound buffers.* Per-connection outbound is bounded (Rust frame channel = 512).
   Replies apply backpressure; **events are shed on overflow** so a notification flood never
-  blocks the radio.
+  blocks the radio. Notifications are ordered payloads, not coalescible: an observation whose
+  delivery stays blocked past a timeout terminates *that stream* with a stable outcome rather than
+  holding an unbounded producer chain.
 - *Capped in-flight commands.* A per-connection semaphore (default 64) limits concurrent ops;
   once hit, the read loop suspends, backpressuring the link instead of spawning unbounded tasks.
+- *Argument ceilings.* Oversized arguments are rejected as `INVALID_REQUEST` before reaching the
+  radio — at most 64 scan filters, 512-byte write/descriptor payloads, and an MTU within the ATT
+  range 23–517. Streaming resources are independently capped per connection (16 active scans, 128
+  observations); reusing a live stream id replaces it without consuming a slot.
+- *Bounded failed-auth accounting.* Rejected upgrades are tracked in the fixed-memory
+  `FailedAuthLimiter` (per-peer + global ceilings, LRU eviction), shared in spirit by both agents;
+  the Kotlin agent additionally rate-limits the operator dashboard's auth with its own limiter.
 
 **Lifecycle hygiene.**
 - *Graceful shutdown.* `SIGTERM`/`SIGINT` stops accepting and disconnects tracked peripherals
@@ -700,12 +740,6 @@ client SDK uses. The agent process initializes it at startup:
 Logger.sink = PrintlnSink
 Logger.level = parseLogLevel(System.getenv("REMOTE_BLE_LOG"))  // default: INFO
 ```
-
-### Runtime log-level toggle
-
-The dashboard exposes `GET/POST /api/log-level` — a dropdown in the HTML page header
-that flips `Logger.level` live (no restart). Values: `trace`, `debug`, `info`, `warn`,
-`error`, `off`.
 
 ### What's logged at each level
 

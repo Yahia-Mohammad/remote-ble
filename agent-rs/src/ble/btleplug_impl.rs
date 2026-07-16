@@ -30,7 +30,7 @@ pub struct BtleplugBackend {
     /// Connected devices -> the owning client's event channel, so the adapter
     /// event listener can forward an unsolicited BLE disconnect to the client.
     /// Keyed by device handle (`PeripheralId::to_string()`).
-    connected: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AgentEvent>>>>,
+    connected: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
     /// Cross-client ownership. An unsolicited BLE drop notifies it so the lease
     /// is released (after its grace window) rather than leaking.
     registry: PeripheralRegistry,
@@ -54,7 +54,7 @@ struct Observation {
 
 struct ScanSubscription {
     filters: Vec<ScanFilter>,
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
+    event_tx: mpsc::Sender<AgentEvent>,
 }
 
 /// How long [BtleplugBackend::spawn_liveness_prober]'s probe waits before treating the link
@@ -240,11 +240,15 @@ impl BtleplugBackend {
                                 );
                                 for (stream, subscription) in subscribers {
                                     if scan_matches(&subscription.filters, &dto) {
-                                        let _ =
-                                            subscription.event_tx.send(AgentEvent::ScanResult {
+                                        // Advertisements are explicitly lossy under pressure: the
+                                        // next packet is a fresher snapshot, and try_send keeps a
+                                        // slow client from blocking the adapter event loop.
+                                        let _ = subscription.event_tx.try_send(
+                                            AgentEvent::ScanResult {
                                                 scan_id: stream.local_id,
                                                 advertisement: dto.clone(),
-                                            });
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -377,14 +381,14 @@ async fn probe_liveness(peripheral: &Peripheral) -> bool {
 /// independent ways a drop can be noticed. A no-op if the device isn't tracked (e.g. an
 /// explicit `Disconnect` op already removed it).
 fn report_unsolicited_disconnect(
-    connected: &Mutex<HashMap<String, mpsc::UnboundedSender<AgentEvent>>>,
+    connected: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
     registry: &PeripheralRegistry,
     handle: &str,
 ) {
     let sender = connected.lock().remove(handle);
     if let Some(tx) = sender {
         tracing::info!("BLE device disconnected (unsolicited): {}", handle);
-        let _ = tx.send(AgentEvent::ConnectionState {
+        let _ = tx.try_send(AgentEvent::ConnectionState {
             device: DeviceHandle {
                 value: handle.to_string(),
             },
@@ -412,7 +416,7 @@ impl BleBackend for BtleplugBackend {
         &self,
         stream: StreamKey,
         filters: Vec<ScanFilter>,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError> {
         tracing::info!("Received start_scan request (scan_id: {})", stream.local_id);
         let is_first = {
@@ -480,7 +484,7 @@ impl BleBackend for BtleplugBackend {
     async fn connect(
         &self,
         device: &DeviceHandle,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError> {
         let peripheral = self.find_peripheral(device).await?;
         if !peripheral.is_connected().await.unwrap_or(false) {
@@ -497,7 +501,7 @@ impl BleBackend for BtleplugBackend {
             .lock()
             .insert(device.value.clone(), event_tx.clone());
 
-        let _ = event_tx.send(AgentEvent::ConnectionState {
+        let _ = event_tx.try_send(AgentEvent::ConnectionState {
             device: device.clone(),
             state: BleConnState::Connected,
             reason: None,
@@ -516,7 +520,7 @@ impl BleBackend for BtleplugBackend {
         }
 
         if let Some(tx) = sender {
-            let _ = tx.send(AgentEvent::ConnectionState {
+            let _ = tx.try_send(AgentEvent::ConnectionState {
                 device: device.clone(),
                 state: BleConnState::Disconnected,
                 reason: None,
@@ -608,7 +612,7 @@ impl BleBackend for BtleplugBackend {
         stream: StreamKey,
         device: &DeviceHandle,
         char_ref: &CharRef,
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError> {
         // Replacing the same connection-local subscription must retire its old pump first.
         self.stop_observe(stream).await?;
@@ -633,15 +637,24 @@ impl BleBackend for BtleplugBackend {
         let target_uuid = characteristic.uuid;
         let task = tokio::spawn(async move {
             while let Some(notification) = notifications.next().await {
-                if notification.uuid == target_uuid
-                    && event_tx
-                        .send(AgentEvent::Notification {
-                            sub_id: stream.local_id,
-                            value: notification.value,
-                        })
-                        .is_err()
-                {
-                    break;
+                if notification.uuid == target_uuid {
+                    match event_tx.try_send(AgentEvent::Notification {
+                        sub_id: stream.local_id,
+                        value: notification.value,
+                    }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            // A notification stream is not safely coalescible. End this pump on
+                            // overflow rather than retaining data or silently losing an arbitrary
+                            // suffix; callers can explicitly subscribe again after recovery.
+                            tracing::warn!(
+                                "notification stream {} terminated: event buffer full",
+                                stream.local_id
+                            );
+                            break;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    }
                 }
             }
         });

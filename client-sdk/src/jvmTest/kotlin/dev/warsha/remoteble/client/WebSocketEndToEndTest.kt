@@ -1,18 +1,25 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.agent.AgentBackend
+import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BlackholeBackend
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
+import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
+import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
+import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.agent.FakeAgent
+import java.io.IOException
+import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
@@ -38,6 +45,21 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import io.ktor.client.plugins.websocket.webSocketSession
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.websocket.CloseReason
+import io.ktor.websocket.Frame
+import io.ktor.websocket.close
+import io.ktor.server.cio.CIO
+import io.ktor.server.application.install
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.routing.routing
+import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.webSocket
 
 /**
  * Proves the transport seam: the unchanged session + RemoteGattClient/RemoteScanSource
@@ -62,6 +84,30 @@ class WebSocketEndToEndTest {
     }
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+
+    private fun incompatibleProtocolServer(port: Int): EmbeddedServer<*, *> =
+        embeddedServer(CIO, port = port) {
+            install(WebSockets)
+            routing {
+                webSocket("/agent") {
+                    close(CloseReason(CloseReason.Codes.PROTOCOL_ERROR, INCOMPATIBLE_PROTOCOL_CLOSE_REASON))
+                }
+            }
+        }.startAndAwaitReady(port)
+
+    private fun EmbeddedServer<*, *>.startAndAwaitReady(port: Int): EmbeddedServer<*, *> {
+        start(wait = false)
+        val deadline = System.nanoTime() + 5.seconds.inWholeNanoseconds
+        while (true) {
+            try {
+                Socket().use { it.connect(InetSocketAddress("localhost", port), 200) }
+                return this
+            } catch (_: IOException) {
+                check(System.nanoTime() < deadline) { "server on port $port did not start" }
+                Thread.sleep(10)
+            }
+        }
+    }
 
     private fun transportTo(
         port: Int,
@@ -119,6 +165,125 @@ class WebSocketEndToEndTest {
 
             val err = assertIs<OpResult.Err>(result)
             assertEquals(ErrorKind.TIMEOUT, err.error.kind)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun incompatibleHelloClosesTheRealWebSocketWithTheStableProtocolSignal() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        try {
+            val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
+            socket.send(Frame.Binary(true, CborProtocolCodec().encode(ClientHello(minVersion = 2, maxVersion = 3))))
+            val reason = withTimeout(5.seconds) { socket.closeReason.await() }
+            assertEquals(CloseReason.Codes.PROTOCOL_ERROR, reason?.knownReason)
+            assertEquals(INCOMPATIBLE_PROTOCOL_CLOSE_REASON, reason?.message)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun transportMapsARealIncompatibleCloseToTerminalStateWithoutReconnect() = runBlocking {
+        val port = freePort()
+        val server = incompatibleProtocolServer(port)
+        try {
+            val transport = transportTo(port, autoReconnect = false)
+            transport.connect()
+            withTimeout(5.seconds) {
+                transport.state.first { it == TransportState.INCOMPATIBLE_PROTOCOL }
+            }
+            assertEquals(TransportState.INCOMPATIBLE_PROTOCOL, transport.state.value)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun incompatibleHelloStillClosesWhenACommandArrivesFirst() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        try {
+            val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
+            socket.send(Frame.Binary(true, CborProtocolCodec().encode(Command(1, Op.Connect(device)))))
+            socket.send(Frame.Binary(true, CborProtocolCodec().encode(ClientHello(minVersion = 2, maxVersion = 3))))
+            val reason = withTimeout(5.seconds) { socket.closeReason.await() }
+            assertEquals(CloseReason.Codes.PROTOCOL_ERROR, reason?.knownReason)
+            assertEquals(INCOMPATIBLE_PROTOCOL_CLOSE_REASON, reason?.message)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun rejectsASecondLiveSocketForTheSameStableClientIdentity() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        try {
+            val first = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent") {
+                header(CLIENT_ID_HEADER, "shared-test-client")
+            }
+            val second = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent") {
+                header(CLIENT_ID_HEADER, "shared-test-client")
+            }
+
+            val reason = withTimeout(5.seconds) { second.closeReason.await() }
+            assertEquals(CloseReason.Codes.VIOLATED_POLICY, reason?.knownReason)
+            assertEquals(AgentWebSocketServer.DUPLICATE_SESSION_CLOSE_REASON, reason?.message)
+            first.close()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun dashboardReadsRequireTheirOwnOperatorCredential() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(
+            port = port,
+            authToken = TOKEN,
+            operatorToken = "operator-secret",
+            monitor = AgentMonitor(),
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            val endpoint = "http://localhost:$port/api/state"
+            assertEquals(HttpStatusCode.Unauthorized, httpClient.get(endpoint).status)
+            assertEquals(
+                HttpStatusCode.Unauthorized,
+                httpClient.get(endpoint) { header(HttpHeaders.Authorization, "Bearer $TOKEN") }.status,
+            )
+            assertEquals(
+                HttpStatusCode.OK,
+                httpClient.get(endpoint) { header(HttpHeaders.Authorization, "Bearer operator-secret") }.status,
+            )
+            assertEquals(
+                HttpStatusCode.OK,
+                httpClient.get(endpoint) {
+                    header(HttpHeaders.Authorization, "Basic b3BlcmF0b3I6b3BlcmF0b3Itc2VjcmV0")
+                }.status,
+            )
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun oversizedFrameIsRejectedBeforeProtocolDecoding() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        try {
+            val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
+            socket.send(Frame.Binary(true, ByteArray(AgentWebSocketServer.MAX_FRAME_BYTES + 1)))
+            val reason = withTimeout(5.seconds) { socket.closeReason.await() }
+            assertEquals(CloseReason.Codes.TOO_BIG, reason?.knownReason)
         } finally {
             server.stop()
         }

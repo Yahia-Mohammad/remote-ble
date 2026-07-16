@@ -7,6 +7,7 @@ import dev.warsha.remoteble.agent.BleAgent
 import dev.warsha.remoteble.agent.BleAgentBackend
 import dev.warsha.remoteble.agent.BleBackend
 import dev.warsha.remoteble.agent.ConnectionWatcher
+import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.EngineBleBackend
 import dev.warsha.remoteble.agent.PeripheralRegistry
 import dev.warsha.remoteble.agent.StrictModeState
@@ -23,8 +24,11 @@ import org.koin.dsl.module
 
 /** Runtime configuration for the agent process (CLI args / environment). */
 data class AgentConfig(
+    val bindHost: String = DEFAULT_BIND_HOST,
     val port: Int = DEFAULT_PORT,
     val authToken: String? = null,
+    val namedCredentials: Map<String, String> = emptyMap(),
+    val operatorToken: String? = null,
     val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     val exclusiveByDefault: Boolean = true,
     val leaseGrace: Duration = 10.seconds,
@@ -32,6 +36,7 @@ data class AgentConfig(
     val livenessProbeInterval: Duration = 15.seconds,
 ) {
     companion object {
+        const val DEFAULT_BIND_HOST: String = "127.0.0.1"
         const val DEFAULT_PORT: Int = 8080
     }
 }
@@ -47,6 +52,17 @@ fun agentModule(config: AgentConfig): Module = module {
         "Shared peripheral mode is unavailable in RemoteBLE 0.9.0; use exclusive ownership"
     }
     single { config }
+    single {
+        require(ClientCredentials.DEFAULT_PRINCIPAL !in config.namedCredentials || config.authToken == null) {
+            "REMOTE_BLE_TOKEN cannot be combined with a named credential called 'default'"
+        }
+        ClientCredentials.of(
+            buildMap {
+                putAll(config.namedCredentials)
+                config.authToken?.takeIf { it.isNotBlank() }?.let { put(ClientCredentials.DEFAULT_PRINCIPAL, it) }
+            },
+        )
+    }
     single<DispatcherProvider> { DefaultDispatcherProvider }
     single { AgentMonitor() }
     single { StrictModeState() }
@@ -75,7 +91,7 @@ fun agentModule(config: AgentConfig): Module = module {
             lifecycleScope = get(qualifier = org.koin.core.qualifier.named("agent")),
             maxConnections = config.maxConnections,
             observer = get<AgentMonitor>(),
-            agentInfo = "RemoteBLE Agent 0.9.0 (kable/${platformName()})",
+            agentInfo = "RemoteBLE Agent 0.9.1 (kable/${platformName()})",
             strictMode = get(),
         )
     }
@@ -87,5 +103,16 @@ fun agentModule(config: AgentConfig): Module = module {
             livenessInterval = config.livenessProbeInterval,
         )
     }
-    single { AgentWebSocketServer(config.port, backend = get(), authToken = config.authToken, monitor = get<AgentMonitor>(), registry = get(), strictMode = get()) }
+    single {
+        AgentWebSocketServer(
+            port = config.port,
+            host = config.bindHost,
+            backend = get(),
+            credentials = get(),
+            operatorToken = config.operatorToken,
+            monitor = get<AgentMonitor>(),
+            registry = get(),
+            strictMode = get(),
+        )
+    }
 }

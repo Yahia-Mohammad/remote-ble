@@ -23,12 +23,14 @@ for the 2026-07-15 review findings.
 | [protocol.md](protocol.md) | The wire contract: every frame/op/result/event type, the codec, serialization rules |
 | [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
 | [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
+| [proposals/0.9.1-progress-status.md](proposals/0.9.1-progress-status.md) | 0.9.1 implementation handoff: completed slices, verification, remaining work, and deferrals |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
 | [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
+| [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 
 ### Proposals (design records)
 
@@ -39,6 +41,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 |---|---|---|
 | [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | **Implemented in 0.8.2** (coarse Android profile; `hint` reserved) |
 | [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | **Implemented in 0.8.0** (Kotlin agent + `agent-rs`) |
+| [proposals/0.9.1-hardening-decisions.md](proposals/0.9.1-hardening-decisions.md) | Security, lifecycle, incompatibility, and overload decisions | **Accepted for 0.9.1** |
 
 ---
 

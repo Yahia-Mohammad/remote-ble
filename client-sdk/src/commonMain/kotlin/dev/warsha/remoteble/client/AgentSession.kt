@@ -62,6 +62,16 @@ interface AgentSession {
     val transportState: StateFlow<TransportState>
 
     /**
+     * Session usability, distinct from the raw IP [transportState]. [SessionReadiness.READY]
+     * means the agent hello completed and any reconnect replay succeeded; [SessionReadiness.DEGRADED]
+     * means the link is usable but one or more previously live peripherals could not be restored.
+     */
+    val readiness: StateFlow<SessionReadiness>
+
+    /** Most recent reconnect replay outcome; `null` until the first reconnect completes. */
+    val reconciliationReport: StateFlow<ReconciliationReport?>
+
+    /**
      * The capabilities the agent advertised on the most recent handshake, or `null`
      * until the first `ServerHello` lands. Negotiation is lenient — `request()` never
      * blocks on this — so callers that must gate a capability-specific op should await
@@ -110,6 +120,28 @@ interface AgentSession {
         val DEFAULT_TIMEOUT: Duration = 15.seconds
     }
 }
+
+/** Higher-level session lifecycle; use this when an operation requires completed negotiation/replay. */
+enum class SessionReadiness {
+    DISCONNECTED,
+    CONNECTING,
+    NEGOTIATING,
+    RECONCILING,
+    READY,
+    DEGRADED,
+    INCOMPATIBLE_PROTOCOL,
+    CLOSED,
+}
+
+/** Bounded, secret-free summary of one reconnect replay. */
+data class ReconciliationReport(
+    val connectionsAttempted: Int,
+    val connectionsRestored: Int,
+    val connectionsFailed: Int,
+    val dependentOperationsReplayed: Int,
+    val dependentOperationsSkipped: Int,
+    val scansReplayed: Int,
+)
 
 /**
  * Free/total connection-slot updates from the agent (requires the agent's `slots`
@@ -221,6 +253,8 @@ class DefaultAgentSession(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     private val _capabilities = MutableStateFlow<Set<String>?>(null)
+    private val _readiness = MutableStateFlow(SessionReadiness.DISCONNECTED)
+    private val _reconciliationReport = MutableStateFlow<ReconciliationReport?>(null)
 
     // Replay set for reconcile-on-reconnect. The IP transport reconnecting does NOT
     // mean the agent's BLE state survived (the agent may have restarted), so on every
@@ -235,6 +269,8 @@ class DefaultAgentSession(
     override val transportState: StateFlow<TransportState> get() = transport.state
 
     override val capabilities: StateFlow<Set<String>?> = _capabilities.asStateFlow()
+    override val readiness: StateFlow<SessionReadiness> = _readiness.asStateFlow()
+    override val reconciliationReport: StateFlow<ReconciliationReport?> = _reconciliationReport.asStateFlow()
 
     init {
         // Decode incoming frames: complete matching requests, fan out events, record
@@ -246,6 +282,9 @@ class DefaultAgentSession(
                     is Event -> _events.emit(frame.event)
                     is ServerHello -> {
                         _capabilities.value = frame.capabilities
+                        if (_readiness.value == SessionReadiness.NEGOTIATING) {
+                            _readiness.value = SessionReadiness.READY
+                        }
                         Logger.info(LogTags.SESSION) { "agent hello — negotiated caps: ${frame.capabilities}" }
                     }
                     is Command, is ClientHello -> Unit
@@ -262,18 +301,34 @@ class DefaultAgentSession(
                 when (state) {
                     TransportState.CONNECTED -> {
                         _capabilities.value = null
+                        _readiness.value = SessionReadiness.NEGOTIATING
                         val replay = everConnected
                         sessionScope.launch {
                             sendHello()
-                            if (replay) reconcileOnReconnect()
+                            if (replay) {
+                                _readiness.value = SessionReadiness.RECONCILING
+                                val report = reconcileOnReconnect()
+                                _reconciliationReport.value = report
+                                _readiness.value = if (report.connectionsFailed > 0) {
+                                    SessionReadiness.DEGRADED
+                                } else {
+                                    SessionReadiness.READY
+                                }
+                            }
                         }
                         everConnected = true
                     }
                     TransportState.DISCONNECTED -> {
+                        _readiness.value = SessionReadiness.DISCONNECTED
                         Logger.info(LogTags.SESSION) { "transport lost — failing in-flight requests" }
                         failAllPending()
                     }
-                    TransportState.CONNECTING -> Unit
+                    TransportState.INCOMPATIBLE_PROTOCOL -> {
+                        _readiness.value = SessionReadiness.INCOMPATIBLE_PROTOCOL
+                        Logger.warn(LogTags.SESSION) { "protocol incompatible — failing in-flight requests" }
+                        failAllPending(ErrorKind.INCOMPATIBLE_PROTOCOL)
+                    }
+                    TransportState.CONNECTING -> _readiness.value = SessionReadiness.CONNECTING
                 }
             }
         }
@@ -330,7 +385,12 @@ class DefaultAgentSession(
             return cid to deferred
         }
         if (transport.state.value != TransportState.CONNECTED) {
-            deferred.complete(OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST, message = "transport not connected")))
+            val kind = if (transport.state.value == TransportState.INCOMPATIBLE_PROTOCOL) {
+                ErrorKind.INCOMPATIBLE_PROTOCOL
+            } else {
+                ErrorKind.TRANSPORT_LOST
+            }
+            deferred.complete(OpResult.Err(AgentError(kind, message = "transport not connected")))
             Logger.debug(LogTags.SESSION) { "sendCommand failed: transport not connected cid=$cid" }
             return cid to deferred
         }
@@ -426,7 +486,7 @@ class DefaultAgentSession(
      * reconciled harmlessly. Runs on its own coroutine; the same drop-fail path applies if
      * the link drops again mid-replay.
      */
-    private suspend fun reconcileOnReconnect() {
+    private suspend fun reconcileOnReconnect(): ReconciliationReport {
         val connections: List<DeviceHandle>
         val subscriptions: List<Op.ObserveStart>
         val scans: List<Op.ScanStart>
@@ -438,14 +498,35 @@ class DefaultAgentSession(
             connParams = lastConnParams.values.toList()
         }
         val started = TimeSource.Monotonic.markNow()
-        connections.forEach { request(Op.Connect(it)) }
-        connParams.forEach { request(it) }
-        subscriptions.forEach { request(it) }
+        val unavailable = mutableSetOf<DeviceHandle>()
+        connections.forEach { device ->
+            if (request(Op.Connect(device)) !is OpResult.Ok) unavailable += device
+        }
+        // A failed prerequisite must not produce noisy dependent replays against a device that is
+        // known unavailable after this reconnect. Scans do not depend on a connection and still run.
+        var dependentReplayed = 0
+        connParams.filterNot { it.device in unavailable }.forEach { request(it); dependentReplayed++ }
+        subscriptions.filterNot { it.device in unavailable }.forEach { request(it); dependentReplayed++ }
         scans.forEach { request(it) }
         val elapsed = started.elapsedNow()
-        Logger.info(LogTags.SESSION) {
-            "reconciled ${connections.size} conn(s), ${connParams.size} param(s), ${subscriptions.size} sub(s), ${scans.size} scan(s) in ${elapsed.inWholeMilliseconds}ms"
+        val summary = "reconciled ${connections.size - unavailable.size}/${connections.size} conn(s), " +
+            "${connParams.size} param(s), ${subscriptions.size} sub(s), ${scans.size} scan(s) in ${elapsed.inWholeMilliseconds}ms"
+        if (unavailable.isEmpty()) {
+            Logger.info(LogTags.SESSION) { summary }
+        } else {
+            Logger.warn(LogTags.SESSION) {
+                "$summary; skipped dependent replay for ${unavailable.size} unavailable device(s)"
+            }
         }
+        return ReconciliationReport(
+            connectionsAttempted = connections.size,
+            connectionsRestored = connections.size - unavailable.size,
+            connectionsFailed = unavailable.size,
+            dependentOperationsReplayed = dependentReplayed,
+            dependentOperationsSkipped = (connParams.count { it.device in unavailable } +
+                subscriptions.count { it.device in unavailable }),
+            scansReplayed = scans.size,
+        )
     }
 
     /**
@@ -469,14 +550,14 @@ class DefaultAgentSession(
         Logger.info(LogTags.SESSION) { "hello sent (caps=${caps.size}, fmt=$fmt)" }
     }
 
-    private suspend fun failAllPending() {
+    private suspend fun failAllPending(kind: ErrorKind = ErrorKind.TRANSPORT_LOST) {
         val drained = pendingLock.withLock {
             val all = pending.values.toList()
             pending.clear()
             all
         }
-        val lost = OpResult.Err(AgentError(ErrorKind.TRANSPORT_LOST))
-        drained.forEach { it.complete(lost) }
+        val failure = OpResult.Err(AgentError(kind))
+        drained.forEach { it.complete(failure) }
     }
 
     override suspend fun close() {
@@ -489,6 +570,8 @@ class DefaultAgentSession(
         if (!shouldClose) return
 
         _capabilities.value = null
+        _readiness.value = SessionReadiness.CLOSED
+        _reconciliationReport.value = null
         failAllPending()
         replayLock.withLock {
             activeConnections.clear()

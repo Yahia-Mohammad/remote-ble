@@ -56,6 +56,7 @@ client-sdk/src/
 agent/run-agent.sh 8080                                       # run the real macOS JVM agent (NOT :agent:jvmRun)
 agent-rs/run-agent-rs.sh 8080                                 # run the native Rust agent on macOS (Linux/Win: cargo run --bin agent-rs)
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080              # …with bearer auth
+REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080 # …with protected dashboard
 ./gradlew :e2e-runner:scanRun --args "ws://localhost:8080/agent 15"   # radio-less scan smoke test
 ./gradlew :android-client:assembleDebug                      # build the emulator client APK
 ```

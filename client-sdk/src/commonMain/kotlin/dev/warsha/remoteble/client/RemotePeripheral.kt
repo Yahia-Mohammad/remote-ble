@@ -2,6 +2,7 @@ package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.CharRef
@@ -10,6 +11,7 @@ import dev.warsha.remoteble.protocol.ConnPriority
 import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
+import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.orThrow
 import com.juul.kable.Characteristic
 import com.juul.kable.Descriptor
@@ -19,6 +21,7 @@ import com.juul.kable.Identifier
 import com.juul.kable.Peripheral
 import com.juul.kable.State
 import com.juul.kable.WriteType
+import kotlin.time.Duration
 import kotlin.uuid.ExperimentalUuidApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +38,22 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.withTimeoutOrNull
+
+/** Result of [RemotePeripheral.shutdown]'s remote-release attempt. Local cleanup always completes. */
+public sealed interface RemoteShutdownResult {
+    /** The agent acknowledged the disconnect/release before the supplied deadline. */
+    public data object Completed : RemoteShutdownResult
+
+    /** No remote cleanup reply arrived before the supplied deadline. */
+    public data object TimedOut : RemoteShutdownResult
+
+    /** The transport dropped before the remote cleanup request could complete. */
+    public data object TransportLost : RemoteShutdownResult
+
+    /** The agent rejected the cleanup for a reason other than transport loss. */
+    public data class Failed(val errorKind: ErrorKind) : RemoteShutdownResult
+}
 
 /**
  * A Kable [Peripheral] backed by a remote agent. App code written against
@@ -54,7 +73,7 @@ public class RemotePeripheral(
     private val session: AgentSession,
     name: String? = null,
     private val requestedMtu: Int = DEFAULT_REQUESTED_MTU,
-    timeouts: RemoteTimeouts = RemoteTimeouts(),
+    private val timeouts: RemoteTimeouts = RemoteTimeouts(),
     dispatchers: DispatcherProvider = DefaultDispatcherProvider,
 ) : Peripheral {
 
@@ -141,6 +160,44 @@ public class RemotePeripheral(
         teardownConnection()
         Logger.info(LogTags.PERIPHERAL) { "disconnected [dev=${handle.value}]" }
         _state.value = State.Disconnected(null)
+    }
+
+    /**
+     * Retires this peripheral deliberately. Unlike Kable's non-suspending [close], this first
+     * asks the agent to disconnect/release the remote lease and waits no longer than [timeout].
+     * In every outcome local observations, child connection work, services, and this peripheral's
+     * scope are retired so a lost transport cannot leak collectors or leave a stale local state.
+     * Repeated calls are safe and return the result of their own best-effort remote request.
+     */
+    public suspend fun shutdown(timeout: Duration = timeouts.op): RemoteShutdownResult {
+        require(!timeout.isNegative()) { "timeout must not be negative" }
+        _state.value = State.Disconnecting
+        return try {
+            if (withTimeoutOrNull(timeout) {
+                    gatt.disconnect()
+                    true
+                } == true
+            ) {
+                RemoteShutdownResult.Completed
+            } else {
+                RemoteShutdownResult.TimedOut
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: AgentException) {
+            if (failure.error.kind == ErrorKind.TRANSPORT_LOST) {
+                RemoteShutdownResult.TransportLost
+            } else {
+                RemoteShutdownResult.Failed(failure.error.kind)
+            }
+        } catch (failure: Throwable) {
+            Logger.debug(LogTags.PERIPHERAL) { "structured shutdown failed: ${failure.message}" }
+            RemoteShutdownResult.TransportLost
+        } finally {
+            teardownConnection()
+            _state.value = State.Disconnected(null)
+            scope.cancel()
+        }
     }
 
     override suspend fun read(characteristic: Characteristic): ByteArray =

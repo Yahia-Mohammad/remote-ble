@@ -1,8 +1,44 @@
 package dev.warsha.remoteble.log
 
+import kotlin.concurrent.Volatile
+
 public object Logger {
-    public var level: LogLevel? = null
-    public var sink: LogSink = LogSink { _, _, _, _ -> }
+    /** One atomically published logging configuration. */
+    public data class Configuration(
+        val level: LogLevel? = null,
+        val sink: LogSink = SilentSink,
+    )
+
+    private val SilentSink = LogSink { _, _, _, _ -> }
+
+    @PublishedApi
+    @Volatile
+    internal var configuration: Configuration = Configuration()
+
+    /**
+     * Compatibility accessor. Prefer [configure] when changing both level and sink so callers
+     * never publish an intermediate configuration.
+     */
+    public var level: LogLevel?
+        get() = configuration.level
+        set(value) {
+            configuration = configuration.copy(level = value)
+        }
+
+    /**
+     * Compatibility accessor. Prefer [configure] when changing both level and sink so callers
+     * never publish an intermediate configuration.
+     */
+    public var sink: LogSink
+        get() = configuration.sink
+        set(value) {
+            configuration = configuration.copy(sink = value)
+        }
+
+    /** Publishes [level] and [sink] together as one immutable configuration snapshot. */
+    public fun configure(level: LogLevel?, sink: LogSink = SilentSink) {
+        configuration = Configuration(level, sink)
+    }
 
     public inline fun trace(
         tag: String,
@@ -50,7 +86,8 @@ public object Logger {
         throwable: Throwable?,
         message: () -> String,
     ) {
-        val min = this.level ?: return
-        if (level >= min) sink.log(level, tag, message(), throwable)
+        val config = configuration
+        val min = config.level ?: return
+        if (level >= min) config.sink.log(level, tag, message(), throwable)
     }
 }

@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -17,7 +16,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -27,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentRunner
@@ -53,17 +52,14 @@ import kotlinx.coroutines.launch
  * [permissionWarning] explains why and [onRequestPermissionSettings], if supplied, renders a
  * button routing to the app's settings page.
  *
- * Auth token: an editable field, enabled only while
- * stopped, backed by [loadPersistedToken]/[persistToken] so a token set in a previous session
- * survives relaunch. If the field is left blank, pressing Start prompts for confirmation and then
- * runs the agent token-free (no auth — any client on the network can connect); see
- * [dev.warsha.remoteble.agent.AgentWebSocketServer], which drops the Authorization gate when the
- * token is null.
+ * Mobile agents intentionally bind to all interfaces so their LAN address is reachable by a
+ * companion client. A non-blank token is required before starting: the UI makes the unencrypted
+ * LAN exposure explicit without rendering the bearer credential itself.
  */
 @Composable
 fun AgentApp(
     runner: AgentRunner,
-    config: AgentConfig = AgentConfig(),
+    config: AgentConfig = AgentConfig(bindHost = MOBILE_LAN_BIND_HOST),
     addressLabel: (Int) -> String = { port -> "ws://<this device>:$port/agent" },
     keepScreenOnNotice: String? = null,
     startEnabled: Boolean = true,
@@ -75,7 +71,6 @@ fun AgentApp(
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
     var token by remember { mutableStateOf<String?>(null) }
     var tokenEdited by remember { mutableStateOf(false) }
-    var showNoTokenConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val persisted = loadPersistedToken()
@@ -99,19 +94,16 @@ fun AgentApp(
         }
     }
 
-    // Start the agent with [chosen]; a blank/null token runs token-free (no auth gate).
+    // Start the LAN-exposed agent with its required credential.
     val startWith: (String?) -> Unit = { chosen ->
         val effectiveToken = chosen?.takeIf { it.isNotBlank() }
         token = effectiveToken
         // Persist on Start, not per keystroke: only records what the agent actually ran with.
-        // A null token clears any stored value so a relaunch also comes up token-free.
         scope.launch { persistToken(effectiveToken) }
-        runner.start(config.copy(authToken = effectiveToken))
+        scope.launch { runner.start(config.copy(authToken = effectiveToken)) }
     }
     val onStart: () -> Unit = {
-        // A blank field is a deliberate, security-relevant choice (anyone on the LAN can then
-        // connect), so confirm before running without auth rather than silently minting a token.
-        if (token.isNullOrBlank()) showNoTokenConfirm = true else startWith(token)
+        if (!token.isNullOrBlank()) startWith(token)
     }
     val onStop: () -> Unit = { scope.launch { runner.stop() } }
 
@@ -126,7 +118,7 @@ fun AgentApp(
                 item {
                     AgentHeader(
                         running = running,
-                        startEnabled = startEnabled,
+                        startEnabled = startEnabled && !token.isNullOrBlank(),
                         address = if (running) addressLabel(config.port) else "Stopped",
                         keepScreenOnNotice = keepScreenOnNotice,
                         token = token,
@@ -149,32 +141,14 @@ fun AgentApp(
             }
         }
 
-        if (showNoTokenConfirm) {
-            AlertDialog(
-                onDismissRequest = { showNoTokenConfirm = false },
-                title = { Text("Start without an auth token?") },
-                text = {
-                    Text(
-                        "The agent will accept any client on the network with no authentication. " +
-                            "Only do this on a trusted network. To require a token, cancel and " +
-                            "type one into the field first.",
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = { showNoTokenConfirm = false; startWith(null) }) {
-                        Text("Start without token")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showNoTokenConfirm = false }) { Text("Cancel") }
-                },
-            )
-        }
     }
 }
 
+/** Mobile's explicit LAN-serving default; desktop/headless defaults stay loopback-only. */
+private const val MOBILE_LAN_BIND_HOST = "0.0.0.0"
+
 /**
- * Header panel: the title, Start/Stop control, agent address, editable auth-token field, and
+ * Header panel: the title, Start/Stop control, agent address, masked auth-token field, and
  * (when starting is gated) the permission warning. Pure rendering — token state and the
  * start/stop actions are hoisted to the caller.
  */
@@ -210,15 +184,14 @@ private fun AgentHeader(
     OutlinedTextField(
         value = token.orEmpty(),
         onValueChange = onTokenChange,
-        label = { Text("Auth token (blank = none)") },
+        label = { Text("Auth token (required for LAN access)") },
+        visualTransformation = PasswordVisualTransformation(),
         enabled = !running,
         modifier = Modifier.fillMaxWidth(),
     )
     if (running) {
-        // Surface what the agent is actually running with: the token for client operators to
-        // copy, or a clear warning when it was started token-free.
         Text(
-            if (token.isNullOrBlank()) "No auth token — any client can connect" else "Token: $token",
+            "LAN exposure over unencrypted ws://. Clients need the configured bearer credential.",
             style = MaterialTheme.typography.bodySmall,
         )
     }

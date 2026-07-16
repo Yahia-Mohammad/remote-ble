@@ -23,8 +23,8 @@ apps):
 
 ```sh
 agent/run-agent.sh 8080
-# → RemoteBLE agent listening on ws://0.0.0.0:8080/agent (no auth, exclusive peripherals, Kable engine on Mac OS X)
-# → Status dashboard: http://localhost:8080/
+# → RemoteBLE agent listening on ws://127.0.0.1:8080/agent (no auth, exclusive peripherals, Kable engine on Mac OS X)
+# → Dashboard disabled (set a separate REMOTE_BLE_OPERATOR_TOKEN to enable it)
 ```
 
 > Use `agent/run-agent.sh`, **not** `./gradlew :agent:jvmRun` — a bare JVM is killed by macOS
@@ -42,8 +42,18 @@ REMOTE_BLE_TOKEN=s3cr3t agent/run-agent.sh 8080
 # → … (bearer-token required, …)
 ```
 
-That's the whole server side. The agent exposes one endpoint, `ws://<host>:8080/agent`,
-and a status dashboard at `http://<host>:8080/`.
+To enable the HTTP status dashboard, configure a **different** operator token as well. Browsers
+prompt for username `operator` and that token; client tokens are rejected by dashboard routes.
+
+```sh
+REMOTE_BLE_TOKEN=client-secret REMOTE_BLE_OPERATOR_TOKEN=operator-secret agent/run-agent.sh 8080
+```
+
+The desktop agent binds `127.0.0.1` by default. For LAN use, set an explicit bind address and
+credentials (for example `REMOTE_BLE_BIND=192.168.1.20 REMOTE_BLE_TOKENS='phone=…'`); use a
+TLS-terminating reverse proxy or VPN for encrypted deployments. Direct `ws://` is only for
+trusted-network/development use. A named credential (`REMOTE_BLE_TOKENS='name=secret,…'`) maps
+the verified bearer secret to a principal; `REMOTE_BLE_TOKEN` remains the `default` alias.
 
 ### Or: the native Rust agent (`agent-rs`)
 
@@ -72,15 +82,26 @@ Compose Multiplatform status UI instead of a terminal. `./gradlew :android-agent
 agent on the phone's own radio. Grant the Bluetooth permission it requests, tap **Start**, and
 point a client at the `ws://<phone-ip>:8080/agent` the screen shows (the app resolves the LAN IP
 for you). Because the phone listens on the open Wi-Fi in cleartext, the mobile agent is **always
-token-protected**: type an auth token or let it auto-generate one — it's shown next to the address,
-and the client supplies it via `WebSocketAgentTransport.authToken` (a suspend provider — return the
-token). iOS can't keep the agent running
+token-protected**: type an auth token, then configure that value in the client through
+`WebSocketAgentTransport.authToken` (a suspend provider). The app masks the field and never
+renders the bearer value after startup. iOS can't keep the agent running
 backgrounded (no equivalent of Android's foreground service — see
 [agent.md](agent.md#android--ios-a-phone-as-the-agent)), so keep that app open.
 
 > The Android/iOS agent apps are **dev/test tools**, not shipping builds — they serve over
-> cleartext `ws://` (the iOS launcher carries a blanket App Transport Security exception). Run
-> them on a trusted network.
+> cleartext `ws://` (the iOS launcher carries a blanket App Transport Security exception) and
+> retain the configured credential in platform development storage (Android DataStore; iOS
+> `NSUserDefaults`), not a protected production credential store. Run them on a trusted network;
+> do not use the mobile launcher for production credentials.
+
+### Credential rotation and revocation
+
+Desktop and Rust agent credentials are read at process startup. Rotate or revoke a credential by
+updating the environment/configuration and restarting the agent. Restart clears all in-memory
+leases, so an old credential cannot resume a warm lease; existing WebSocket sessions also end with
+the process. There is intentionally no live credential-reload API in 0.9.1 — changing an
+environment variable without restarting has no security effect. For a zero-downtime rotation, run
+a separately configured replacement agent and migrate clients before retiring the old one.
 
 ---
 
@@ -210,6 +231,11 @@ indicator:
 session.transportState.collect { state -> /* CONNECTING / CONNECTED / DISCONNECTED */ }
 ```
 
+When an operation must wait for the initial hello or for recovery replay to finish, observe the
+additive `session.readiness` flow and proceed only at `SessionReadiness.READY`. A
+`SessionReadiness.DEGRADED` link is usable, but one or more remembered peripheral connections did
+not recover and should be handled by the app (usually rescan/reconnect).
+
 **Two different "disconnected" states — don't confuse them:**
 
 | You want to know… | Watch | Type |
@@ -220,6 +246,11 @@ session.transportState.collect { state -> /* CONNECTING / CONNECTED / DISCONNECT
 A brief IP drop does **not** flip `peripheral.state` — the session heals it silently.
 A real radio disconnect flips `peripheral.state` to `State.Disconnected` and clears
 `peripheral.services`, exactly as local Kable would.
+
+When replacing a remote peripheral or leaving a screen, prefer the concrete
+`RemotePeripheral.shutdown()` API over Kable's non-suspending `close()`. It requests remote
+disconnect/release within a timeout, always cancels local observation/connection work, and reports
+whether cleanup completed, timed out, or lost transport.
 
 **Errors.** A failed op throws `AgentException`, whose `error.kind` tells you *where*
 it failed:
@@ -330,8 +361,7 @@ received it" — order is guaranteed, per-write *delivery* is still best-effort.
   [agent.md](agent.md#android--ios-a-phone-as-the-agent).
 - **Diagnostics:** The SDK defaults silent. To turn on logging, set `Logger.level` and
   `Logger.sink` before creating the session (see [client-sdk.md → Logging](client-sdk.md#logging)).
-  The agents default to `INFO` (`REMOTE_BLE_LOG=debug` to override; the Kotlin agent also
-  has a live dashboard toggle at `POST /api/log-level`).
+  The agents default to `INFO` (`REMOTE_BLE_LOG=debug` to override).
 
 ---
 

@@ -23,8 +23,9 @@ import kotlinx.coroutines.sync.withLock
  * The lease model is uniform: anything that means "the owner is (temporarily) gone" schedules a
  * per-lease release timer; anything that means "the owner is back" cancels it. The only
  * difference between causes is the delay and whether the radio link is kept warm meanwhile:
- *  - **BLE disconnect** (explicit or unsolicited): release after [leaseGrace]; the link is
- *    already down, so this just frees ownership.
+ *  - **Unsolicited BLE disconnect**: release after [leaseGrace]; the link is already down, so a
+ *    brief reconnect by the owner can retain ownership.
+ *  - **Explicit disconnect**: release immediately; it is never resumable.
  *  - **Transport (WebSocket) drop**: release after [transportGrace]; the radio link is left
  *    **warm**, so a quick reconnect resumes with no re-pair/rediscover. On expiry [onRelease]
  *    tears the warm link down.
@@ -148,16 +149,32 @@ class PeripheralRegistry(
     }
 
     /** Marks [handle] physically connected under [clientKey]; cancels any pending release. */
-    suspend fun onConnected(handle: String, clientKey: String) = mutex.withLock {
-        leases[handle]?.takeIf { it.owner == clientKey }?.let {
-            it.connected = true
-            it.cancelGrace()
-        }
-        Unit
+    suspend fun onConnected(handle: String, clientKey: String) {
+        onConnected(handle, clientKey) { true }
     }
 
     /**
-     * Marks [handle] BLE-disconnected under [clientKey] and schedules release after [leaseGrace].
+     * Commits [handle] as physically connected under [clientKey] — but only while [stillLive] reports
+     * the owning connection is live. A slow `connect()` can complete *after* its WebSocket was retired
+     * and [onTransportDropped] scheduled the lease's transport grace; marking it connected and
+     * cancelling that grace here would leak an abandoned link with no release timer (the race the
+     * Rust agent guards with `connection_live`). When the connection is already retired this is a
+     * no-op that returns false, deliberately leaving the lease to the transport-grace path — whose
+     * [onRelease] tears the radio link down on the registry scope, so teardown survives the retiring
+     * command coroutine's cancellation. The liveness check and the commit share the registry lock, so
+     * a grace scheduled by [onTransportDropped] is either seen here (→ leave it) or scheduled after
+     * this commit (→ warm lease, released on expiry). Returns true when the lease was committed live.
+     */
+    suspend fun onConnected(handle: String, clientKey: String, stillLive: () -> Boolean): Boolean = mutex.withLock {
+        val lease = leases[handle]?.takeIf { it.owner == clientKey } ?: return@withLock false
+        if (!stillLive()) return@withLock false
+        lease.connected = true
+        lease.cancelGrace()
+        true
+    }
+
+    /**
+     * Marks [handle] *unsolicitedly* BLE-disconnected under [clientKey] and schedules release after [leaseGrace].
      * Idempotent: a release already scheduled (e.g. an in-flight transport grace) is left as-is.
      */
     suspend fun onDisconnected(handle: String, clientKey: String) = mutex.withLock {

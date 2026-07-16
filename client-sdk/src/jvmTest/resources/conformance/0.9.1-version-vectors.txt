@@ -1,0 +1,4 @@
+# scenario|minimum|maximum|expected
+VERSION-01|1|1|selected:1
+VERSION-01|2|1|invalid-range
+VERSION-01|2|3|no-compatible-version

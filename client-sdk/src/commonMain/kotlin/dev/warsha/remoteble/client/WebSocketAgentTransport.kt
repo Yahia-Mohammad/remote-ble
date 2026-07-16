@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
+import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
 import dev.warsha.remoteble.log.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -8,6 +9,7 @@ import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.websocket.Frame
+import io.ktor.websocket.CloseReason
 import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
 import kotlin.time.Duration
@@ -103,7 +105,9 @@ class WebSocketAgentTransport(
     private val _state = MutableStateFlow(TransportState.DISCONNECTED)
     override val state: StateFlow<TransportState> = _state.asStateFlow()
 
-    private val incomingChannel = Channel<ByteArray>(Channel.UNLIMITED)
+    // Keep the transport's handoff bounded. A consumer that cannot decode incoming frames fast
+    // enough is disconnected instead of letting an event flood retain an unbounded byte queue.
+    private val incomingChannel = Channel<ByteArray>(INCOMING_FRAME_CAPACITY)
     override val incoming: Flow<ByteArray> = incomingChannel.receiveAsFlow()
 
     private val connectMutex = Mutex()
@@ -170,18 +174,45 @@ class WebSocketAgentTransport(
     private suspend fun receiveLoop(s: DefaultClientWebSocketSession) {
         try {
             for (frame in s.incoming) {
-                if (frame is Frame.Binary) incomingChannel.trySend(frame.readBytes())
+                when (frame) {
+                    is Frame.Binary -> {
+                        if (incomingChannel.trySend(frame.readBytes()).isFailure) {
+                            Logger.warn(LogTags.TRANSPORT) { "incoming frame buffer overflow; closing [cid=$clientId]" }
+                            s.close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, INCOMING_OVERFLOW_CLOSE_REASON))
+                            return
+                        }
+                    }
+                    else -> Unit
+                }
             }
         } catch (_: Throwable) {
             Logger.debug(LogTags.TRANSPORT) { "receive loop closed" }
         } finally {
-            onDisconnected(s)
+            // Ktor normally completes `incoming` without yielding a Frame.Close. Its close reason
+            // lives on the session Deferred, so derive terminal protocol state from there instead
+            // of relying on a control frame reaching the application-level loop.
+            val reason = try {
+                s.closeReason.await()
+            } catch (_: Throwable) {
+                null
+            }
+            val incompatibleProtocol = reason?.knownReason == CloseReason.Codes.PROTOCOL_ERROR &&
+                reason.message == INCOMPATIBLE_PROTOCOL_CLOSE_REASON
+            onDisconnected(s, incompatibleProtocol)
         }
     }
 
-    private fun onDisconnected(closedSession: DefaultClientWebSocketSession) {
+    private fun onDisconnected(closedSession: DefaultClientWebSocketSession, incompatibleProtocol: Boolean) {
         if (session !== closedSession && session != null) return
         session = null
+        if (incompatibleProtocol) {
+            // A new session with a different supported range may be created by the caller, but this
+            // instance must not reconnect and disguise a stable incompatibility as a network blip.
+            closed = true
+            _state.value = TransportState.INCOMPATIBLE_PROTOCOL
+            Logger.warn(LogTags.TRANSPORT) { "INCOMPATIBLE_PROTOCOL [cid=$clientId]" }
+            return
+        }
         _state.value = TransportState.DISCONNECTED
         Logger.info(LogTags.TRANSPORT) { "DISCONNECTED [cid=$clientId]" }
         if (reconnect.enabled && !closed) {
@@ -219,5 +250,10 @@ class WebSocketAgentTransport(
                 }
             }
         }
+    }
+
+    private companion object {
+        const val INCOMING_FRAME_CAPACITY: Int = 256
+        const val INCOMING_OVERFLOW_CLOSE_REASON: String = "REMOTE_BLE_INCOMING_OVERFLOW"
     }
 }

@@ -10,6 +10,16 @@ The module is organized as the four layers described in
 [the architecture overview](README.md#the-clients-three-layers). This document walks
 them bottom-up.
 
+`transportState == CONNECTED` only means the WebSocket link is open. For work that requires the
+server hello and reconnect restoration, observe `AgentSession.readiness`: it moves through
+`NEGOTIATING` and, after a reconnect, `RECONCILING`, then reaches `READY` or `DEGRADED` when one or
+more previously connected peripherals could not be restored. `INCOMPATIBLE_PROTOCOL` and `CLOSED`
+are terminal for the session instance.
+
+After a reconnect, `AgentSession.reconciliationReport` records the completed replay without exposing
+device handles or credentials: attempted/restored/failed connections, replayed/skipped dependent
+operations, and independent scans replayed. It is `null` before the first replay.
+
 Source root: [`client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client)
 
 ---
@@ -515,6 +525,23 @@ state:
 - **`scope`** is built on `dispatchers.default` — production uses
   `DefaultDispatcherProvider` (`Dispatchers.Default`); a test can inject a deterministic
   dispatcher through `RemotePeripheralFactory` (see below).
+
+For deliberate retirement, use the additive `RemotePeripheral.shutdown()` API instead of Kable's
+non-suspending `close()`:
+
+```kotlin
+when (peripheral.shutdown()) {
+    RemoteShutdownResult.Completed -> Unit             // agent released the lease
+    RemoteShutdownResult.TimedOut -> /* remote result unknown; local cleanup still finished */
+    RemoteShutdownResult.TransportLost -> /* reconnect or rescan as appropriate */
+    is RemoteShutdownResult.Failed -> /* inspect errorKind */
+}
+```
+
+`shutdown(timeout)` stops local observations and child connection work in `finally`, even if the
+disconnect reply is lost or times out. It returns the remote outcome rather than throwing ordinary
+cleanup failures. `close()` remains Kable-compatible best-effort local cancellation; it does not
+wait for remote release.
 
 `read(Descriptor)`/`write(Descriptor)` and `pair()/unpair()/bondState` are supported when the
 agent advertises the `descriptors`/`pairing` capabilities (otherwise the op is answered with

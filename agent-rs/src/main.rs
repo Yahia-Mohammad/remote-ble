@@ -5,7 +5,8 @@ mod translate;
 mod transport;
 
 use clap::Parser;
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -19,6 +20,10 @@ use transport::server::{AgentServer, ServerConfig};
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Native cross-platform RemoteBLE Agent", long_about = None)]
 struct Args {
+    /// Address to listen on. Loopback is the safe default; choose a LAN address explicitly.
+    #[arg(long, default_value = "127.0.0.1", env = "REMOTE_BLE_BIND")]
+    bind: IpAddr,
+
     /// Port to listen on for WebSocket client connections
     #[arg(short, long, default_value_t = 8080, env = "PORT")]
     port: u16,
@@ -26,6 +31,14 @@ struct Args {
     /// Bearer token required for WebSocket upgrade authentication
     #[arg(short, long, env = "REMOTE_BLE_TOKEN")]
     token: Option<String>,
+
+    /// Named bearer credentials in `principal=secret,other=secret` form.
+    #[arg(long, env = "REMOTE_BLE_TOKENS")]
+    tokens: Option<String>,
+
+    /// Permit an unauthenticated non-loopback listener for local development only.
+    #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_INSECURE_LAN")]
+    allow_insecure_lan: bool,
 
     /// BLE-disconnect grace window in milliseconds
     #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_LEASE_GRACE_MS")]
@@ -75,6 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         subscriber.init();
     }
+    let credentials = parse_credentials(args.token.as_deref(), args.tokens.as_deref())?;
+    validate_bind(&args, !credentials.is_empty())?;
 
     tracing::info!(
         "Starting RemoteBLE Agent (Rust) v{} | log level: {}",
@@ -113,10 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
+    let addr = SocketAddr::new(args.bind, args.port);
     let server_config = ServerConfig {
         addr,
-        auth_token: args.token,
+        credentials: Arc::new(credentials),
         strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
     };
 
@@ -133,6 +148,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_bind(args: &Args, has_token: bool) -> Result<(), String> {
+    validate_bind_policy(args.bind, has_token, args.allow_insecure_lan)?;
+    if !args.bind.is_loopback() && !has_token {
+        tracing::warn!(
+            "starting unauthenticated non-loopback listener because the insecure development override is enabled"
+        );
+    }
+    Ok(())
+}
+
+fn parse_credentials(
+    token: Option<&str>,
+    named: Option<&str>,
+) -> Result<HashMap<String, String>, String> {
+    let mut credentials = HashMap::new();
+    if let Some(named) = named.filter(|value| !value.trim().is_empty()) {
+        for entry in named.split(',') {
+            let Some((principal, secret)) = entry.split_once('=') else {
+                return Err("REMOTE_BLE_TOKENS entries must use principal=secret".into());
+            };
+            if principal.trim().is_empty()
+                || secret.trim().is_empty()
+                || principal.len() > 128
+                || secret.len() > 512
+                || principal.contains('\0')
+            {
+                return Err(
+                    "credential names and secrets must be non-empty and within size limits".into(),
+                );
+            }
+            if credentials
+                .insert(principal.to_string(), secret.to_string())
+                .is_some()
+            {
+                return Err("REMOTE_BLE_TOKENS contains duplicate principals".into());
+            }
+            if credentials
+                .values()
+                .filter(|existing| *existing == secret)
+                .count()
+                > 1
+            {
+                return Err("REMOTE_BLE_TOKENS contains duplicate secrets".into());
+            }
+        }
+    }
+    if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
+        if credentials.contains_key("default") {
+            return Err(
+                "REMOTE_BLE_TOKEN cannot be combined with a named credential called 'default'"
+                    .into(),
+            );
+        }
+        if credentials.values().any(|secret| secret == token) {
+            return Err("REMOTE_BLE_TOKEN cannot reuse a named credential secret".into());
+        }
+        credentials.insert("default".to_string(), token.to_string());
+    }
+    Ok(credentials)
+}
+
+fn validate_bind_policy(
+    bind: IpAddr,
+    has_token: bool,
+    allow_insecure_lan: bool,
+) -> Result<(), String> {
+    if bind.is_multicast() {
+        return Err(format!("refusing multicast bind address {bind}"));
+    }
+    if !bind.is_loopback() && !has_token && !allow_insecure_lan {
+        return Err("non-loopback bind requires REMOTE_BLE_TOKEN/--token; use \
+             REMOTE_BLE_ALLOW_INSECURE_LAN=true only for local development"
+            .into());
+    }
     Ok(())
 }
 
@@ -158,5 +250,34 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn bind_policy_allows_loopback_and_authenticated_lan() {
+        assert!(validate_bind_policy(IpAddr::V4(Ipv4Addr::LOCALHOST), false, false).is_ok());
+        assert!(validate_bind_policy(IpAddr::V4(Ipv4Addr::UNSPECIFIED), true, false).is_ok());
+    }
+
+    #[test]
+    fn bind_policy_rejects_open_lan_and_multicast() {
+        assert!(validate_bind_policy(IpAddr::V4(Ipv4Addr::UNSPECIFIED), false, false).is_err());
+        assert!(
+            validate_bind_policy(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), true, false).is_err()
+        );
+        assert!(validate_bind_policy(IpAddr::V6(Ipv6Addr::LOCALHOST), false, false).is_ok());
+    }
+
+    #[test]
+    fn named_credentials_parse_without_exposing_names_to_clients() {
+        let credentials = parse_credentials(Some("legacy"), Some("lab=one,staging=two")).unwrap();
+        assert_eq!(credentials.len(), 3);
+        assert!(parse_credentials(Some("legacy"), Some("default=other")).is_err());
+        assert!(parse_credentials(None, Some("alpha=same,beta=same")).is_err());
     }
 }

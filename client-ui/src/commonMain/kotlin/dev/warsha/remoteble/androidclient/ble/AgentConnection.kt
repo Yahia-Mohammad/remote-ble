@@ -81,7 +81,8 @@ class AgentConnection(private val scope: CoroutineScope) {
     private suspend fun obtain(url: String, token: String): AgentSession {
         val current = session.value
         if (current != null && this.url == url && this.token == token &&
-            current.transportState.value != TransportState.DISCONNECTED
+            current.transportState.value != TransportState.DISCONNECTED &&
+            current.transportState.value != TransportState.INCOMPATIBLE_PROTOCOL
         ) {
             return current
         }

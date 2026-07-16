@@ -64,6 +64,11 @@ kotlin {
         // (and the JVM HttpClient helper) live on the JVM target.
         jvmTest.dependencies {
             implementation(project(":agent"))
+            // A small closing WebSocket server verifies that the SDK observes Ktor's actual
+            // session close reason, rather than relying on a synthetic transport state.
+            implementation(libs.ktor.server.core)
+            implementation(libs.ktor.server.cio)
+            implementation(libs.ktor.server.websockets)
             // Verifies the Koin graph resolves (ClientKoinTest); no network/radio.
             implementation(libs.koin.test)
         }

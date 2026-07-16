@@ -144,6 +144,7 @@ private fun AgentStateBanner(agentState: TransportState, modifier: Modifier = Mo
     val (text, color) = when (agentState) {
         TransportState.CONNECTING -> "Reconnecting to agent…" to AppColors.warning
         TransportState.DISCONNECTED -> "Agent disconnected — device status below may be stale" to AppColors.danger
+        TransportState.INCOMPATIBLE_PROTOCOL -> "Agent protocol is incompatible — update the client or agent" to AppColors.danger
         TransportState.CONNECTED -> return // caller doesn't show the banner in this case
     }
     Box(

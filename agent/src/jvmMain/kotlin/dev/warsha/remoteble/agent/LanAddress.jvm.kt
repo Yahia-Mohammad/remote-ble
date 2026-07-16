@@ -5,9 +5,8 @@ import java.net.NetworkInterface
 import java.util.Collections
 
 /**
- * The desktop CLI agent binds `0.0.0.0` and prints that literally (see `Main.kt`) rather than
- * resolving a single LAN address, so this actual exists only to satisfy the `commonMain` expect
- * for the `jvm()` target; nothing in the CLI path calls it today.
+ * The desktop CLI binds loopback by default and requires an explicit LAN bind; this actual exists
+ * only to satisfy the `commonMain` expect for the `jvm()` target.
  */
 actual fun lanIPv4Address(): String? =
     Collections.list(NetworkInterface.getNetworkInterfaces())

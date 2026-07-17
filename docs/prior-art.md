@@ -83,7 +83,7 @@ phone via CoreBluetooth / Android BLE. That single difference cascades:
 | **Security** | Noise encryption key required as of [ESPHome 2026.1.0](https://esphome.io/changelog/2026.1.0/) (plaintext password auth removed) | Optional bearer token enforced at the WebSocket handshake |
 | **Scan modes** | Passive vs. active split (active gates GATT + scan-response) | Always full op-set |
 | **Connection slots** | Explicit, default 3, ~1 KB RAM each, ~5 practical max | Bounded by host; surfaced via the `slots` capability, not a headline constraint |
-| **Multi-agent fan-out** | Mature — HA aggregates every proxy + local adapters and routes connections across them | One agent per deployment; no `AgentRegistry` ([intentional v1 cut](design-decisions.md#single-agent-multiple-clients)) |
+| **Multi-agent fan-out** | Mature — HA aggregates every proxy + local adapters and routes connections across them | One agent endpoint per client session; a transparent [AgentProxy](proposals/agent-proxy.md) is designed but deferred beyond 0.10.0 ([intentional v1 cut](design-decisions.md#single-agent-multiple-clients)) |
 | **Device ownership / sharing** | None — HA is the sole controller | [Per-peripheral leasing](design-decisions.md#peripheral-ownership) (exclusive by default), grace windows, ownership survives reconnect |
 | **Reconnection** | Yes | [Reconcile-on-reconnect](design-decisions.md#reconnection); IP-transport and BLE state kept as two independent state machines |
 | **Second implementation** | ESPHome firmware + HA client | Two agents (Kotlin/Kable + Rust/`btleplug`), byte-identical CBOR, plus a [normative wire spec](agent-proxy-spec.md) |

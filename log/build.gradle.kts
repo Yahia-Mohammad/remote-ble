@@ -1,6 +1,10 @@
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp.library)
+    alias(libs.plugins.kover)
+    // This is an API dependency of :client-sdk. Publish it alongside the SDK so a consumer can
+    // resolve the SDK's generated POM without depending on this source tree.
+    alias(libs.plugins.vanniktech.maven.publish)
 }
 
 kotlin {

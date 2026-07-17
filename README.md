@@ -93,7 +93,10 @@ architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 
 Release planning is maintained in [`ai-context/ROADMAP.md`](ai-context/ROADMAP.md). The 0.9.0 scope
 includes a required [code-review addendum](ai-context/0.9.0-review-addendum.md); remaining review
-hardening is scheduled in the [0.9.1 plan](ai-context/0.9.1-implementation-plan.md).
+hardening is scheduled in the [0.9.1 plan](ai-context/0.9.1-implementation-plan.md). The tracked
+[0.10.0 scope](docs/proposals/0.10.0-scope.md) covers radio-less CI, the Rust-agent container,
+deferred validation, and the consolidated Maven Central release; the future
+[AgentProxy design](docs/proposals/agent-proxy.md) is explicitly outside that release.
 
 ## Modules
 
@@ -195,6 +198,19 @@ The bearer secret selects the principal; `X-RemoteBle-Client` is only a bounded 
 within that principal. Deploy LAN use behind a TLS-terminating reverse proxy or VPN; direct
 `ws://` is for trusted networks/development.
 
+### Run a radio-less simulated JVM agent
+
+For CI or a deterministic demo, run the JVM agent against the checked-in Heart Rate profile instead
+of a Bluetooth adapter:
+
+```sh
+./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json"
+```
+
+The normal client URL stays `ws://127.0.0.1:8080/agent`; only agent configuration changes. See
+[the simulation profile contract](docs/simulation.md) for the released-JAR form, environment
+equivalent, supported behaviors, and safety limits.
+
 ### Running the native Rust agent (`agent-rs`)
 
 For lightweight, cross-platform deployments on macOS or Linux.
@@ -214,6 +230,19 @@ On **macOS** the script wraps the binary in a signed `RemoteBleAgentRs.app` and 
 same TCC/`SIGABRT` reason as the [JVM agent above](#macos-tcc)); the first launch prompts once for
 Bluetooth — approve it, and re-run if the first scan is empty. On **Linux** it just builds and runs
 the binary directly, talking to BlueZ over D-Bus. Either way it streams the log; Ctrl-C stops it.
+
+### Running the Rust agent in Docker (Linux real radio)
+
+The image uses host BlueZ over the system D-Bus socket; it is not a real-radio option for Docker
+Desktop on macOS or Windows. Build and smoke-test it locally with:
+
+```sh
+docker build -f agent-rs/Dockerfile -t remoteble-agent-rs:local .
+agent-rs/container-smoke.sh remoteble-agent-rs:local
+```
+
+See [the container guide](docs/rust-agent-container.md) for the credentialed D-Bus invocation and
+the remaining Ubuntu/Pi hardware-validation requirements.
 
 ### Running the agent on a phone (Android / iOS)
 

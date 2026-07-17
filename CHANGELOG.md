@@ -26,6 +26,31 @@ protocol version: **1**.
 
 ### Added
 
+- **Multi-architecture Rust-agent image workflow.** PR/main builds smoke-test the amd64 image; a
+  version-tag workflow publishes an amd64/arm64 GHCR manifest with semantic/commit tags, OCI labels,
+  Buildx SBOM/provenance, and an archived digest after the shared version guard passes.
+
+- **Local Rust-agent OCI image.** `agent-rs/Dockerfile` produces a multi-stage, non-root Debian
+  runtime that uses host BlueZ through system D-Bus and fails closed without credentials on its
+  published `0.0.0.0:8080` default. `container-smoke.sh` verifies version and bind policy; actual
+  Ubuntu/Pi D-Bus radio evidence remains release-gated hardware validation.
+
+- **Radio-less simulated JVM agent.** A versioned, bounded `schemaVersion: 1` profile now drives a
+  production `SimulatedBleBackend`, selected with `--simulate <profile.json>` or
+  `REMOTE_BLE_SIMULATE`. The canonical HRM/Battery profile, real-WebSocket SDK E2E test, and CI job
+  let scan/connect/discover/read/write/observe run without Bluetooth hardware. Rust intentionally
+  does not interpret simulation profiles in this release.
+
+- **Permanent 0.10.0 release gates.** A dedicated cross-agent conformance task/job, merged Kotlin
+  JVM Kover report, Rust Tarpaulin coverage report, clean Maven-local JVM consumer fixture,
+  Gitleaks, dependency review, Cargo advisory/license policy, Dependabot, and an archived SPDX
+  source SBOM now run on pull requests, `main`, manual dispatch, and/or weekly review. The consumer
+  gate also ensures the SDK's public `:log` dependency is published with the SDK.
+
+- **Published logging dependency.** `:log` is now published to Maven Central alongside
+  `:protocol` and `:client-sdk`, so downstream consumers can resolve the SDK's logging API from
+  its generated POM without source-tree or composite-build dependencies.
+
 - **New `:log` module** — a shared, zero-dependency KMP logging facade (`Logger`, `LogLevel`,
   `LogSink`, `PrintlnSink`, `AndroidLogSink`, `AppleLogSink`, `bytesPreview`, `RateLimitedLog`)
   that both `:client-sdk` and `:agent` depend on. `Logger` is a global object: consumers set

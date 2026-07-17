@@ -1,0 +1,10 @@
+.git
+.github
+.gradle
+**/.gradle
+**/build
+**/target
+**/.DS_Store
+android-client/local.properties
+android-agent/local.properties
+local.properties

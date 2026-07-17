@@ -55,6 +55,24 @@ class ClientCredentialsTest {
     }
 
     @Test
+    fun revokedCredentialFailsAuthenticationUntilUnrevoked() {
+        val credentials = ClientCredentials.of(mapOf("alpha" to "secret-a", "beta" to "secret-b"))
+        assertEquals("alpha", credentials.authenticate("Bearer secret-a"))
+
+        credentials.revoke("alpha")
+        assertTrue(credentials.isRevoked("alpha"))
+        assertNull(credentials.authenticate("Bearer secret-a"))
+        // Revocation is per-principal: an unrelated credential keeps working.
+        assertEquals("beta", credentials.authenticate("Bearer secret-b"))
+
+        credentials.unrevoke("alpha")
+        assertFalse(credentials.isRevoked("alpha"))
+        assertEquals("alpha", credentials.authenticate("Bearer secret-a"))
+
+        assertFailsWith<IllegalArgumentException> { credentials.revoke("unknown-principal") }
+    }
+
+    @Test
     fun failedAuthLimiterBoundsEachPeerAndSuppressesRepeatedLimitLogs() {
         val limiter = FailedAuthLimiter(maxPeers = 1, maxFailuresPerPeer = 2, maxFailuresGlobal = 3, windowMillis = 60_000)
 

@@ -214,18 +214,27 @@ fn constant_time_eq(expected: &str, candidate: &str) -> bool {
     difference == 0
 }
 
+/// AUTH-REVOKE-01: every connection attempt — a fresh handshake or a resume reconnect within a
+/// lease's transport grace ([crate::registry::peripheral_lease::PeripheralRegistry::on_transport_drop])
+/// — re-authenticates from scratch here, so a principal revoked mid-grace cannot resume: its next
+/// reconnect fails this check before the registry is ever consulted.
 fn authenticate(
     credentials: &HashMap<String, String>,
+    revoked: &parking_lot::Mutex<HashSet<String>>,
     authorization: Option<&str>,
 ) -> Option<String> {
     if credentials.is_empty() {
         return Some("anonymous".to_string());
     }
     let bearer = authorization?.strip_prefix("Bearer ")?;
-    credentials
+    let principal = credentials
         .iter()
         .find(|(_, secret)| constant_time_eq(secret, bearer))
-        .map(|(principal, _)| principal.clone())
+        .map(|(principal, _)| principal.clone())?;
+    if revoked.lock().contains(&principal) {
+        return None;
+    }
+    Some(principal)
 }
 
 fn session_key(principal: &str, client_id: &str) -> String {
@@ -352,6 +361,7 @@ pub struct AgentServer {
     registry: PeripheralRegistry,
     live_sessions: Arc<LiveSessionRegistry>,
     failed_auth_limiter: Arc<AuthFailureLimiter>,
+    revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
 }
 
 impl AgentServer {
@@ -366,13 +376,37 @@ impl AgentServer {
             registry,
             live_sessions: Arc::new(LiveSessionRegistry::default()),
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
+            revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
         }
     }
 
-    // The WebSocket handshake callback must return `http::Response` in its Err
-    // arm (tungstenite's API), which clippy flags as a large Err variant. The
-    // type is fixed by the upstream signature, so the lint doesn't apply here.
-    #[allow(clippy::result_large_err)]
+    /// Revokes `principal` at runtime: every future connection attempt for it fails
+    /// authentication (see [authenticate]) until [Self::unrevoke_principal]. Errs if `principal`
+    /// is not one of this server's configured credential names.
+    ///
+    /// No operator trigger (signal, admin endpoint) calls this yet in `main.rs` — `agent-rs` has
+    /// no equivalent of the Kotlin agent's dashboard mutation routes today — so it's exercised by
+    /// the AUTH-REVOKE-01 conformance tests only. Wiring a real trigger is a separate follow-up.
+    #[allow(dead_code)]
+    pub fn revoke_principal(&self, principal: &str) -> Result<(), String> {
+        if !self.config.credentials.contains_key(principal) {
+            return Err(format!("unknown credential principal: {principal}"));
+        }
+        self.revoked_principals.lock().insert(principal.to_string());
+        Ok(())
+    }
+
+    /// Restores a previously [Self::revoke_principal]d principal.
+    #[allow(dead_code)]
+    pub fn unrevoke_principal(&self, principal: &str) {
+        self.revoked_principals.lock().remove(principal);
+    }
+
+    #[allow(dead_code)]
+    pub fn is_principal_revoked(&self, principal: &str) -> bool {
+        self.revoked_principals.lock().contains(principal)
+    }
+
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(self.config.addr).await?;
         tracing::info!(
@@ -407,114 +441,141 @@ impl AgentServer {
             let strict = self.config.strict_identifiers.clone();
             let live_sessions = self.live_sessions.clone();
             let failed_auth_limiter = self.failed_auth_limiter.clone();
+            let revoked_principals = self.revoked_principals.clone();
 
-            tokio::spawn(async move {
-                let mut client_id = format!("anon-{}", peer_addr);
-                let mut principal = None;
-                let mut session_generation = None;
+            tokio::spawn(Self::accept_connection(
+                stream,
+                peer_addr,
+                backend,
+                registry,
+                credentials,
+                strict,
+                live_sessions,
+                failed_auth_limiter,
+                revoked_principals,
+            ));
+        }
+    }
 
-                let callback =
-                    |req: &Request,
-                     response: Response|
-                     -> Result<Response, http::Response<Option<String>>> {
-                        principal = authenticate(
-                            credentials.as_ref(),
-                            req.headers()
-                                .get("Authorization")
-                                .and_then(|header| header.to_str().ok()),
-                        );
+    /// Runs the pre-upgrade auth/duplicate-session handshake and, on success, the connection's
+    /// full lifecycle. Generic over the stream so tests can drive it with an in-memory duplex
+    /// pair instead of a real `TcpStream` while exercising the exact handshake the live server
+    /// uses (`run()` calls this for every accepted socket).
+    // The WebSocket handshake callback must return `http::Response` in its Err arm
+    // (tungstenite's API), which clippy flags as a large Err variant. The type is
+    // fixed by the upstream signature, so the lint doesn't apply here.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    async fn accept_connection<S>(
+        stream: S,
+        peer_addr: SocketAddr,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        credentials: Arc<HashMap<String, String>>,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        failed_auth_limiter: Arc<AuthFailureLimiter>,
+        revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut client_id = format!("anon-{}", peer_addr);
+        let mut principal = None;
+        let mut session_generation = None;
 
-                        if let Some(cid_hdr) = req.headers().get("X-RemoteBle-Client")
-                            && let Ok(str_val) = cid_hdr.to_str()
-                        {
-                            client_id = str_val.to_string();
+        let callback = |req: &Request,
+                        response: Response|
+         -> Result<Response, http::Response<Option<String>>> {
+            principal = authenticate(
+                credentials.as_ref(),
+                revoked_principals.as_ref(),
+                req.headers()
+                    .get("Authorization")
+                    .and_then(|header| header.to_str().ok()),
+            );
+
+            if let Some(cid_hdr) = req.headers().get("X-RemoteBle-Client")
+                && let Ok(str_val) = cid_hdr.to_str()
+            {
+                client_id = str_val.to_string();
+            }
+
+            let Some(principal) = principal.as_deref() else {
+                let decision = failed_auth_limiter.record_failure(peer_addr.ip());
+                if decision.should_log {
+                    tracing::warn!(
+                        "client rejected from {}: {}",
+                        peer_addr,
+                        if decision.allowed {
+                            "unauthorized"
+                        } else {
+                            "authentication rate limited"
                         }
-
-                        let Some(principal) = principal.as_deref() else {
-                            let decision = failed_auth_limiter.record_failure(peer_addr.ip());
-                            if decision.should_log {
-                                tracing::warn!(
-                                    "client rejected from {}: {}",
-                                    peer_addr,
-                                    if decision.allowed {
-                                        "unauthorized"
-                                    } else {
-                                        "authentication rate limited"
-                                    }
-                                );
-                            }
-                            let rejected = http::Response::builder()
-                                .status(if decision.allowed { 401 } else { 429 })
-                                .body(Some(
-                                    if decision.allowed {
-                                        "Unauthorized"
-                                    } else {
-                                        "Too Many Requests"
-                                    }
-                                    .to_string(),
-                                ))
-                                .unwrap();
-                            return Err(rejected);
-                        };
-                        if client_id.trim().is_empty()
-                            || client_id.len() > 128
-                            || client_id.contains('\0')
-                        {
-                            let rejected = http::Response::builder()
-                                .status(400)
-                                .body(Some("Invalid X-RemoteBle-Client".to_string()))
-                                .unwrap();
-                            return Err(rejected);
-                        }
-                        client_id = session_key(principal, &client_id);
-                        let generation = NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed);
-                        if !live_sessions.try_acquire(&client_id, generation) {
-                            tracing::warn!(
-                                "client rejected from {}: duplicate live session",
-                                peer_addr
-                            );
-                            let rejected = http::Response::builder()
-                                .status(409)
-                                .body(Some(DUPLICATE_SESSION_CLOSE_REASON.to_string()))
-                                .unwrap();
-                            return Err(rejected);
-                        }
-                        session_generation = Some(generation);
-
-                        Ok(response)
-                    };
-
-                match tokio_tungstenite::accept_hdr_async_with_config(
-                    stream,
-                    callback,
-                    Some(websocket_config()),
-                )
-                .await
-                {
-                    Ok(ws_stream) => {
-                        let connection = NEXT_LOG_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
-                        let span = tracing::info_span!("conn", connection, peer = %peer_addr);
-                        tracing::info!(parent: &span, "Client connected");
-                        Self::handle_connection(
-                            ws_stream,
-                            client_id,
-                            backend,
-                            registry,
-                            strict,
-                            live_sessions,
-                            session_generation.expect("accepted session must have a generation"),
-                        )
-                        .instrument(span)
-                        .await;
-                    }
-                    Err(e) => {
-                        if let Some(generation) = session_generation {
-                            live_sessions.release(&client_id, generation);
-                        }
-                        tracing::warn!("Handshake failed for {}: {}", peer_addr, e);
-                    }
+                    );
                 }
-            });
+                let rejected = http::Response::builder()
+                    .status(if decision.allowed { 401 } else { 429 })
+                    .body(Some(
+                        if decision.allowed {
+                            "Unauthorized"
+                        } else {
+                            "Too Many Requests"
+                        }
+                        .to_string(),
+                    ))
+                    .unwrap();
+                return Err(rejected);
+            };
+            if client_id.trim().is_empty() || client_id.len() > 128 || client_id.contains('\0') {
+                let rejected = http::Response::builder()
+                    .status(400)
+                    .body(Some("Invalid X-RemoteBle-Client".to_string()))
+                    .unwrap();
+                return Err(rejected);
+            }
+            client_id = session_key(principal, &client_id);
+            let generation = NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed);
+            if !live_sessions.try_acquire(&client_id, generation) {
+                tracing::warn!("client rejected from {}: duplicate live session", peer_addr);
+                let rejected = http::Response::builder()
+                    .status(409)
+                    .body(Some(DUPLICATE_SESSION_CLOSE_REASON.to_string()))
+                    .unwrap();
+                return Err(rejected);
+            }
+            session_generation = Some(generation);
+
+            Ok(response)
+        };
+
+        match tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            callback,
+            Some(websocket_config()),
+        )
+        .await
+        {
+            Ok(ws_stream) => {
+                let connection = NEXT_LOG_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+                let span = tracing::info_span!("conn", connection, peer = %peer_addr);
+                tracing::info!(parent: &span, "Client connected");
+                Self::handle_connection(
+                    ws_stream,
+                    client_id,
+                    backend,
+                    registry,
+                    strict,
+                    live_sessions,
+                    session_generation.expect("accepted session must have a generation"),
+                )
+                .instrument(span)
+                .await;
+            }
+            Err(e) => {
+                if let Some(generation) = session_generation {
+                    live_sessions.release(&client_id, generation);
+                }
+                tracing::warn!("Handshake failed for {}: {}", peer_addr, e);
+            }
         }
     }
 
@@ -1025,7 +1086,7 @@ impl AgentServer {
 mod tests {
     use super::*;
     use crate::protocol::{
-        op::{CharRef, DeviceHandle, ScanFilter},
+        op::{CharRef, DescRef, DeviceHandle, ScanFilter},
         results::ResultPayload,
     };
     use crate::registry::peripheral_lease::LeaseConfig;
@@ -1043,11 +1104,15 @@ mod tests {
             ("alpha".to_string(), "secret-a".to_string()),
             ("beta".to_string(), "secret-b".to_string()),
         ]);
+        let revoked = parking_lot::Mutex::new(HashSet::new());
         assert_eq!(
-            authenticate(&credentials, Some("Bearer secret-a")),
+            authenticate(&credentials, &revoked, Some("Bearer secret-a")),
             Some("alpha".to_string())
         );
-        assert_eq!(authenticate(&credentials, Some("Bearer wrong")), None);
+        assert_eq!(
+            authenticate(&credentials, &revoked, Some("Bearer wrong")),
+            None
+        );
         assert_ne!(
             session_key("alpha", "client"),
             session_key("beta", "client")
@@ -1110,6 +1175,37 @@ mod tests {
         );
     }
 
+    /// LIMIT-SLOW-01: the outbound frame channel — what a stalled client or an event flood fills
+    /// up — is bounded (`FRAME_CHANNEL_CAP`) and sheds with `TrySendError::Full` rather than
+    /// growing or blocking the sender, exactly as `handle_connection`'s event pump
+    /// (`frame_tx_event.try_send(..)`, above) and the notification pump
+    /// (`ble::btleplug_impl::start_observe`) both rely on. Draining one slot immediately makes
+    /// room again, so the bound is stable rather than a one-shot trip.
+    #[test]
+    fn outbound_frame_channel_sheds_on_overflow_instead_of_growing_or_blocking() {
+        let (tx, mut rx) = mpsc::channel::<Outbound>(FRAME_CHANNEL_CAP);
+        let event = || {
+            Outbound::Frame(Frame::Event {
+                event: AgentEvent::Notification {
+                    sub_id: 0,
+                    value: Vec::new(),
+                },
+            })
+        };
+
+        for _ in 0..FRAME_CHANNEL_CAP {
+            tx.try_send(event()).expect("must accept up to capacity");
+        }
+        assert!(matches!(
+            tx.try_send(event()),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        rx.try_recv().expect("draining one slot frees capacity");
+        tx.try_send(event())
+            .expect("a freed slot must accept the next frame immediately");
+    }
+
     #[test]
     fn failed_auth_limiter_caps_a_peer_and_rate_limits_its_logs() {
         let limiter = AuthFailureLimiter::default();
@@ -1148,6 +1244,353 @@ mod tests {
                 .expect("peer must produce a frame result")
                 .is_err()
         );
+    }
+
+    /// LEASE-DUPLICATE-01 (operational): a second live generation for the same
+    /// `(principal, stable client id)` is refused pre-upgrade with HTTP 409, and the incumbent's
+    /// generation is left untouched. Drives `AgentServer::accept_connection` — the exact
+    /// handshake path `run()` uses for every accepted socket — over two in-memory duplex pairs so
+    /// no real TCP port is required. See docs/conformance/0.9.1-scenarios.md for the Kotlin
+    /// counterpart (`WebSocketEndToEndTest.rejectsASecondLiveSocketForTheSameStableClientIdentity`),
+    /// which observes the equivalent refusal as a post-upgrade close(1008) — the two agents signal
+    /// the refusal differently but both leave the incumbent generation untouched.
+    #[tokio::test]
+    async fn duplicate_live_generation_is_rejected_with_409_and_leaves_the_incumbent_untouched() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let backend: Arc<dyn BleBackend> = Arc::new(FakeBackend::default());
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        let credentials = Arc::new(HashMap::from([(
+            "alpha".to_string(),
+            "secret-a".to_string(),
+        )]));
+        let strict = Arc::new(AtomicBool::new(false));
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let failed_auth_limiter = Arc::new(AuthFailureLimiter::default());
+        let revoked_principals = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+        let request = || {
+            let mut request = "ws://localhost/agent".into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Authorization", "Bearer secret-a".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("X-RemoteBle-Client", "device-1".parse().unwrap());
+            request
+        };
+
+        let (first_server_io, first_client_io) = tokio::io::duplex(4096);
+        let first_peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let first_accept = tokio::spawn(AgentServer::accept_connection(
+            first_server_io,
+            first_peer,
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let (first_client, _) = tokio_tungstenite::client_async(request(), first_client_io)
+            .await
+            .expect("first connection must be accepted");
+
+        let (second_server_io, second_client_io) = tokio::io::duplex(4096);
+        let second_peer: SocketAddr = "127.0.0.1:2".parse().unwrap();
+        let second_accept = tokio::spawn(AgentServer::accept_connection(
+            second_server_io,
+            second_peer,
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let second_err = tokio_tungstenite::client_async(request(), second_client_io)
+            .await
+            .expect_err("duplicate live generation must be refused pre-upgrade");
+        match second_err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), http::StatusCode::CONFLICT);
+            }
+            other => panic!("expected an HTTP 409 handshake rejection, got {other:?}"),
+        }
+
+        // The incumbent's generation is untouched: the same (principal, client id) key still
+        // reports as held by the first connection, so a third acquire attempt is refused too.
+        assert!(!live_sessions.try_acquire(&session_key("alpha", "device-1"), u64::MAX));
+
+        drop(first_client);
+        first_accept
+            .await
+            .expect("first connection task must not panic");
+        second_accept
+            .await
+            .expect("second connection task must not panic");
+    }
+
+    async fn send_command<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>, cid: i64, op: Op)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let bytes = encode_cbor(&Frame::Command { cid, op }).expect("command must encode");
+        ws.send(Message::Binary(bytes))
+            .await
+            .expect("command must send");
+    }
+
+    async fn recv_reply<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> OpResult
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            let msg = ws
+                .next()
+                .await
+                .expect("stream ended before a reply arrived")
+                .expect("websocket read must not error");
+            if msg.is_binary() {
+                match decode_cbor(&msg.into_data()).expect("reply must decode") {
+                    Frame::Reply { result, .. } => return result,
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    /// AUTH-PRINCIPAL-01: two credentials reusing one stable client ID must not let a lease or
+    /// operation cross the principal boundary. `alpha` and `beta` share the raw
+    /// `X-RemoteBle-Client` header value; the server's actual ownership key is
+    /// `session_key(principal, client_id)` (see the handshake callback above), so the two
+    /// connections are fully independent owners despite the shared raw id.
+    #[tokio::test]
+    async fn principal_isolation_holds_across_lease_and_operations() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        let credentials = Arc::new(HashMap::from([
+            ("alpha".to_string(), "secret-a".to_string()),
+            ("beta".to_string(), "secret-b".to_string()),
+        ]));
+        let strict = Arc::new(AtomicBool::new(false));
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let failed_auth_limiter = Arc::new(AuthFailureLimiter::default());
+        let revoked_principals = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+        let request_for = |secret: &'static str| {
+            let mut request = "ws://localhost/agent".into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Authorization", format!("Bearer {secret}").parse().unwrap());
+            request.headers_mut().insert(
+                "X-RemoteBle-Client",
+                "shared-raw-client-id".parse().unwrap(),
+            );
+            request
+        };
+
+        let (alpha_server_io, alpha_client_io) = tokio::io::duplex(65536);
+        tokio::spawn(AgentServer::accept_connection(
+            alpha_server_io,
+            "127.0.0.1:1".parse().unwrap(),
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let (mut alpha, _) =
+            tokio_tungstenite::client_async(request_for("secret-a"), alpha_client_io)
+                .await
+                .expect("alpha must be accepted");
+
+        let (beta_server_io, beta_client_io) = tokio::io::duplex(65536);
+        tokio::spawn(AgentServer::accept_connection(
+            beta_server_io,
+            "127.0.0.1:2".parse().unwrap(),
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let (mut beta, _) =
+            tokio_tungstenite::client_async(request_for("secret-b"), beta_client_io)
+                .await
+                .expect("beta must be accepted despite sharing alpha's raw client id");
+
+        let device = DeviceHandle {
+            value: "dev".into(),
+        };
+
+        send_command(
+            &mut alpha,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(recv_reply(&mut alpha).await, OpResult::Ok { .. }));
+
+        // beta shares the raw client id but not the principal: it must not see alpha's lease.
+        send_command(
+            &mut beta,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut beta).await,
+            OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy
+        ));
+
+        send_command(
+            &mut beta,
+            2,
+            Op::Read {
+                device: device.clone(),
+                char: CharRef {
+                    service: "s".into(),
+                    characteristic: "c".into(),
+                    instance: 0,
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut beta).await,
+            OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy
+        ));
+        assert_eq!(fake.reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn agent_server_revoke_principal_validates_known_credentials_and_toggles_state() {
+        let credentials = Arc::new(HashMap::from([(
+            "alpha".to_string(),
+            "secret-a".to_string(),
+        )]));
+        let server = AgentServer::new(
+            ServerConfig {
+                addr: "127.0.0.1:0".parse().unwrap(),
+                credentials,
+                strict_identifiers: Arc::new(AtomicBool::new(false)),
+            },
+            Arc::new(FakeBackend::default()),
+            PeripheralRegistry::new(LeaseConfig::default()),
+        );
+
+        assert!(server.revoke_principal("unknown").is_err());
+        assert!(!server.is_principal_revoked("alpha"));
+
+        server.revoke_principal("alpha").unwrap();
+        assert!(server.is_principal_revoked("alpha"));
+
+        server.unrevoke_principal("alpha");
+        assert!(!server.is_principal_revoked("alpha"));
+    }
+
+    /// AUTH-REVOKE-01: a credential revoked while a lease sits mid transport-grace must not be
+    /// able to resume it. The revoked principal's next connection attempt — even carrying the
+    /// same stable client id a warm-lease resume would use — fails re-authentication
+    /// (`authenticate`, above) before the registry is ever consulted.
+    #[tokio::test]
+    async fn revoked_credential_cannot_resume_a_lease_during_transport_grace() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let backend: Arc<dyn BleBackend> = Arc::new(FakeBackend::default());
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        let credentials = Arc::new(HashMap::from([(
+            "alpha".to_string(),
+            "secret-a".to_string(),
+        )]));
+        let strict = Arc::new(AtomicBool::new(false));
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let failed_auth_limiter = Arc::new(AuthFailureLimiter::default());
+        let revoked_principals = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+        let request = || {
+            let mut request = "ws://localhost/agent".into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Authorization", "Bearer secret-a".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("X-RemoteBle-Client", "resuming-client".parse().unwrap());
+            request
+        };
+
+        let (first_server_io, first_client_io) = tokio::io::duplex(4096);
+        let first_accept = tokio::spawn(AgentServer::accept_connection(
+            first_server_io,
+            "127.0.0.1:1".parse().unwrap(),
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let (mut first, _) = tokio_tungstenite::client_async(request(), first_client_io)
+            .await
+            .expect("first connect must be accepted");
+        send_command(
+            &mut first,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(recv_reply(&mut first).await, OpResult::Ok { .. }));
+
+        // The transport drops (radio link stays warm, pending release within grace — see
+        // LEASE-GRACE-01) and the credential is revoked while the lease is held.
+        drop(first);
+        first_accept
+            .await
+            .expect("first connection task must not panic");
+        revoked_principals.lock().insert("alpha".to_string());
+
+        // A resume attempt with the same stable client id and the revoked credential must be
+        // refused pre-upgrade — never reaching the registry at all.
+        let (second_server_io, second_client_io) = tokio::io::duplex(4096);
+        tokio::spawn(AgentServer::accept_connection(
+            second_server_io,
+            "127.0.0.1:2".parse().unwrap(),
+            backend.clone(),
+            registry.clone(),
+            credentials.clone(),
+            strict.clone(),
+            live_sessions.clone(),
+            failed_auth_limiter.clone(),
+            revoked_principals.clone(),
+        ));
+        let second_err = tokio_tungstenite::client_async(request(), second_client_io)
+            .await
+            .expect_err("a revoked credential must not be able to resume the lease");
+        match second_err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("expected an HTTP 401 handshake rejection, got {other:?}"),
+        }
     }
 
     #[derive(Default)]
@@ -1367,6 +1810,36 @@ mod tests {
         assert_eq!(fake.reads.load(Ordering::Relaxed), 0);
     }
 
+    /// LEASE-DISCONNECT-01: `Op::Disconnect` releases the lease immediately, with no transport
+    /// grace window — contrast with `registry::peripheral_lease::tests::
+    /// reconnect_within_grace_keeps_lease_and_skips_teardown` (LEASE-GRACE-01), where the same
+    /// device stays denied to another client until the grace timer elapses.
+    #[tokio::test]
+    async fn explicit_disconnect_releases_immediately_and_cannot_resume() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Disconnect {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Ok { .. }));
+        assert_eq!(fake.disconnects.load(Ordering::Relaxed), 1);
+
+        // No grace window: another client can acquire the same device right away, and the
+        // original owner can no longer act on it without a fresh Connect.
+        assert!(registry.acquire_lease("dev", "someone-else").is_ok());
+        assert!(registry.authorize_connected("dev", "owner").is_err());
+    }
+
     #[tokio::test]
     async fn same_local_scan_id_is_isolated_by_connection_generation() {
         let fake = Arc::new(FakeBackend::default());
@@ -1479,6 +1952,12 @@ mod tests {
             characteristic: "2a37".into(),
             instance: 0,
         };
+        let descriptor = DescRef {
+            service: char.service.clone(),
+            characteristic: char.characteristic.clone(),
+            descriptor: "2902".into(),
+            instance: 0,
+        };
         let cases = [
             Op::ScanStart {
                 scan_id: 1,
@@ -1498,11 +1977,24 @@ mod tests {
                 value: vec![0; MAX_WRITE_BYTES + 1],
                 with_response: true,
             },
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: descriptor,
+                value: vec![0; MAX_WRITE_BYTES + 1],
+            },
             Op::RequestMtu {
                 device: DeviceHandle {
                     value: "dev".into(),
                 },
                 mtu: MAX_MTU + 1,
+            },
+            Op::RequestMtu {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                mtu: MIN_MTU - 1,
             },
         ];
 

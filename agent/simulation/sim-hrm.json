@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "seed": 17,
+  "peripherals": [
+    {
+      "id": "sim-hrm-1",
+      "advertisement": {
+        "name": "Warsha HRM (sim)",
+        "serviceUuids": ["180d", "180f", "180a"],
+        "rssi": -50,
+        "rssiJitter": 2,
+        "intervalMs": 100
+      },
+      "connect": { "latencyMs": 30 },
+      "services": [
+        {
+          "uuid": "180d",
+          "characteristics": [
+            {
+              "uuid": "2a37",
+              "properties": ["notify"],
+              "notify": {
+                "intervalMs": 1000,
+                "values": { "sequence": ["003c", "003d", "003e", "003f"] }
+              }
+            },
+            {
+              "uuid": "2a39",
+              "properties": ["write"],
+              "write": { "accept": true }
+            }
+          ]
+        },
+        {
+          "uuid": "180f",
+          "characteristics": [
+            {
+              "uuid": "2a19",
+              "properties": ["read"],
+              "read": { "static": "64" }
+            }
+          ]
+        },
+        {
+          "uuid": "180a",
+          "characteristics": [
+            {
+              "uuid": "2a29",
+              "properties": ["read"],
+              "read": { "static": "576172736861" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

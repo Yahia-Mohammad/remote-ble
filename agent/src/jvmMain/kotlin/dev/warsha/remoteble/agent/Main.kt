@@ -6,6 +6,8 @@ import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.log.PrintlnSink
 import dev.warsha.remoteble.protocol.DeviceHandle
+import java.nio.file.Files
+import java.nio.file.Path
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import kotlin.time.Duration.Companion.milliseconds
@@ -21,6 +23,8 @@ fun main(args: Array<String>) {
         "REMOTE_BLE_EXCLUSIVE=false is unsupported in RemoteBLE 0.9.0; shared mode is disabled"
     }
     val cli = parseCli(args)
+    val simulationPath = cli.simulationPath ?: System.getenv("REMOTE_BLE_SIMULATE")?.takeIf { it.isNotBlank() }
+    val simulationProfile = simulationPath?.let(::readSimulationProfile)
     val token = System.getenv("REMOTE_BLE_TOKEN")?.takeIf { it.isNotBlank() }
     val namedCredentials = parseNamedCredentials(System.getenv("REMOTE_BLE_TOKENS"))
     val operatorToken = System.getenv("REMOTE_BLE_OPERATOR_TOKEN")?.takeIf { it.isNotBlank() }
@@ -42,6 +46,7 @@ fun main(args: Array<String>) {
             ?: AgentConfig().transportGrace,
         livenessProbeInterval = System.getenv("REMOTE_BLE_LIVENESS_PROBE_MS")?.toLongOrNull()?.milliseconds
             ?: AgentConfig().livenessProbeInterval,
+        simulationProfile = simulationProfile,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -52,7 +57,8 @@ fun main(args: Array<String>) {
 
     val auth = if (config.authToken != null || config.namedCredentials.isNotEmpty()) "bearer-token required" else "no auth"
     val host = System.getProperty("os.name") ?: "jvm"
-    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, Kable engine on $host)" }
+    val radio = if (simulationProfile == null) "Kable engine on $host" else "simulation profile (${simulationProfile.peripherals.size} peripherals)"
+    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, $radio)" }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
     Logger.info(LogTags.AGENT) { "Liveness probe: every ${config.livenessProbeInterval}" }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
@@ -74,11 +80,12 @@ fun main(args: Array<String>) {
     CountDownLatch(1).await()
 }
 
-private data class Cli(val bindHost: String?, val port: Int)
+internal data class Cli(val bindHost: String?, val port: Int, val simulationPath: String?)
 
-private fun parseCli(args: Array<String>): Cli {
+internal fun parseCli(args: Array<String>): Cli {
     var bind: String? = null
     var port = AgentConfig.DEFAULT_PORT
+    var simulation: String? = null
     var index = 0
     if (args.firstOrNull()?.toIntOrNull() != null) {
         port = args[0].toInt()
@@ -88,15 +95,27 @@ private fun parseCli(args: Array<String>): Cli {
         when (args[index]) {
             "--bind" -> bind = args.getOrNull(++index) ?: error("--bind requires an address")
             "--port" -> port = args.getOrNull(++index)?.toIntOrNull() ?: error("--port requires a valid port")
-            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind")
+            "--simulate" -> simulation = args.getOrNull(++index)?.takeIf { it.isNotBlank() }
+                ?: error("--simulate requires a profile path")
+            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind, --simulate")
         }
         index++
     }
     require(port in 1..65535) { "port must be between 1 and 65535" }
-    return Cli(bind, port)
+    return Cli(bind, port, simulation)
 }
 
-private fun validateBind(requested: String, hasCredential: Boolean, allowInsecureLan: Boolean): String {
+/** Resolves a simulation profile before Koin/server startup, so malformed input never opens a port. */
+internal fun readSimulationProfile(path: String): SimulationProfile = try {
+    SimulationProfile.decode(Files.readString(Path.of(path)))
+} catch (error: IllegalArgumentException) {
+    throw error
+} catch (error: Throwable) {
+    throw IllegalArgumentException("cannot load simulation profile '$path': ${error.message}", error)
+}
+
+// BIND-SECURITY-01: internal (not private) so MainTest.kt can exercise the policy directly.
+internal fun validateBind(requested: String, hasCredential: Boolean, allowInsecureLan: Boolean): String {
     val address = runCatching { InetAddress.getByName(requested) }
         .getOrElse { error("invalid bind address $requested: ${it.message}") }
     require(!address.isMulticastAddress) { "refusing multicast bind address $requested" }

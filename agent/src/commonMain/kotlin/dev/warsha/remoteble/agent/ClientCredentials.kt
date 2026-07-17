@@ -1,18 +1,43 @@
 package dev.warsha.remoteble.agent
 
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
+
 /**
  * Named client credentials for the WebSocket upgrade boundary. The credential name is an internal
  * principal label; only the bearer secret travels on the wire.
  */
 class ClientCredentials private constructor(private val byName: Map<String, String>) {
+    private val lock = SynchronizedObject()
+    private val revoked = mutableSetOf<String>()
+
     val required: Boolean get() = byName.isNotEmpty()
 
-    /** Returns the authenticated principal name, or null when [bearer] is absent/invalid. */
+    /**
+     * Returns the authenticated principal name, or null when [bearer] is absent/invalid/revoked.
+     * Every connection attempt — a fresh handshake or a resume reconnect within a lease's
+     * transport grace (see [PeripheralRegistry.onTransportDropped]) — re-authenticates from
+     * scratch here, so a principal [revoke]d mid-grace cannot resume: its next reconnect fails
+     * this check before the registry is ever consulted (AUTH-REVOKE-01).
+     */
     fun authenticate(bearer: String?): String? {
         if (!required) return ANONYMOUS_PRINCIPAL
         val candidate = bearer?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ") ?: return null
-        return byName.entries.firstOrNull { (_, secret) -> constantTimeEquals(secret, candidate) }?.key
+        val principal = byName.entries.firstOrNull { (_, secret) -> constantTimeEquals(secret, candidate) }?.key
+            ?: return null
+        return principal.takeUnless { synchronized(lock) { it in revoked } }
     }
+
+    /** Revokes [name] at runtime: every future [authenticate] call for it fails until [unrevoke]. */
+    fun revoke(name: String) {
+        require(name in byName) { "unknown credential principal: $name" }
+        synchronized(lock) { revoked += name }
+    }
+
+    /** Restores a previously [revoke]d principal. */
+    fun unrevoke(name: String): Unit = synchronized(lock) { revoked -= name }
+
+    fun isRevoked(name: String): Boolean = synchronized(lock) { name in revoked }
 
     companion object {
         const val DEFAULT_PRINCIPAL = "default"

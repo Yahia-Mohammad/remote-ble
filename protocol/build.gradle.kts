@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.kmp.library)
+    alias(libs.plugins.kover)
     // Maven Central (Central Portal) publishing. Configured entirely by the POM_* /
     // SONATYPE_HOST / RELEASE_SIGNING_ENABLED properties in gradle.properties + this
     // module's gradle.properties; auto-wires the KMP + per-target publications.

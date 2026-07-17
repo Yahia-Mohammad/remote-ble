@@ -4,6 +4,7 @@ import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.di.agentModule
 import kotlin.test.Test
 import kotlin.test.assertNotNull
+import kotlin.test.assertIs
 import org.koin.dsl.koinApplication
 import org.koin.dsl.module
 
@@ -26,6 +27,20 @@ class AgentKoinTest {
             )
         }
         try {
+            assertNotNull(app.koin.get<AgentWebSocketServer>())
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
+    fun moduleSelectsSimulationWithoutConstructingTheEngine() {
+        val profile = SimulationProfile.decode(
+            """{"schemaVersion":1,"peripherals":[{"id":"sim","advertisement":{"intervalMs":50},"services":[{"uuid":"180d","characteristics":[{"uuid":"2a37","properties":["read"],"read":{"static":"00"}}]}]}]}""",
+        )
+        val app = koinApplication { modules(agentModule(AgentConfig(port = 0, simulationProfile = profile))) }
+        try {
+            assertIs<SimulatedBleBackend>(app.koin.get<BleBackend>())
             assertNotNull(app.koin.get<AgentWebSocketServer>())
         } finally {
             app.close()

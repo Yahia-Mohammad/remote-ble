@@ -10,6 +10,8 @@ import dev.warsha.remoteble.agent.ConnectionWatcher
 import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.EngineBleBackend
 import dev.warsha.remoteble.agent.PeripheralRegistry
+import dev.warsha.remoteble.agent.SimulatedBleBackend
+import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.agent.StrictModeState
 import dev.warsha.remoteble.agent.DefaultDispatcherProvider
 import dev.warsha.remoteble.agent.DispatcherProvider
@@ -34,6 +36,8 @@ data class AgentConfig(
     val leaseGrace: Duration = 10.seconds,
     val transportGrace: Duration = 10.seconds,
     val livenessProbeInterval: Duration = 15.seconds,
+    /** Non-null only for the JVM's explicit radio-less simulation mode. */
+    val simulationProfile: SimulationProfile? = null,
 ) {
     companion object {
         const val DEFAULT_BIND_HOST: String = "127.0.0.1"
@@ -42,10 +46,9 @@ data class AgentConfig(
 }
 
 /**
- * Composition-root wiring for the runnable agent. Assembles the same object graph
- * `Main.kt` used to nest by hand — a Blue-Falcon macOS engine behind the real
- * [BleAgent] op handler, hosted by [AgentWebSocketServer]. The agent's classes keep
- * their plain constructors; this module just resolves them via `get()`.
+ * Composition-root wiring for the runnable agent. Assembles the selected real or simulated
+ * [BleBackend] behind the real [BleAgent] op handler, hosted by [AgentWebSocketServer]. The
+ * agent's classes keep their plain constructors; this module just resolves them via `get()`.
  */
 fun agentModule(config: AgentConfig): Module = module {
     require(config.exclusiveByDefault) {
@@ -82,7 +85,8 @@ fun agentModule(config: AgentConfig): Module = module {
         )
     }
     single<BleBackend> {
-        EngineBleBackend(scope = get(qualifier = org.koin.core.qualifier.named("agent")))
+        val scope = get<CoroutineScope>(qualifier = org.koin.core.qualifier.named("agent"))
+        config.simulationProfile?.let { SimulatedBleBackend(it, scope) } ?: EngineBleBackend(scope = scope)
     }
     single<AgentBackend> {
         BleAgentBackend(

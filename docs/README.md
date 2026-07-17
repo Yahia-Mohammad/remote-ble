@@ -24,6 +24,13 @@ for the 2026-07-15 review findings.
 | [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
 | [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
 | [proposals/0.9.1-progress-status.md](proposals/0.9.1-progress-status.md) | 0.9.1 implementation handoff: completed slices, verification, remaining work, and deferrals |
+| [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
+| [proposals/0.10.0-pr1-progress-status.md](proposals/0.10.0-pr1-progress-status.md) | 0.10.0 implementation handoff: PR0/PR1 landed, PR2–PR4 in progress, verification and remaining work |
+| [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
+| [simulation.md](simulation.md) | Versioned radio-less JVM agent profile, CLI use, supported behaviors, and validation limits |
+| [rust-agent-container.md](rust-agent-container.md) | PR5 local Rust-agent Docker image, smoke checks, and the supported-host boundary |
+| [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
+| [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
@@ -42,6 +49,9 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/connection-parameters.md](proposals/connection-parameters.md) | Capability-gated BLE connection-interval control (`conn.params`), generalizing the Android-only `conn.priority` | **Implemented in 0.8.2** (coarse Android profile; `hint` reserved) |
 | [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | **Implemented in 0.8.0** (Kotlin agent + `agent-rs`) |
 | [proposals/0.9.1-hardening-decisions.md](proposals/0.9.1-hardening-decisions.md) | Security, lifecycle, incompatibility, and overload decisions | **Accepted for 0.9.1** |
+| [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | Validated CI/deployment release without changing the client programming model | **Accepted for 0.10.0** |
+| [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Planned for 0.10.0** |
+| [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
 
 ---
 
@@ -90,7 +100,7 @@ and swapped in isolation.
 
 | Module / Project | Role | Dependencies | Targets |
 |---|---|---|---|
-| [`:log`](../log) | Shared logging facade: `Logger` (global object), `LogLevel`, `LogSink`, platform sinks, `bytesPreview`, `RateLimitedLog`. Zero external deps. | none | JVM, Android, iOS |
+| [`:log`](../log) | Shared logging facade: `Logger` (global object), `LogLevel`, `LogSink`, platform sinks, `bytesPreview`, `RateLimitedLog`. Zero external deps. | Maven Central (`dev.warsha.remoteble:log`) | JVM, Android, iOS |
 | [`:protocol`](../protocol) | The wire contract + CBOR/JSON codec. Pure data, **no BLE, no network**. | kotlinx-serialization only | JVM, Android, iOS |
 | [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters. | `:protocol`, `:log`, coroutines, Ktor client, Kable | JVM (tests), Android, iOS |
 | [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, + a Compose Multiplatform status UI on mobile. | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform | JVM, Android, iOS |

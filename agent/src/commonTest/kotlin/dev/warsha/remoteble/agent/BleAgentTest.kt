@@ -31,6 +31,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.withTimeoutOrNull
@@ -45,6 +46,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -70,17 +73,23 @@ class BleAgentTest {
         strictMode: StrictModeState = StrictModeState(),
         // Default to a format that differs from the clients tests declare, so translation engages.
         agentFormat: IdentifierFormat = IdentifierFormat.BLUEZ_JSON,
+        observer: AgentObserver = AgentObserver.None,
     ) {
         private val codec = CborProtocolCodec()
         private val toAgent = Channel<ByteArray>(Channel.UNLIMITED)
         private val fromAgent = Channel<ByteArray>(Channel.UNLIMITED)
         val frames = MutableSharedFlow<Frame>(replay = 128, extraBufferCapacity = 128)
 
+        // LIMIT-SLOW-01: flips the outbound link to a stalled client (every write suspends
+        // forever) without touching the inbound command path, so a test can drive a connection
+        // to a healthy state first and then simulate the transport going slow.
+        var stallOutgoing: Boolean = false
+
         init {
             scope.launch { fromAgent.receiveAsFlow().collect { frames.emit(codec.decode(it)) } }
             BleAgent(
                 incoming = toAgent.receiveAsFlow(),
-                outgoing = { fromAgent.send(it) },
+                outgoing = { if (stallOutgoing) kotlinx.coroutines.awaitCancellation() else fromAgent.send(it) },
                 scope = scope,
                 backend = backend,
                 codec = codec,
@@ -94,6 +103,7 @@ class BleAgentTest {
                 scanBatchMaxSize = scanBatchMaxSize,
                 strictMode = strictMode,
                 agentFormat = agentFormat,
+                observer = observer,
             ).start()
         }
 
@@ -273,8 +283,9 @@ class BleAgentTest {
         h.send(2, Op.Write(device, char, ByteArray(BleAgent.MAX_WRITE_BYTES + 1), withResponse = true))
         h.send(3, Op.WriteDescriptor(device, desc, ByteArray(BleAgent.MAX_WRITE_BYTES + 1)))
         h.send(4, Op.RequestMtu(device, BleAgent.MAX_MTU + 1))
+        h.send(5, Op.RequestMtu(device, BleAgent.MIN_MTU - 1))
 
-        for (cid in 1L..4L) {
+        for (cid in 1L..5L) {
             assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(cid)).error.kind)
         }
         assertNull(backend.lastWrite)
@@ -634,6 +645,43 @@ class BleAgentTest {
         assertEquals(FakeBleBackend.DEFAULT_NOTIFICATIONS[0].toList(), values[0].value.toList())
 
         h.send(3, Op.ObserveStop(9))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+    }
+
+    /**
+     * LIMIT-SLOW-01: a notification stream is not safely coalescible, so a client that stops
+     * draining its link must not be allowed to hold an unbounded producer chain — the affected
+     * observe stream terminates once delivery can't complete within
+     * [BleAgent.NOTIFICATION_DELIVERY_TIMEOUT], with a visible log line, and the subscription
+     * slot is freed rather than left dangling.
+     */
+    @Test
+    fun observeTerminatesOnOutputOverflowWhenTheClientCannotKeepUp() = runTest {
+        val logs = mutableListOf<String>()
+        val observer = object : AgentObserver {
+            override fun onClientLog(clientId: Long, message: String) {
+                logs += message
+            }
+        }
+        // Emits every 10ms by default — plenty fast to hit a stalled client's delivery timeout.
+        val h = Harness(backgroundScope, FakeBleBackend(), observer = observer)
+
+        h.connect(1)
+        h.send(2, Op.ObserveStart(subId = 9, device = device, char = char))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+
+        h.stallOutgoing = true
+        advanceTimeBy(BleAgent.NOTIFICATION_DELIVERY_TIMEOUT + 1.seconds)
+        runCurrent()
+
+        assertTrue(
+            logs.any { it.contains("too slow") },
+            "overflow must be logged so the operator can see it: $logs",
+        )
+
+        // The slot is freed, not left dangling: the same sub id can be restarted immediately.
+        h.stallOutgoing = false
+        h.send(3, Op.ObserveStart(subId = 9, device = device, char = char))
         assertIs<OpResult.Ok>(h.frames.reply(3))
     }
 

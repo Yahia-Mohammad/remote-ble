@@ -284,11 +284,11 @@ an injected `onRelease` callback and `ConnectionWatcher` is the only piece that 
 
 ## Single agent, multiple clients
 
-v1 is one **agent** per deployment — there is no `AgentRegistry`, no multi-agent fan-out, and
-no *auth* identity beyond the bearer token (the handshake client id is for resume, not access).
-Multiple **clients** may share one agent, but peripheral ownership keeps them from colliding on
-the same hardware (above). Multiplexing many agents would live above this layer and is a
-non-goal for v1.
+v1 is one **agent endpoint** per client session — there is no client-side `AgentRegistry` or
+multi-agent fan-out API. Multiple **clients** may share one agent, with authenticated principals and
+peripheral ownership keeping them from colliding on the same hardware (above). Transparent
+multi-agent aggregation, if a concrete deployment needs it, belongs behind one ordinary endpoint in
+the future [AgentProxy](proposals/agent-proxy.md); it remains a non-goal for 0.10.0.
 
 ## Monorepo: SDK and agent share one repository
 
@@ -337,7 +337,7 @@ These are deliberate v1 cuts, each a clean extension:
 | ~~`CharNode.properties` populated only on macOS engine~~ — this row was stale: `EngineBleBackend.toNode()` reads Kable's `properties.value` directly in `commonMain` (no `propertiesOf` seam ever existed), and both the JVM/btleplug (`BtleplugCharacteristic`) and Android (`PlatformDiscoveredCharacteristic`) engines already read real native property bits, not a stub — verified 0.8.2 (see `EngineBleBackendJvmTest.toNodePreservesNonZeroPropertyBits`) | `EngineBleBackend` | — |
 | ~~Throughput coalescing not implemented~~ — landed in 0.8.3: `writeWithoutResponseBurst` pipelines WWR writes to fill the in-flight window (no wire change), and `BleAgent` chains writes **per device** so a burst reaches the radio's FIFO GATT queue in submission order despite per-command concurrency (a non-reference agent must uphold the same). Guaranteed in code + asserted in CI (`BleAgentTest`); on-radio confirmation batched into the next hardware round (plan §2d/§3) | `RemoteGattClient`, `BleAgent` | a wire batch op (`Op.WriteBatch`) only if the rig shows framing/round-trip still dominates after pipelining |
 | `conn.params`/`conn.priority` implemented Android-only; `ConnParamHint` is reserved wire space no engine honors; result is `Ok(null)` (Android reports accept/reject, not the resulting interval) | `ConnParamsSupport.*`, `EngineBleBackend` | iOS/JVM backends with real interval control (none known today — btleplug exposes none); an engine that reports the applied interval could add a `ResultPayload` for it |
-| One agent / one session | `DefaultAgentSession` | an `AgentRegistry` above the session |
+| One agent endpoint / one session | `DefaultAgentSession` | a future transparent [AgentProxy](proposals/agent-proxy.md) behind the endpoint, with no Kable/client API change |
 | ~~Agent is JVM-only~~ — done: `:agent` now also targets Android/iOS (Kable's native Android BLE / CoreBluetooth backends, Ktor's native-target CIO server); see [agent.md](agent.md#android--ios-a-phone-as-the-agent). Remaining cut: iOS can't run the agent backgrounded (no listening TCP server while backgrounded on iOS) | `agent/build.gradle.kts` | a background-capable iOS transport would need a fundamentally different delivery mechanism (push-triggered wake, not a held-open server socket) |
 
 ## Pinned versions (and why pinned)

@@ -4,6 +4,10 @@ import dev.warsha.remoteble.agent.AgentBackend
 import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BlackholeBackend
+import dev.warsha.remoteble.agent.BleAgentBackend
+import dev.warsha.remoteble.agent.BleBackend
+import dev.warsha.remoteble.agent.ClientCredentials
+import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.ClientHello
@@ -13,6 +17,8 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
+import dev.warsha.remoteble.protocol.ScanFilter
+import dev.warsha.remoteble.protocol.ServiceNode
 import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.agent.FakeAgent
@@ -37,6 +43,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -60,6 +67,23 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
+
+/**
+ * A no-radio [BleBackend] that always succeeds, for tests that need [BleAgentBackend]'s real
+ * cross-connection [dev.warsha.remoteble.agent.PeripheralRegistry] ownership semantics — unlike
+ * [FakeAgent], which has no cross-client leasing at all. `agent`'s own `FakeBleBackend` lives in
+ * its `commonTest` source set and isn't visible across the module boundary.
+ */
+private class MinimalBleBackend : BleBackend {
+    override fun scan(filters: List<ScanFilter>) = emptyFlow<AdvertisementDto>()
+    override suspend fun connect(device: DeviceHandle) = Unit
+    override suspend fun disconnect(device: DeviceHandle) = Unit
+    override suspend fun discover(device: DeviceHandle) = emptyList<ServiceNode>()
+    override suspend fun read(device: DeviceHandle, char: CharRef) = ByteArray(0)
+    override suspend fun write(device: DeviceHandle, char: CharRef, value: ByteArray, withResponse: Boolean) = Unit
+    override fun observe(device: DeviceHandle, char: CharRef) = emptyFlow<ByteArray>()
+    override suspend fun requestMtu(device: DeviceHandle, mtu: Int) = mtu
+}
 
 /**
  * Proves the transport seam: the unchanged session + RemoteGattClient/RemoteScanSource
@@ -237,6 +261,121 @@ class WebSocketEndToEndTest {
             assertEquals(CloseReason.Codes.VIOLATED_POLICY, reason?.knownReason)
             assertEquals(AgentWebSocketServer.DUPLICATE_SESSION_CLOSE_REASON, reason?.message)
             first.close()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    /**
+     * AUTH-PRINCIPAL-01: two credentials reusing one stable client ID must not let a lease,
+     * operation, or warm resume cross the principal boundary. `alpha` and `beta` share the raw
+     * `X-RemoteBle-Client` value; the agent's actual ownership key is
+     * `ClientCredentials.sessionKey(principal, stableClientId)` (`AgentWebSocketServer.kt`), so the
+     * two connections must be treated as fully independent owners despite the shared raw id —
+     * live, and still while `alpha`'s transport sits in its post-drop grace window (LEASE-GRACE-01).
+     */
+    @Test
+    fun principalIsolationHoldsAcrossLeaseOperationsAndDuringTransportGrace() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(
+            port = port,
+            credentials = ClientCredentials.of(mapOf("alpha" to "secret-a", "beta" to "secret-b")),
+            backend = BleAgentBackend(MinimalBleBackend()),
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            val sharedRawClientId = "shared-raw-client-id"
+            fun sessionFor(secret: String) = DefaultAgentSession(
+                WebSocketAgentTransport(
+                    "ws://localhost:$port/agent", scope, httpClient,
+                    authToken = { secret },
+                    reconnect = ReconnectPolicy.None,
+                    clientId = sharedRawClientId,
+                ),
+                CborProtocolCodec(),
+                scope,
+            )
+
+            val sessionAlpha = sessionFor("secret-a")
+            sessionAlpha.awaitConnected()
+            val sessionBeta = sessionFor("secret-b")
+            sessionBeta.awaitConnected()
+
+            // Sharing the raw client id does not trip the duplicate-live-session check
+            // (LEASE-DUPLICATE-01 is principal-scoped): both connections are accepted at once.
+            assertEquals(TransportState.CONNECTED, sessionAlpha.transportState.value)
+            assertEquals(TransportState.CONNECTED, sessionBeta.transportState.value)
+
+            assertIs<OpResult.Ok>(sessionAlpha.request(Op.Connect(device)))
+
+            // beta shares the raw client id but not the principal: it must not see alpha's lease.
+            val betaConnectWhileLive = sessionBeta.request(Op.Connect(device))
+            assertEquals(ErrorKind.PERIPHERAL_BUSY, assertIs<OpResult.Err>(betaConnectWhileLive).error.kind)
+            val betaReadWhileLive = sessionBeta.request(Op.Read(device, char))
+            assertEquals(ErrorKind.PERIPHERAL_BUSY, assertIs<OpResult.Err>(betaReadWhileLive).error.kind)
+
+            // alpha's transport drops: the radio link stays warm, pending release within grace
+            // (LEASE-GRACE-01). beta — same raw client id — still cannot warm-resume alpha's lease.
+            sessionAlpha.close()
+            val betaConnectDuringGrace = sessionBeta.request(Op.Connect(device))
+            assertEquals(ErrorKind.PERIPHERAL_BUSY, assertIs<OpResult.Err>(betaConnectDuringGrace).error.kind)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    /**
+     * AUTH-REVOKE-01: a credential revoked while a lease sits mid transport-grace must not be
+     * able to resume it. The revoked principal's next connection attempt — even carrying the same
+     * stable client id a warm-lease resume would use — fails re-authentication at the handshake
+     * gate ([ClientCredentials.authenticate]) before the registry is ever consulted.
+     */
+    @Test
+    fun revokedCredentialCannotResumeALeaseDuringTransportGrace() = runBlocking {
+        val port = freePort()
+        val credentials = ClientCredentials.of(mapOf("alpha" to "secret-a"))
+        val server = AgentWebSocketServer(
+            port = port,
+            credentials = credentials,
+            backend = BleAgentBackend(MinimalBleBackend()),
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            val resumingClientId = "resuming-client"
+            val session = DefaultAgentSession(
+                WebSocketAgentTransport(
+                    "ws://localhost:$port/agent", scope, httpClient,
+                    authToken = { "secret-a" },
+                    reconnect = ReconnectPolicy.None,
+                    clientId = resumingClientId,
+                ),
+                CborProtocolCodec(),
+                scope,
+            )
+            session.awaitConnected()
+            assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
+
+            // Revoke while the lease is still live, then drop the transport: the lease enters its
+            // grace window (LEASE-GRACE-01) still owned by the now-revoked principal.
+            credentials.revoke("alpha")
+            session.close()
+
+            // A resume attempt with the same stable client id and the revoked credential must
+            // never reach CONNECTED — rejected at the handshake, not at the lease.
+            val resumeSession = DefaultAgentSession(
+                WebSocketAgentTransport(
+                    "ws://localhost:$port/agent", scope, httpClient,
+                    authToken = { "secret-a" },
+                    reconnect = ReconnectPolicy.None,
+                    clientId = resumingClientId,
+                ),
+                CborProtocolCodec(),
+                scope,
+            )
+            val reached = withTimeoutOrNull(3.seconds) {
+                resumeSession.transportState.first { it == TransportState.CONNECTED }
+            }
+            assertNull(reached, "a revoked credential must not be able to resume a warm lease")
         } finally {
             server.stop()
         }

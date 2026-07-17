@@ -3,6 +3,8 @@ package dev.warsha.remoteble.client
 import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BleAgentBackend
 import dev.warsha.remoteble.agent.BleBackend
+import dev.warsha.remoteble.agent.SimulatedBleBackend
+import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharNode
@@ -79,5 +81,59 @@ class BleAgentOverWebSocketTest {
             server.stop()
         }
         Unit
+    }
+
+    @Test
+    fun simulatedProfileDrivesTheOrdinaryClientOverARealSocket() = runBlocking {
+        val port = freePort()
+        val simulated = SimulatedBleBackend(SimulationProfile.decode(SIMULATED_PROFILE))
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(simulated)).also { it.startAndAwaitReady(port) }
+        try {
+            val session = DefaultAgentSession(
+                WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),
+                CborProtocolCodec(),
+                scope,
+            )
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+
+            val advertisement = withTimeout(10.seconds) { RemoteScanSource(session).advertisements().first() }
+            assertEquals(DeviceHandle("sim-hrm-1"), advertisement.device)
+            val peripheral = RemoteGattClient(advertisement.device, session)
+            val heartRate = CharRef("180d", "2a37")
+            val controlPoint = CharRef("180d", "2a39")
+            val battery = CharRef("180f", "2a19")
+
+            peripheral.connect()
+            assertEquals(2, peripheral.discover().size)
+            assertEquals(listOf<Byte>(0x64), peripheral.read(battery).toList())
+            peripheral.write(controlPoint, byteArrayOf(0x01), withResponse = true)
+            assertEquals(listOf(listOf<Byte>(0, 60), listOf<Byte>(0, 61)),
+                withTimeout(10.seconds) { peripheral.observe(heartRate).take(2).toList() }.map { it.toList() })
+            peripheral.disconnect()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    private companion object {
+        val SIMULATED_PROFILE = """
+            {
+              "schemaVersion": 1,
+              "peripherals": [{
+                "id": "sim-hrm-1",
+                "advertisement": { "name": "Sim HRM", "serviceUuids": ["180d", "180f"], "rssi": -50, "intervalMs": 50 },
+                "services": [
+                  { "uuid": "180d", "characteristics": [
+                    { "uuid": "2a37", "properties": ["notify"], "notify": { "intervalMs": 50, "values": { "sequence": ["003c", "003d"] } } },
+                    { "uuid": "2a39", "properties": ["write"], "write": { "accept": true } }
+                  ] },
+                  { "uuid": "180f", "characteristics": [
+                    { "uuid": "2a19", "properties": ["read"], "read": { "static": "64" } }
+                  ] }
+                ]
+              }]
+            }
+        """.trimIndent()
     }
 }

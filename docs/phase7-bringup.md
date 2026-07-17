@@ -176,3 +176,19 @@ exercised automatically by the runner's "Force write error" prompts above, not a
    confirmed on real hardware, and the inherent WWR/notify best-effort limits are confirmed as
    BLE-design properties, not implementation gaps.
 4. Both follow-ups above are verified (unsolicited drop, write-without-response throughput baseline).
+
+## 0.10.0 hardware-validation gate
+
+In addition to the real-radio checks above, the 0.10.0 Maven Central release requires this deferred
+validation bundle:
+
+1. Run the mobile-agent lifecycle on iOS hardware, including start, stop, cancellation, and failure
+   recovery evidence. The Android JVM host suite already covers the shared runner core.
+2. Put a credentialed loopback-bound agent behind a TLS-terminating reverse proxy and connect via
+   `wss://`. Verify the WebSocket upgrade, bearer forwarding, certificate trust, reconnect, and live
+   notification delivery against the test peripheral.
+3. Archive the exact CI, version-consistency, real-radio, iOS, and TLS results with the release
+   commit/tag before starting the Maven Central publication workflow.
+
+These requirements are intentionally deferred from 0.9.1; they are mandatory release evidence for
+0.10.0.

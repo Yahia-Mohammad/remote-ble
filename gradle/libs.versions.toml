@@ -16,6 +16,7 @@ android-min = "24"
 
 # Publishing to Maven Central (Central Portal) for :protocol + :client-sdk.
 vanniktech-publish = "0.37.0"
+kover = "0.9.8"
 
 # Kable — released on Maven Central (0.43.1 ships the JVM btleplug backend, kable#901).
 kable = "0.43.1"
@@ -70,3 +71,6 @@ android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 # Maven Central (Central Portal) publishing — applied only to :protocol + :client-sdk.
 vanniktech-maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "vanniktech-publish" }
+# JVM-only coverage for the KMP modules; Android device and native tests are intentionally outside
+# Kover's supported collection surface.
+kover = { id = "org.jetbrains.kotlinx.kover", version.ref = "kover" }

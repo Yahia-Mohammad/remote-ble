@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.kmp.library)
+    alias(libs.plugins.kover)
     // Compose Multiplatform for the Android/iOS status UI (mobileMain only — see below;
     // the jvm() CLI target never touches compose.*).
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.0"
@@ -29,6 +30,9 @@ kotlin {
         namespace = "dev.warsha.remoteble.agent"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
+        // The mobile composition root is platform-neutral, but it previously had no host test
+        // target. Keep lifecycle regressions runnable in CI without a device/emulator.
+        withHostTest {}
     }
     // No iosX64() (Intel Simulator): this module depends on compose.* and Compose Multiplatform
     // 1.11.1 doesn't publish for it — same call :client-ui makes. Apple Silicon Macs cover

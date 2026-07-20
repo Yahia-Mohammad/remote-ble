@@ -86,7 +86,7 @@ phone via CoreBluetooth / Android BLE. That single difference cascades:
 | **Multi-agent fan-out** | Mature — HA aggregates every proxy + local adapters and routes connections across them | One agent endpoint per client session; a transparent [AgentProxy](proposals/agent-proxy.md) is designed but deferred beyond 0.10.0 ([intentional v1 cut](design-decisions.md#single-agent-multiple-clients)) |
 | **Device ownership / sharing** | None — HA is the sole controller | [Per-peripheral leasing](design-decisions.md#peripheral-ownership) (exclusive by default), grace windows, ownership survives reconnect |
 | **Reconnection** | Yes | [Reconcile-on-reconnect](design-decisions.md#reconnection); IP-transport and BLE state kept as two independent state machines |
-| **Second implementation** | ESPHome firmware + HA client | Two agents (Kotlin/Kable + Rust/`btleplug`), byte-identical CBOR, plus a [normative wire spec](agent-proxy-spec.md) |
+| **Second implementation** | ESPHome firmware + HA client | Two agents (Kotlin/Kable + Rust/`btleplug`), byte-identical CBOR, plus a [normative wire spec](agent-conformance-spec.md) |
 | **Primary purpose** | Extend HA's BLE reach across a home, cheaply | Dev tooling: emulator/CI testing, remote-lab access, device sharing, retrofitting remote access onto Kable apps |
 | **Ecosystem coupling** | Tightly coupled to Home Assistant | Standalone SDK; no assumptions about the consuming app |
 
@@ -183,7 +183,7 @@ In rough order of weight:
 3. **Cross-language interop worked without codegen.** The byte-for-byte CBOR interop between the
    Kotlin codec and the Rust agent (ciborium) is exactly where CBOR's self-describing nature
    shines: two independent implementations agreeing on a self-describing format, verified by
-   round-tripping, no shared generated code. The [normative conformance spec](agent-proxy-spec.md)
+   round-tripping, no shared generated code. The [normative conformance spec](agent-conformance-spec.md)
    already plays the role Protobuf's `.proto` would.
 4. **The wire-size and CPU penalties don't bite.** This is where ESPHome is the perfect contrast.
    ESPHome invests heavily in Protobuf-encoding CPU optimization on ESP32 — because on a

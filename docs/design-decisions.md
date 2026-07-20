@@ -324,7 +324,7 @@ history — whereas un-splitting is painful. So the bias is to defer until the p
 clone the whole repo to run an agent" is solved by *shipping the agent as a released artifact*
 (JVM fat JAR, `agent-rs` native binaries, on-device APK via GitHub Releases), which removes the
 clone-and-build step entirely without touching repo structure. That release workflow and its current
-gates are tracked in the canonical [`ai-context/ROADMAP.md`](../ai-context/ROADMAP.md).
+gates are tracked in [`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md).
 
 ## Known boundaries & extension points
 

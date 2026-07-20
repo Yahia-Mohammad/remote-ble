@@ -5,10 +5,10 @@
 RemoteBLE is pre-1.0 and released from a single line. Security fixes land on the
 latest published version only.
 
-| Version | Supported |
-|---------|-----------|
-| 0.7.x   | ✅        |
-| < 0.7   | ❌        |
+| Version                | Supported |
+|------------------------|-----------|
+| Latest `0.x` release   | ✅        |
+| Any earlier release    | ❌        |
 
 ## Reporting a vulnerability
 

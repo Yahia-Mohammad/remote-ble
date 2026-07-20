@@ -46,6 +46,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     // ComponentActivity/setContent + the rotation-surviving ViewModel wrapper around
     // RemoteBleController.
-    implementation("androidx.activity:activity-compose:1.10.0")
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
 }

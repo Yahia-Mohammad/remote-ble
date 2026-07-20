@@ -21,15 +21,17 @@ the JVM/Gradle dependency graph; Cargo has the additional advisory and license p
 
 ## Deliberate boundaries
 
-- The SBOM is a source/dependency inventory at this stage. PR7 adds versioned release-artifact,
-  container-manifest, checksum, and publication inventories; PR9 attaches those to the tag.
+- The SBOM is a source/dependency inventory at this stage. PR7 has added the versioned
+  release-artifact, container-manifest, checksum, and publication inventory in
+  [release-candidate.md](release-candidate.md); PR9 attaches the resulting evidence to the tag.
 - Kover reports JVM execution only; its upstream support does not collect Kotlin/Native or Android
   device-test coverage. Tarpaulin measures Rust on the Linux CI host. The reports are measured
   evidence, not a substitute for PR8's platform and hardware validation.
 - `consumer-tests/jvm` is intentionally an independent Gradle build. It proves that the POMs resolve
   from Maven local without composite-build or project-dependency leakage. Android and KMP/iOS clean
-  consumers belong to the release-candidate gate in PR7, when their target artifacts and the exact
-  `0.10.0` version exist.
+  consumers remain release-candidate evidence: the JVM fixture is complete locally, while Android
+  and KMP/iOS clean-consumer resolution must be recorded against staging or released coordinates
+  before tag approval.
 - No workflow substitutes for `TLS-PROXY-01`, live-radio, iOS lifecycle, or Ubuntu/Pi BlueZ container
   evidence. Those stay in PR8's hardware-validation bundle.
 - `cargo deny` allows only the explicit permissive license set in its checked-in policy. Any future

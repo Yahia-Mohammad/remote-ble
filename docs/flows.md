@@ -10,6 +10,15 @@ Notation: `C→A` is a client→agent frame, `A→C` is agent→client.
 
 ---
 
+## Real radio and simulation use the same wire flow
+
+Every sequence below begins after the agent has selected a backend. With normal JVM startup it is
+`EngineBleBackend`; with `--simulate <profile.json>` it is `SimulatedBleBackend`. That selection is
+entirely behind `BleBackend`, so the WebSocket frames, client calls, session behavior, and diagrams
+below do not change. [simulation.md](simulation.md) documents the profile contract and limits.
+
+---
+
 ## Establishing a session
 
 ```mermaid

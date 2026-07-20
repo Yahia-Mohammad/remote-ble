@@ -24,13 +24,21 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.9.1")
+    implementation("dev.warsha.remoteble:client-sdk:0.10.0")
 }
 ```
 
+> The snippet tracks the current release line. The **Maven Central badge at the top of this
+> README shows the version actually resolvable right now** — if you're reading between a version
+> bump and its Central publish, use that number.
+
+Upgrading from an earlier Central release? Read the concise
+[0.10.0 migration guide](docs/migrate-to-0.10.0.md), especially the breaking `authToken` provider
+change.
+
 **iOS** is covered by the same coordinate: it's a Kotlin Multiplatform publication, so an
 iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) resolves the
-`iosArm64`/`iosSimulatorArm64`/`iosX64` klibs from Central automatically. There is no separate
+`iosArm64`/`iosSimulatorArm64` klibs from Central automatically. There is no separate
 Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
 
 The **agent** is run from a prebuilt binary ([download from a release](https://github.com/Yahia-Mohammad/remote-ble/releases/latest))
@@ -91,12 +99,12 @@ architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 [agent](docs/agent.md), [end-to-end flows + sequence diagrams](docs/flows.md),
 [design rationale](docs/design-decisions.md), [build & testing](docs/build-and-testing.md).
 
-Release planning is maintained in [`ai-context/ROADMAP.md`](ai-context/ROADMAP.md). The 0.9.0 scope
-includes a required [code-review addendum](ai-context/0.9.0-review-addendum.md); remaining review
-hardening is scheduled in the [0.9.1 plan](ai-context/0.9.1-implementation-plan.md). The tracked
-[0.10.0 scope](docs/proposals/0.10.0-scope.md) covers radio-less CI, the Rust-agent container,
-deferred validation, and the consolidated Maven Central release; the future
-[AgentProxy design](docs/proposals/agent-proxy.md) is explicitly outside that release.
+Release scope is tracked in [`docs/proposals/0.10.0-scope.md`](docs/proposals/0.10.0-scope.md),
+which covers radio-less CI, the Rust-agent container, deferred validation, and the consolidated
+Maven Central release; the [CHANGELOG](CHANGELOG.md) is the shipped history and
+[`docs/proposals/0.9.1-hardening-decisions.md`](docs/proposals/0.9.1-hardening-decisions.md) records
+the accepted security/lifecycle hardening. The future
+[AgentProxy design](docs/proposals/agent-proxy.md) is explicitly outside the 0.10.0 release.
 
 ## Modules
 
@@ -295,10 +303,18 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 
 ## Status
 
-Proven end-to-end, on real radios and in tests: app logic written purely against Kable's
-`Peripheral`/`Scanner` API runs unchanged against a `RemotePeripheral` talking to an agent
-over WebSocket — connect, discover, read, write, observe (notify), scan, and reconnect.
-(Capabilities are listed under [Features](#features) above.)
+The 0.10.0 release candidate is code-complete and verified locally (full `./gradlew build` and the
+Rust suite green). App logic written purely against Kable's `Peripheral`/`Scanner` API runs
+unchanged against a `RemotePeripheral` talking to an agent over WebSocket — connect, discover,
+read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
+complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
+
+Two things remain before the tag: **on-hardware validation** (real-radio, iOS lifecycle,
+TLS-proxy, and Ubuntu/Raspberry-Pi container evidence) and **publication** (GitHub release + GHCR
+image + Maven Central). Until then, treat 0.10.0 as a release candidate rather than a shipped
+version. The exact remaining-work boundary is tracked in the
+[release handoff](docs/proposals/0.10.0-progress-status.md) and the
+[release-candidate inventory](docs/release-candidate.md).
 
 The reference apps show both sides: an Android client (`:android-client`) and an iOS launcher
 (`ios-client/`) drive the shared `:client-ui` over a remote agent with no local radio, while

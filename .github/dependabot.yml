@@ -1,19 +1,21 @@
 version: 2
 updates:
+  # Paused: open-pull-requests-limit: 0 stops new PRs without losing this config.
+  # To resume, set the three limits below back to 5 (or your preferred value).
   - package-ecosystem: "gradle"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "cargo"
     directory: "/agent-rs"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0

@@ -1,6 +1,6 @@
 name: Release
 
-# Publish :protocol + :client-sdk to Maven Central. This is MANUAL (workflow_dispatch) on purpose:
+# Publish :protocol + :log + :client-sdk to Maven Central. This is MANUAL (workflow_dispatch) on purpose:
 # most releases (0.8.1 / 0.8.2 / 0.8.3 / 0.9.0 …) ship agent binaries to GitHub Releases via
 # agent-artifacts.yml but are NOT published to Central — that conserves the monthly Central file
 # quota (272 files/release, 1,000/month). Only deliberate milestone publishes (next up: 0.10.0) run
@@ -36,7 +36,7 @@ jobs:
           TAG: ${{ inputs.tag }}
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: temurin
@@ -52,7 +52,7 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-release-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
 
-      # Publishes :protocol + :client-sdk (KMP publication + JVM/Android/iOS per-target ones)
+      # Publishes :protocol + :log + :client-sdk (KMP publication + JVM/Android/iOS per-target ones)
       # to the Central Portal and releases the deployment. Signing + credentials come from
       # encrypted secrets (never in the tree). Config cache is disabled for the publish tasks.
       - name: Publish + release to Maven Central

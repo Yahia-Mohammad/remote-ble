@@ -152,7 +152,7 @@ A gap found in review, fixed in both agents plus the client — **no wire change
   translation before any replayed op arrives.
 - **Conformance note:** an agent that implements both `identifier.translate` and ownership leases
   must re-seed on resume this way, or reconcile silently breaks for translated clients
-  (agent-proxy-spec §6.1).
+  (agent-conformance-spec §6.1).
 - **Remaining limitation (accepted):** after an **agent restart** there are no leases to seed from,
   so a replayed translated handle cannot route — the client must rescan. Same-platform pairings are
   unaffected (identity fast-path; handles pass through and stay valid wherever the OS keeps them

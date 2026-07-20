@@ -58,6 +58,8 @@ Source: [`agent/src/`](../agent/src)
 | [`AgentObserver.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentObserver.kt) | Lifecycle hooks `BleAgent` reports (devices/scan/activity); no-op default |
 | [`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleBackend.kt) | The portable radio op surface |
 | [`EngineBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt) | Real backend over Kable's common `Peripheral`/`Scanner` API — one implementation for all three targets |
+| [`SimulationProfile.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulationProfile.kt) | Strict, bounded `schemaVersion: 1` JSON profile decoded before simulated startup |
+| [`SimulatedBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt) | Deterministic `BleBackend` implementation for the JVM agent's radio-less profile mode |
 | [`PeripheralByIdentifier.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralByIdentifier.kt) | `expect`/`actual` bridge for reconstructing a `Peripheral` from a bare identifier — see [below](#the-real-backend--enginebleblebackend) |
 | [`ConnectionWatcher.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ConnectionWatcher.kt) | Polls `BleBackend.isConnected` every tick, `BleBackend.checkLiveness` (active probe) every `livenessInterval`, to catch unsolicited drops and start the lease release grace |
 | [`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt) | A canned, radio-free agent for client tests |
@@ -70,6 +72,19 @@ Source: [`agent/src/`](../agent/src)
 | [`IosAgentEntry.kt`](../agent/src/iosMain/kotlin/dev/warsha/remoteble/agent/IosAgentEntry.kt) | iOS entry point (`IosAgentSession`): owns the runner + idle-timer observer; `dispose()` on view teardown |
 | `PlatformName` / `LanAddress` / `TokenStore` (`expect`/`actual`) | Per-platform bits the mobile UI needs: the host label (`agentInfo`), the LAN IPv4 for the `ws://` address, and development-only auth-token persistence (Android DataStore / iOS `NSUserDefaults`; not a protected production credential store) |
 | [`AndroidAgentContext.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AndroidAgentContext.kt) | Holds the application `Context` the Android `actual`s (LAN address, token store) need |
+
+---
+
+## Radio-less JVM mode — `SimulatedBleBackend`
+
+`Main.kt` normally builds `EngineBleBackend`. Passing `--simulate <profile.json>` (or setting
+`REMOTE_BLE_SIMULATE`) instead parses `SimulationProfile` and wires `SimulatedBleBackend` through
+the same `BleAgentBackend` and `AgentWebSocketServer` path. The client, protocol handler, lease
+logic, authentication, and WebSocket server are therefore unchanged; only the radio seam moves.
+
+This is the deterministic CI/demo path, not a generic scripting engine and not a Rust-agent feature.
+Start with `agent/simulation/sim-hrm.json`, then see [simulation.md](simulation.md) for profile
+semantics.
 
 ---
 

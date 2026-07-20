@@ -11,13 +11,13 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> **0.9.0 release-plan addendum:** the correctness/isolation work required by
-> [`ai-context/0.9.0-review-addendum.md`](ai-context/0.9.0-review-addendum.md) is implemented and
-> regression-tested in both agents (see **Fixed** below). The batched hardware round is deferred
-> and remains a hard gate before the later Maven Central publish; this GitHub-only release is
-> explicitly hardware-pending. Shared mode is disabled pending a safe participant model. Remaining review
-> hardening is assigned to [`0.9.1`](ai-context/0.9.1-implementation-plan.md). The scope authority is
-> [`ai-context/ROADMAP.md`](ai-context/ROADMAP.md).
+> **0.9.0 release-plan addendum:** the correctness/isolation work required by the 0.9.0 code-review
+> addendum is implemented and regression-tested in both agents (see **Fixed** below). The batched
+> hardware round is deferred and remains a hard gate before the later Maven Central publish; this
+> GitHub-only release is explicitly hardware-pending. Shared mode is disabled pending a safe
+> participant model. Remaining review hardening is assigned to 0.9.1 (accepted decisions in
+> [`docs/proposals/0.9.1-hardening-decisions.md`](docs/proposals/0.9.1-hardening-decisions.md)). The
+> tracked scope authority is [`docs/proposals/0.10.0-scope.md`](docs/proposals/0.10.0-scope.md).
 >
 > **GitHub-only release — the Maven Central publish is deferred to 0.10.0.** `agent-artifacts.yml`
 > runs on the `v0.9.0` tag (agent binaries); `release.yml`/Maven Central publish stays skipped. This
@@ -161,9 +161,8 @@ protocol version: **1**.
 - **Client-side write-without-response pipelining** — `RemotePeripheral.writeWithoutResponseBurst` /
   `RemoteGattClient.writeWithoutResponseBurst`. Keeps up to `window` (default 8) WithoutResponse
   writes in flight instead of paying one full client↔agent round trip per write before sending the
-  next — the fix indicated by tracing a serial WWR burst end-to-end
-  (`ai-context/archive/0.8.3-implementation-plan.md` §2b): the dominant cost is N sequential WebSocket
-  round-trips, not the radio. **No wire change** — frames are still sent one per write, in
+  next — the fix indicated by tracing a serial WWR burst end-to-end: the dominant cost is N
+  sequential WebSocket round-trips, not the radio. **No wire change** — frames are still sent one per write, in
   submission order; only the client's await discipline changes. Backed by a new
   `AgentSession.dispatch(op, timeout)` primitive (send now, await the reply later) that shares its
   send-and-track core with `request()`. Submission order is preserved **end-to-end** (see the
@@ -284,6 +283,10 @@ protocol version: **1**.
 
 ### Changed
 
+- **0.10.0 Central-consumer migration guidance.** The new
+  [`docs/migrate-to-0.10.0.md`](docs/migrate-to-0.10.0.md) collects the cumulative dependency and
+  platform guidance, prominently including the earlier breaking `authToken` provider change.
+
 - **`WebSocketAgentTransport` auth token is now a suspend provider.** The `authToken` constructor
   parameter changed from `String?` to `suspend () -> String? = { null }` (and likewise
   `RemoteBleClientConfig.authToken`). The provider is invoked once per connection attempt — including
@@ -362,7 +365,7 @@ protocol version: **1**.
 - Peripheral ownership/leasing, reconcile-on-reconnect, and independent IP-vs-BLE
   connection state machines.
 - A normative, language-agnostic conformance spec
-  ([docs/agent-proxy-spec.md](docs/agent-proxy-spec.md)).
+  ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
 [0.8.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.0

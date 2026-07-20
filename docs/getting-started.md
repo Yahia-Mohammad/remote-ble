@@ -15,6 +15,22 @@ assumes you can build the repo (`./gradlew build`) and have read nothing else.
 
 ## Part 1 — Run an agent
 
+### Fastest path: a simulated agent (no Bluetooth hardware)
+
+For a deterministic local walkthrough or CI-style test, start the JVM agent with the checked-in
+Heart Rate profile. This bypasses the real radio, so it does not need the macOS signed-app launcher:
+
+```sh
+./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json"
+# → RemoteBLE agent listening on ws://127.0.0.1:8080/agent (simulated backend)
+```
+
+Use `ws://127.0.0.1:8080/agent` in Part 2 and continue through the client walkthrough unchanged.
+The simulated backend is intentionally an agent configuration, not a separate client API. See
+[simulation.md](simulation.md) for its profile contract.
+
+### Real radio: JVM agent
+
 The agent is the process next to the Bluetooth device that owns the real radio. The
 reference agent (`:agent`) targets the JVM, Android, and iOS; this tutorial uses the JVM
 target, which runs over Kable's native (`btleplug`) backend — on macOS that's
@@ -99,7 +115,7 @@ backgrounded (no equivalent of Android's foreground service — see
 Desktop and Rust agent credentials are read at process startup. Rotate or revoke a credential by
 updating the environment/configuration and restarting the agent. Restart clears all in-memory
 leases, so an old credential cannot resume a warm lease; existing WebSocket sessions also end with
-the process. There is intentionally no live credential-reload API in 0.9.1 — changing an
+the process. There is intentionally no live credential-reload API in 0.10.0 — changing an
 environment variable without restarting has no security effect. For a zero-downtime rotation, run
 a separately configured replacement agent and migrate clients before retiring the old one.
 

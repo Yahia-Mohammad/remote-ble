@@ -1,8 +1,8 @@
 [versions]
-kotlin = "2.4.0"
+kotlin = "2.4.10"
 coroutines = "1.11.0"
-serialization = "1.9.0"
-ktor = "3.5.0"
+serialization = "1.11.0"
+ktor = "3.5.1"
 koin = "4.2.1"
 atomicfu = "0.33.0"
 jvm-toolchain = "17"
@@ -10,7 +10,7 @@ datastore = "1.1.7"
 
 # Android client target (Phase 7). AGP/compileSdk match the Kable fork so the
 # consumed klibs line up; minSdk >= Kable's own min (21).
-agp = "9.2.1"
+agp = "9.3.0"
 android-compile = "37"
 android-min = "24"
 

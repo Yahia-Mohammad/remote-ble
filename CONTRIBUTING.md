@@ -62,7 +62,7 @@ cd agent-rs && cargo test
 - **Note wire-protocol impact.** New optional features should degrade
   gracefully via capability negotiation (a `Set<String>`), not a version bump —
   see [docs/protocol.md](docs/protocol.md) and
-  [docs/agent-proxy-spec.md](docs/agent-proxy-spec.md).
+  [docs/agent-conformance-spec.md](docs/agent-conformance-spec.md).
 - **Update docs + CHANGELOG.** Add a line under `[Unreleased]` in
   [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
 

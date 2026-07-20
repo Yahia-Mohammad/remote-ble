@@ -1,5 +1,4 @@
 use futures_util::{SinkExt, StreamExt};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -10,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{
-    CloseFrame, Message, WebSocketConfig, frame::coding::CloseCode,
+    CloseFrame, Message, WebSocketConfig,
+    frame::{Utf8Bytes, coding::CloseCode},
 };
 use tracing::Instrument;
 
@@ -63,11 +63,9 @@ static NEXT_LOG_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn websocket_config() -> WebSocketConfig {
-    WebSocketConfig {
-        max_message_size: Some(MAX_FRAME_BYTES),
-        max_frame_size: Some(MAX_FRAME_BYTES),
-        ..Default::default()
-    }
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME_BYTES))
+        .max_frame_size(Some(MAX_FRAME_BYTES))
 }
 static NEXT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -632,7 +630,7 @@ impl AgentServer {
                                 match outbound {
                                     Outbound::Frame(frame) => {
                                         if let Ok(bytes) = encode_cbor(&frame)
-                                            && ws_sender.send(Message::Binary(bytes)).await.is_err()
+                                            && ws_sender.send(Message::Binary(bytes.into())).await.is_err()
                                         {
                                             break "writer send failed";
                                         }
@@ -640,14 +638,14 @@ impl AgentServer {
                                     Outbound::IncompatibleProtocolClose => {
                                         let _ = ws_sender.send(Message::Close(Some(CloseFrame {
                                             code: CloseCode::Protocol,
-                                            reason: Cow::Borrowed(INCOMPATIBLE_PROTOCOL_CLOSE_REASON),
+                                            reason: Utf8Bytes::from_static(INCOMPATIBLE_PROTOCOL_CLOSE_REASON),
                                         }))).await;
                                         break "protocol incompatible";
                                     }
                                     Outbound::FrameTooLargeClose => {
                                         let _ = ws_sender.send(Message::Close(Some(CloseFrame {
                                             code: CloseCode::Size,
-                                            reason: Cow::Borrowed(FRAME_TOO_LARGE_CLOSE_REASON),
+                                            reason: Utf8Bytes::from_static(FRAME_TOO_LARGE_CLOSE_REASON),
                                         }))).await;
                                         break "frame too large";
                                     }
@@ -662,7 +660,7 @@ impl AgentServer {
                             let _ = ws_sender.send(Message::Close(None)).await;
                             break "liveness timeout";
                         }
-                        if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        if ws_sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                             break "ping failed";
                         }
                     }
@@ -1234,7 +1232,7 @@ mod tests {
         let mut server = server.await.unwrap();
 
         client
-            .send(Message::Binary(vec![0; MAX_FRAME_BYTES + 1]))
+            .send(Message::Binary(vec![0; MAX_FRAME_BYTES + 1].into()))
             .await
             .unwrap();
         assert!(
@@ -1338,7 +1336,7 @@ mod tests {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let bytes = encode_cbor(&Frame::Command { cid, op }).expect("command must encode");
-        ws.send(Message::Binary(bytes))
+        ws.send(Message::Binary(bytes.into()))
             .await
             .expect("command must send");
     }

@@ -7,28 +7,29 @@ plan.
 
 For quickstart/build commands see [`../README.md`](../README.md).
 
-Release scope is maintained separately from this implementation reference in
-[`../ai-context/ROADMAP.md`](../ai-context/ROADMAP.md). Its 0.9.0
-[review addendum](../ai-context/0.9.0-review-addendum.md) and
-[0.9.1 plan](../ai-context/0.9.1-implementation-plan.md) are the canonical implementation plans
-for the 2026-07-15 review findings.
+Release scope is tracked separately from this implementation reference in
+[`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md) (the current release) and the
+[`0.9.1-hardening-decisions.md`](proposals/0.9.1-hardening-decisions.md) record; the
+[CHANGELOG](../CHANGELOG.md) is the shipped history. Detailed day-to-day planning notes are kept
+maintainer-internal and are not part of the published docs.
 
 ## Documents
 
 | Document | Covers |
 |---|---|
 | [getting-started.md](getting-started.md) | **Start here if you're building an app.** Run an agent, connect a client, the local↔remote swap, lifecycle & errors |
+| [migrate-to-0.10.0.md](migrate-to-0.10.0.md) | Upgrade a Maven Central consumer to 0.10.0; `authToken` provider change and platform compatibility |
 | [architecture](#architecture) (below) | The layered model, module map, the seams, glossary |
-| [agent-proxy-spec.md](agent-proxy-spec.md) | **The normative conformance spec** — what an independent agent/proxy (or client) MUST do to interoperate. The *contract*, language-agnostic; the others explain *why*. |
+| [agent-conformance-spec.md](agent-conformance-spec.md) | **The normative conformance spec** — what an independent agent/proxy (or client) MUST do to interoperate. The *contract*, language-agnostic; the others explain *why*. |
 | [protocol.md](protocol.md) | The wire contract: every frame/op/result/event type, the codec, serialization rules |
 | [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
 | [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
-| [proposals/0.9.1-progress-status.md](proposals/0.9.1-progress-status.md) | 0.9.1 implementation handoff: completed slices, verification, remaining work, and deferrals |
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
-| [proposals/0.10.0-pr1-progress-status.md](proposals/0.10.0-pr1-progress-status.md) | 0.10.0 implementation handoff: PR0/PR1 landed, PR2–PR4 in progress, verification and remaining work |
+| [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) | 0.10.0 implementation handoff: PR0–PR7 landed, verification and remaining hardware/publication work |
 | [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
 | [simulation.md](simulation.md) | Versioned radio-less JVM agent profile, CLI use, supported behaviors, and validation limits |
 | [rust-agent-container.md](rust-agent-container.md) | PR5 local Rust-agent Docker image, smoke checks, and the supported-host boundary |
+| [release-candidate.md](release-candidate.md) | 0.10.0 version source, artifact inventory, and pre-tag approval checklist |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
@@ -36,6 +37,7 @@ for the 2026-07-15 review findings.
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
+| [pr8-validation-plan.md](pr8-validation-plan.md) | The PR8 hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
 | [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
 | [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 
@@ -50,7 +52,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/agent-side-identifier-translation.md](proposals/agent-side-identifier-translation.md) | Agent translates device handles into each client's native Kable `Identifier` format (reverse map for op routing); hybrid default + strict dashboard toggle | **Implemented in 0.8.0** (Kotlin agent + `agent-rs`) |
 | [proposals/0.9.1-hardening-decisions.md](proposals/0.9.1-hardening-decisions.md) | Security, lifecycle, incompatibility, and overload decisions | **Accepted for 0.9.1** |
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | Validated CI/deployment release without changing the client programming model | **Accepted for 0.10.0** |
-| [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Planned for 0.10.0** |
+| [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
 
 ---

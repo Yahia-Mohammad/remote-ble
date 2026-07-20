@@ -1,7 +1,8 @@
 # Build from the repository root so the image carries the release LICENSE/NOTICE:
 #   docker build -f agent-rs/Dockerfile -t remoteble-agent-rs:local .
-# Rust 1.85 is the first stable compiler for the Cargo edition used by this crate.
-FROM rust:1.85-bookworm AS builder
+# let-chains (src/ble/btleplug_impl.rs) require a newer stable compiler than the 2024
+# edition's minimum of 1.85; pinned to match the toolchain CI already builds against.
+FROM rust:1.97.1-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libdbus-1-dev pkg-config \

@@ -7,6 +7,15 @@ plugins {
     id("org.jetbrains.compose") version "1.11.1"
 }
 
+// Benign KLIB "same unique_name found in more than one library" warnings (savedstate /
+// lifecycle-common / lifecycle-runtime) come from *inside* Compose Multiplatform 1.11.1: its
+// `org.jetbrains.compose.ui:ui` transitively pulls both Google's `androidx.savedstate` /
+// `androidx.lifecycle` KMP artifacts and JetBrains' `org.jetbrains.androidx.*` fork during CMP's
+// upstream migration. This module declares no lifecycle/savedstate dependency of its own, so there
+// is no clean project-side fix; forcing an exclusion of either side risks breaking Compose. The
+// build is green and this module ships no published artifact — the warnings resolve when CMP
+// finishes migrating to Google's KMP androidx. Do not chase them here.
+
 kotlin {
     jvmToolchain(libs.versions.jvm.toolchain.get().toInt())
 

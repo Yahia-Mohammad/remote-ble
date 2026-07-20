@@ -47,7 +47,7 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: temurin
@@ -60,11 +60,17 @@ jobs:
       - name: Build fat JAR
         run: ./gradlew :agent:jvmFatJar --no-configuration-cache
 
+      - name: Generate SHA-256 checksum
+        run: |
+          for artifact in agent/build/libs/remoteble-agent-*-all.jar; do
+            sha256sum "$artifact" > "$artifact.sha256"
+          done
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: agent/build/libs/remoteble-agent-*-all.jar
+          files: agent/build/libs/remoteble-agent-*-all.jar*
 
   agent-rs-linux:
     needs: release-version
@@ -102,12 +108,15 @@ jobs:
           mkdir -p dist
           cp target/release/agent-rs dist/remoteble-agent-rs-linux-x86_64
           chmod +x dist/remoteble-agent-rs-linux-x86_64
+          sha256sum dist/remoteble-agent-rs-linux-x86_64 > dist/remoteble-agent-rs-linux-x86_64.sha256
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: agent-rs/dist/remoteble-agent-rs-linux-x86_64
+          files: |
+            agent-rs/dist/remoteble-agent-rs-linux-x86_64
+            agent-rs/dist/remoteble-agent-rs-linux-x86_64.sha256
 
   agent-rs-linux-arm64:
     needs: release-version
@@ -148,12 +157,15 @@ jobs:
           mkdir -p dist
           cp target/aarch64-unknown-linux-gnu/release/agent-rs dist/remoteble-agent-rs-linux-aarch64
           chmod +x dist/remoteble-agent-rs-linux-aarch64
+          sha256sum dist/remoteble-agent-rs-linux-aarch64 > dist/remoteble-agent-rs-linux-aarch64.sha256
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: agent-rs/dist/remoteble-agent-rs-linux-aarch64
+          files: |
+            agent-rs/dist/remoteble-agent-rs-linux-aarch64
+            agent-rs/dist/remoteble-agent-rs-linux-aarch64.sha256
 
   agent-rs-windows:
     needs: release-version
@@ -187,9 +199,14 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/agent-rs.exe dist/remoteble-agent-rs-windows-x86_64.exe
+          $artifact = "dist/remoteble-agent-rs-windows-x86_64.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $artifact).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $artifact)" | Out-File -NoNewline -Encoding ascii "$artifact.sha256"
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: agent-rs/dist/remoteble-agent-rs-windows-x86_64.exe
+          files: |
+            agent-rs/dist/remoteble-agent-rs-windows-x86_64.exe
+            agent-rs/dist/remoteble-agent-rs-windows-x86_64.exe.sha256

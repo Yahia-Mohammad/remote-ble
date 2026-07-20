@@ -3,8 +3,8 @@
 > Verification of the Kotlin agent (`:agent`) vs the Rust agent (`agent-rs`) after the
 > 0.9.0 logging implementation. This is a point-in-time feature inventory, not an overall parity
 > verdict. The 2026-07-15 review found additional runtime differences and assigned their release
-> disposition in the [0.9.0 addendum](../ai-context/0.9.0-review-addendum.md) and
-> [0.9.1 plan](../ai-context/0.9.1-implementation-plan.md).
+> disposition in the accepted
+> [`0.9.1-hardening-decisions.md`](proposals/0.9.1-hardening-decisions.md).
 
 ---
 
@@ -234,9 +234,7 @@ authorization in both agents and Rust differences in stream scoping, task lifeti
 ordering, observation teardown, MTU truthfulness, and scan filters. All of these are fixed and
 covered by regression tests in both agents as part of the 0.9.0 addendum (Kotlin two-client
 authorization suite; Rust `transport::server::tests` with a fake backend). Grace/liveness
-alignment and permanent executable parity evidence remain scheduled for 0.9.1. See the
-[verification verdict](../ai-context/Sol-5.6-Findings/08-verification-verdict.md) for the original
-findings.
+alignment and permanent executable parity evidence remain scheduled for 0.9.1.
 
 ### Symmetric logging differences (by design)
 - Kotlin-only: pluggable sinks, `RateLimitedLog`

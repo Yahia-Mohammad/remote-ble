@@ -1,6 +1,7 @@
 # Rust agent container — Linux real-radio image
 
-**Status:** approved 0.10.0 design target; implementation pending
+**Status:** implemented in 0.10.0 (Dockerfile + multi-arch workflow landed; Ubuntu/Pi host validation
+is release-gated — see [../release-candidate.md](../release-candidate.md))
 
 **Artifact:** `ghcr.io/yahia-mohammad/remoteble-agent-rs:<version>`
 

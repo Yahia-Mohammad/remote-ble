@@ -52,14 +52,22 @@ client-sdk/src/
 ./gradlew build                      # all modules + targets compile; JVM tests run
 ./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (39 tests)
 ./gradlew :client-sdk:jvmTest        # session / transport / kable / error-path / identifier suites
-(cd agent-rs && cargo test)          # native Rust agent: 40 unit + cross-language interop tests
+./gradlew conformanceTest            # named cross-agent conformance gate
+(cd agent-rs && cargo test)          # native Rust agent: 74 unit + cross-language interop tests
 agent/run-agent.sh 8080                                       # run the real macOS JVM agent (NOT :agent:jvmRun)
+./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json" # deterministic no-radio JVM agent
 agent-rs/run-agent-rs.sh 8080                                 # run the native Rust agent on macOS (Linux/Win: cargo run --bin agent-rs)
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080              # …with bearer auth
 REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080 # …with protected dashboard
 ./gradlew :e2e-runner:scanRun --args "ws://localhost:8080/agent 15"   # radio-less scan smoke test
 ./gradlew :android-client:assembleDebug                      # build the emulator client APK
 ```
+
+For the 0.10.0 release-candidate consumer gate, publish the three modules to Maven local and compile
+the independent fixture: `./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal
+:client-sdk:publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false`, then
+`./gradlew -p consumer-tests/jvm clean compileKotlin -PremoteBleVersion=0.10.0`. The full gate
+inventory and intentional hardware boundaries are in [release-gates.md](release-gates.md).
 
 > `agent/run-agent.sh` exists because a bare `:agent:jvmRun` is killed by macOS TCC on first
 > CoreBluetooth use — see [agent.md](agent.md#the-runnable-agent-jvm--main) for the full story.

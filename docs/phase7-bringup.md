@@ -191,4 +191,6 @@ validation bundle:
    commit/tag before starting the Maven Central publication workflow.
 
 These requirements are intentionally deferred from 0.9.1; they are mandatory release evidence for
-0.10.0.
+0.10.0. The full checklist, grouped by which physical rig each test case needs (real-radio phones,
+iOS agent, TLS reverse proxy, Ubuntu/Pi container hosts), is
+[`pr8-validation-plan.md`](pr8-validation-plan.md).

@@ -30,7 +30,7 @@ route, or understand upstream topology.
 AgentProxy is therefore a deployment component, not a client SDK feature. Its purpose is transparent
 radio aggregation for installations that accept proxy-defined routing policy.
 
-Naming note: [agent-proxy-spec.md](../agent-proxy-spec.md) is the existing language-neutral wire
+Naming note: [agent-conformance-spec.md](../agent-conformance-spec.md) is the existing language-neutral wire
 specification for any compatible client/agent. This proposal's `AgentProxy` is one concrete future
 service that implements both sides of that contract.
 

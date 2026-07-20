@@ -1,4 +1,4 @@
-# Rust agent container (PR5 local image)
+# Rust agent container (0.10.0 PR5–PR6 delivery)
 
 The local image is built from the repository root so it can include the release license and notice:
 

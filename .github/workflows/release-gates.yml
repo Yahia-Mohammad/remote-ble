@@ -134,7 +134,10 @@ jobs:
       - name: Scan tracked history and working tree
         uses: docker://ghcr.io/gitleaks/gitleaks:v8.24.3
         with:
-          args: git --redact --verbose --report-format sarif --report-path gitleaks-results.sarif .
+          entrypoint: sh
+          args: >-
+            -c "git config --global --add safe.directory /github/workspace &&
+            gitleaks git --redact --verbose --report-format sarif --report-path gitleaks-results.sarif ."
       - name: Archive secret-scan report
         if: always()
         uses: actions/upload-artifact@v7

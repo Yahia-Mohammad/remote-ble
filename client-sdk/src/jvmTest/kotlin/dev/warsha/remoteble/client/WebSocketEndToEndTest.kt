@@ -253,6 +253,14 @@ class WebSocketEndToEndTest {
             val first = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent") {
                 header(CLIENT_ID_HEADER, "shared-test-client")
             }
+            // The client-visible handshake completes as soon as the 101 response lands, which
+            // Ktor writes before the route body — where tryAcquire lives — ever runs. Opening
+            // `second` right after that risks racing `first`'s own registration, so force a real
+            // round-trip on `first` first: a reply can only arrive once the server has passed the
+            // duplicate-session check and entered backend.serve for it.
+            first.send(Frame.Binary(true, CborProtocolCodec().encode(ClientHello())))
+            withTimeout(5.seconds) { first.incoming.receive() }
+
             val second = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent") {
                 header(CLIENT_ID_HEADER, "shared-test-client")
             }

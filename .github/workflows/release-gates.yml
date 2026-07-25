@@ -132,9 +132,16 @@ jobs:
         with:
           fetch-depth: 0
       - name: Scan tracked history and working tree
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.24.3
+        with:
+          args: git --redact --verbose --report-format sarif --report-path gitleaks-results.sarif .
+      - name: Archive secret-scan report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitleaks-results
+          path: gitleaks-results.sarif
+          if-no-files-found: ignore
 
   dependency-review:
     name: Dependency review

@@ -84,6 +84,40 @@ protocol version: **1**.
 
 ### Fixed
 
+- **A stalled ATT transaction no longer wedges an agent's write chain.** Both reference agents now
+  bound a single characteristic read/write at 10s (below the client SDK's 15s default op timeout)
+  and report `TIMEOUT` when it expires, instead of awaiting the backend indefinitely. Confirmed on
+  hardware: btleplug on macOS never delivers the completion for a write-with-response that the
+  peripheral answers with an ATT error — the call neither returns nor throws. Because both agents
+  serialize same-device writes, that stalled write never released its ordering turn, so every
+  later write to that device blocked behind it, and in the Rust agent it also held one of the 64
+  in-flight op permits permanently; nothing recovered it, since the client's timeout is
+  client-side only and the protocol has no cancel op. Expiry is reported as `TIMEOUT` rather than
+  `WRITE_FAILED` because a transaction that never completed has an unknown outcome — the
+  peripheral may have applied it — and `Op.Write` is non-idempotent, so auto-retry stays off
+  either way. `connect` is deliberately left unbounded (legitimately long-running).
+
+  The live E2E step "Write-with-response error surfaces WRITE_FAILED (F)" is consequently recorded
+  as a known failure (XFAIL) on btleplug-backed agents rather than being relaxed to accept
+  `TIMEOUT` — the expectation is still enforced on backends that can satisfy it, and an XPASS now
+  signals the gate is stale. Set `REMOTE_BLE_E2E_BTLEPLUG=false` when running against the Android
+  or Apple agent, whose native Kable backends are expected to deliver ATT errors correctly but are
+  unverified on hardware.
+
+- **Writes on a connection that has stopped completing them now fail immediately**
+  (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, Kotlin agent). Follow-up hardware verification of
+  the bound above found the gap has a second symptom: after one write-with-response is answered by
+  an ATT error, btleplug delivers no further write completions for that peripheral *at all* — the
+  peripheral's own log shows later writes arriving and being accepted with error injection already
+  off, yet nothing returns. Reads keep working and a fresh connection writes normally (measured at
+  66ms), so re-establishing the connection is the only recovery. Without this, every later write
+  costs a full 10s before failing. The short-circuit reports the same `TIMEOUT` error the wait
+  would have produced — it changes latency, not semantics — and the switch exists so the workaround
+  can be turned off deliberately rather than the agent silently special-casing a backend defect.
+  The setting is printed at startup. The E2E step "a failed write never poisons the session" is
+  gated as XFAIL on btleplug-backed agents for the same reason as the step above it: no agent-side
+  handling can make it pass while the backend behaves this way.
+
 - **Cross-client device authorization and release-surface hardening.** Both reference agents now
   require the lease-owning client to hold a live connection before any device-bearing operation can
   reach the backend; a scanned handle is no longer sufficient to read, write, observe, configure,

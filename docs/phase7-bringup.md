@@ -110,20 +110,40 @@ again) plus the existing notify prompt:
 • Write (without response) ... PASS
 • Negotiated MTU write length ... PASS — 244 bytes
   >>> Now toggle 'Force write error' ON on the phone, then press Enter <<<
-• Write-with-response error surfaces WRITE_FAILED (F) ... PASS — WRITE_FAILED as expected
+• Write-with-response error surfaces WRITE_FAILED (F) ... XFAIL (known): expected WRITE_FAILED, got AgentException (TIMEOUT) — btleplug does not deliver ATT errors for write-with-response; the agent reports TIMEOUT instead
 • WWR still returns Ok despite the same peripheral-side reject (inherent BLE limit, not a bug) ... PASS — Ok, as expected
   >>> Now toggle 'Force write error' OFF on the phone, then press Enter <<<
 • Write-with-response succeeds again — a failed write never poisons the session ... PASS
   >>> Now press 'Notify (counter +1)' on the phone TWICE (within 60s) <<<
 • Observe 2 notifications, no miss/dup ... PASS — 2 received: 01 02
 • Disconnect ... PASS
-RESULT: 14 passed, 0 failed
+RESULT: 13 passed, 0 failed, 1 known-failing
 ```
 
 When prompted: change the readable value, toggle the write-error control on then off, and press
 **Notify** twice. A green run proves the headline promise on real hardware — app code written against
 Kable's `Peripheral` ran unchanged against a remote agent — **and** that read/write-with-response
 completion is exact while WWR/notify remain best-effort by BLE design, not by implementation gap.
+
+### The write-error step is a known failure on btleplug-backed agents
+
+Confirmed on hardware (Rig A, 2026-07-27) against both desktop agents: btleplug on macOS never
+delivers the completion for a write-with-response that the peripheral answers with an ATT error —
+the native call neither returns nor throws, so no agent above it can report `WRITE_FAILED`. The
+agents bound the transaction (`EngineBleBackend.GATT_OP_TIMEOUT`, 10s) and report `TIMEOUT`, which
+is honest but is not the documented expectation, so the step is recorded as **XFAIL** and the run
+still exits zero. The expectation itself is deliberately unchanged — relaxing it to accept `TIMEOUT`
+would erase the distinction between "the radio rejected it" and "no answer, outcome unknown".
+
+The runner assumes a btleplug-backed agent, since both desktop reference agents are. When pointing
+it at the Android or Apple agent — whose native Kable backends are expected to deliver ATT errors
+properly, though this is **unverified on hardware** as of 2026-07-27 — declare it:
+
+```sh
+REMOTE_BLE_E2E_BTLEPLUG=false REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080/agent"
+```
+
+If the step ever reports **XPASS**, the gap is fixed on that backend and the gate should be removed.
 
 ## What to shake out (EngineBleBackend)
 

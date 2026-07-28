@@ -42,6 +42,16 @@ suite has grown substantially — this is the first real-radio run against that 
    bonded connection, then a transport blip (toggle Wi-Fi / kill `adb forward`); confirm the
    session resumes and replayed ops route correctly. Separately confirm the documented residual:
    after an **agent restart** (not just a transport blip), the client rescans rather than resuming.
+   **Scope correction (2026-07-28, see [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) case 5):** the
+   *rewrite* half of this is unreachable on Rig A regardless of client platform.
+   `HandleTranslator.needsRewrite` only synthesizes for a `UUID`/`MAC_ADDRESS` client format that
+   differs from the agent's own; Rig A's agent is macOS/Kable (native `UUID`), so a `UUID` client
+   (JVM, iOS) is an identity match and `STRING` (Android) is never rewritten at all — every client
+   this repo ships hits a no-rewrite path against this agent. Genuine rewriting needs an agent whose
+   native format is `MAC_ADDRESS` (Windows) or `BLUEZ_JSON` (Linux), i.e. Rig D or a Windows host.
+   What Rig A *can* prove — reconcile/resume with the capability negotiated and a genuinely
+   cross-platform client (`fmt=STRING`), across both a transport blip and an agent restart — is
+   still real evidence, just not the rewrite-survives-reconcile property this case implies.
 6. **Write-without-response throughput + ordering** — `ThroughputMain` baseline, then
    `RemotePeripheral.writeWithoutResponseBurst` with `window > 1`; confirm a measured improvement,
    submission order preserved in the peripheral's write log, and no regression to with-response

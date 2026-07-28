@@ -36,6 +36,14 @@ data class AgentConfig(
     val leaseGrace: Duration = 10.seconds,
     val transportGrace: Duration = 10.seconds,
     val livenessProbeInterval: Duration = 15.seconds,
+    /**
+     * Whether a device whose writes have stopped completing rejects further writes immediately
+     * instead of waiting out `EngineBleBackend.GATT_OP_TIMEOUT` on each one. Same error either way
+     * — this changes latency, not semantics. See `EngineBleBackend.markWriteDegraded` for the
+     * backend defect it works around, and turn it off (`REMOTE_BLE_WRITE_FAIL_FAST=false`) to run
+     * without the workaround.
+     */
+    val failFastOnDegradedWrites: Boolean = true,
     /** Non-null only for the JVM's explicit radio-less simulation mode. */
     val simulationProfile: SimulationProfile? = null,
 ) {
@@ -86,7 +94,8 @@ fun agentModule(config: AgentConfig): Module = module {
     }
     single<BleBackend> {
         val scope = get<CoroutineScope>(qualifier = org.koin.core.qualifier.named("agent"))
-        config.simulationProfile?.let { SimulatedBleBackend(it, scope) } ?: EngineBleBackend(scope = scope)
+        config.simulationProfile?.let { SimulatedBleBackend(it, scope) }
+            ?: EngineBleBackend(scope = scope, failFastOnDegradedWrites = config.failFastOnDegradedWrites)
     }
     single<AgentBackend> {
         BleAgentBackend(

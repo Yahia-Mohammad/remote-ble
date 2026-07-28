@@ -4,13 +4,22 @@ import com.juul.kable.Characteristic
 import com.juul.kable.DiscoveredCharacteristic
 import com.juul.kable.DiscoveredDescriptor
 import com.juul.kable.ExperimentalApi
+import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.Capabilities
+import dev.warsha.remoteble.protocol.DeviceHandle
+import dev.warsha.remoteble.protocol.ErrorKind
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.runTest
 
 /**
  * JVM-specific guard for the platform-conditional `rssi` capability. Kable's JVM/btleplug backend
@@ -67,5 +76,140 @@ class EngineBleBackendJvmTest {
         val node = with(EngineBleBackend()) { fakeChar.toNode() }
 
         assertEquals(0x12, node.properties, "property bits must survive the DiscoveredCharacteristic -> CharNode mapping")
+    }
+
+    /**
+     * Confirmed on hardware (Rig A, 2026-07-27): a peripheral-side ATT error on a
+     * write-with-response is never delivered by btleplug on macOS — `peripheral.write` neither
+     * returns nor throws, it simply parks forever. Unbounded, that stalls the agent's command
+     * coroutine indefinitely, and because `BleAgent` chains same-device writes, the stalled write
+     * never completes its turn and every later write to that device blocks behind it. Nothing
+     * cancels it (the client's timeout is client-side; there is no cancel op), so the bound here is
+     * the only thing that lets that chain drain.
+     *
+     * Virtual time: `runTest` advances the clock, so the 10s bound costs no wall-clock time.
+     */
+    @Test
+    fun gattOpThatNeverCompletesIsReportedAsTimeoutRatherThanHanging() = runTest {
+        val error = assertFailsWith<AgentException> {
+            EngineBleBackend().gattOp(ErrorKind.WRITE_FAILED, "write") { awaitCancellation() }
+        }.error
+
+        // TIMEOUT, deliberately *not* the WRITE_FAILED passed as the failure kind: a transaction
+        // that never completed has an unknown outcome — the peripheral may have applied it — so
+        // "the radio rejected the write" would claim more than is known.
+        assertEquals(ErrorKind.TIMEOUT, error.kind)
+        assertTrue(
+            error.message?.contains("write") == true,
+            "the message should name the operation that stalled, got: ${error.message}",
+        )
+    }
+
+    @Test
+    fun gattOpStillMapsARealFailureToItsOwnErrorKind() = runTest {
+        // The bound must not swallow the normal path: a backend call that *does* fail keeps
+        // reporting the caller's kind, so a genuine rejection is still WRITE_FAILED, not TIMEOUT.
+        val error = assertFailsWith<AgentException> {
+            EngineBleBackend().gattOp(ErrorKind.WRITE_FAILED, "write") {
+                throw IllegalStateException("peripheral said no")
+            }
+        }.error
+
+        assertEquals(ErrorKind.WRITE_FAILED, error.kind)
+        assertEquals("peripheral said no", error.message)
+    }
+
+    @Test
+    fun gattOpReturnsTheValueWhenTheOperationCompletes() = runTest {
+        val value = EngineBleBackend().gattOp(ErrorKind.READ_FAILED, "read") { byteArrayOf(0x07) }
+        assertEquals(0x07, value.single())
+    }
+
+    @Test
+    fun gattOpLetsCancellationPropagateRatherThanMappingIt() = runTest {
+        // Structured cancellation must survive the bound: mapping a CancellationException to an
+        // ErrorKind would turn a cancelled scope into a bogus BLE error reply.
+        assertFailsWith<CancellationException> {
+            EngineBleBackend().gattOp(ErrorKind.READ_FAILED, "read") {
+                throw CancellationException("scope cancelled")
+            }
+        }
+    }
+
+    // --- degraded-write fail-fast -------------------------------------------------------------
+    // The condition itself (btleplug dropping write completions after an ATT error) reproduces only
+    // on hardware; what is testable here is the gate — that the state is tracked, that the switch
+    // actually switches, and that the short-circuit reports the same kind as waiting would.
+
+    @Test
+    fun writesAreNotDegradedUntilOneFailsToComplete() {
+        assertNull(
+            EngineBleBackend().degradedWriteRejection(DEVICE, withResponse = true),
+            "a device with no stalled write must not be short-circuited",
+        )
+    }
+
+    @Test
+    fun aStalledWriteMarksTheConnectionAndShortCircuitsLaterWithResponseWrites() {
+        val backend = EngineBleBackend()
+        backend.markWriteDegraded(DEVICE)
+
+        assertTrue(backend.isWriteDegraded(DEVICE))
+        val rejection = assertNotNull(backend.degradedWriteRejection(DEVICE, withResponse = true))
+        // Same kind the caller would have got by waiting out GATT_OP_TIMEOUT — the point of the
+        // short-circuit is latency, not a different outcome.
+        assertEquals(ErrorKind.TIMEOUT, rejection.kind)
+        assertTrue(
+            rejection.message?.contains("reconnect") == true,
+            "the message should tell the operator what recovers it, got: ${rejection.message}",
+        )
+    }
+
+    /**
+     * Regression test (Rig A, 2026-07-28): the gate used to apply to every write regardless of
+     * type, which made a degraded connection reject WriteWithoutResponse too — breaking the
+     * documented "WWR still returns Ok" guarantee, since WithoutResponse never awaits the ATT
+     * response that actually wedges (see [degradedWriteRejection]'s doc). A degraded device must
+     * still let WithoutResponse writes through.
+     */
+    @Test
+    fun aDegradedDeviceStillLetsWriteWithoutResponseThrough() {
+        val backend = EngineBleBackend()
+        backend.markWriteDegraded(DEVICE)
+
+        assertTrue(backend.isWriteDegraded(DEVICE))
+        assertNull(
+            backend.degradedWriteRejection(DEVICE, withResponse = false),
+            "WriteWithoutResponse never awaits the ATT response that degrades, so it must not be short-circuited",
+        )
+    }
+
+    @Test
+    fun degradationIsPerDeviceNotAgentWide() {
+        val backend = EngineBleBackend()
+        backend.markWriteDegraded(DEVICE)
+
+        assertNull(
+            backend.degradedWriteRejection(DeviceHandle("other-device"), withResponse = true),
+            "one peripheral's stalled writes must not short-circuit a different peripheral",
+        )
+    }
+
+    @Test
+    fun disablingFailFastKeepsTheUnmodifiedBehaviourEvenOnceDegraded() {
+        // The switch exists so the workaround can be turned off — if btleplug starts delivering ATT
+        // errors, or if the short-circuit ever misfires. Off means writes go to the radio as before.
+        val backend = EngineBleBackend(failFastOnDegradedWrites = false)
+        backend.markWriteDegraded(DEVICE)
+
+        assertTrue(backend.isWriteDegraded(DEVICE), "the state is still tracked for logging")
+        assertNull(
+            backend.degradedWriteRejection(DEVICE, withResponse = true),
+            "with fail-fast off, a degraded device must still attempt the write",
+        )
+    }
+
+    private companion object {
+        val DEVICE = DeviceHandle("11111111-2222-3333-4444-555555555555")
     }
 }

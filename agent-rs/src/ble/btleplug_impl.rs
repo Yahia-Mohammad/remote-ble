@@ -6,7 +6,7 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures_util::stream::StreamExt;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -40,11 +40,88 @@ pub struct BtleplugBackend {
     /// addresses mint a fresh key on every rotation) and identity never bleeds from one scan
     /// into the next. This matches the KMP agent, whose coalescer is per-scan.
     scan_identity: Arc<Mutex<HashMap<String, ScanIdentity>>>,
+    /// Tracks devices whose write-with-response completions have stopped arriving. Mirrors
+    /// `EngineBleBackend.writeDegraded`/`failFastOnDegradedWrites` in the Kotlin agent — see
+    /// [DegradedWrites] for the defect this works around.
+    write_degraded: DegradedWrites,
 }
 
 /// Last-known `(local name, service UUIDs)` for a device within a scan session, used to
 /// backfill sparse advertisement packets (see [coalesce_identity]).
 type ScanIdentity = (Option<String>, Vec<String>);
+
+/// Tracks per-device write-with-response degradation and the fail-fast short-circuit.
+///
+/// Confirmed on hardware (Rig A, 2026-07-28): once btleplug has had one write-with-response
+/// answered by a peripheral-side ATT error, it stops delivering write completions for that
+/// peripheral for the rest of the connection — later writes reach the peripheral and are
+/// accepted, but no completion ever arrives. Reads are unaffected, and a *fresh* connection writes
+/// normally, so tearing the connection down is the only observed recovery. Without fail-fast,
+/// every subsequent write-with-response still costs a full [GATT_OP_TIMEOUT] before failing; this
+/// records the state so [DegradedWrites::rejection] can answer immediately instead.
+///
+/// Only ever applies to write-**with-response**: `WriteWithoutResponse` has no ATT response to
+/// await in the first place (btleplug hands it to the local controller and returns), so it can't
+/// be affected by this wedge and must not be short-circuited by it — see [DegradedWrites::rejection].
+///
+/// Split out from [BtleplugBackend] (which needs a live `Adapter`, so it isn't constructible in
+/// tests without hardware) so the gate itself is unit-testable headless.
+struct DegradedWrites {
+    fail_fast: bool,
+    degraded: Mutex<HashSet<String>>,
+}
+
+impl DegradedWrites {
+    fn new(fail_fast: bool) -> Self {
+        Self {
+            fail_fast,
+            degraded: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Records that `device`'s write-with-response completions have stopped arriving. A no-op
+    /// (not even a log) if it's already marked, so a burst of stalled writes to the same device
+    /// only logs once.
+    fn mark_degraded(&self, device: &str) {
+        let newly_degraded = self.degraded.lock().insert(device.to_string());
+        if newly_degraded {
+            tracing::warn!(
+                device,
+                fail_fast = self.fail_fast,
+                "write did not complete; treating this connection's writes as degraded until it is re-established"
+            );
+        }
+    }
+
+    /// A newly (re-)established connection is the one thing observed to clear this.
+    fn clear(&self, device: &str) {
+        self.degraded.lock().remove(device);
+    }
+
+    fn is_degraded(&self, device: &str) -> bool {
+        self.degraded.lock().contains(device)
+    }
+
+    /// The rejection a write-with-response should raise before touching the radio, or `None` to
+    /// proceed normally. Reports [ErrorKind::Timeout] — the same kind and therefore the same
+    /// client-visible outcome as letting [gatt_op] expire on this write, since this only changes
+    /// how long the failure takes, not what it means.
+    ///
+    /// `with_response = false` always returns `None`: see this struct's doc for why
+    /// WriteWithoutResponse can't be degraded by the defect this guards against.
+    fn rejection(&self, device: &str, with_response: bool) -> Option<AgentError> {
+        if !with_response || !self.fail_fast || !self.is_degraded(device) {
+            return None;
+        }
+        Some(AgentError::new(
+            ErrorKind::Timeout,
+            Some(format!(
+                "writes on this connection are not completing; reconnect the device \
+                 (set REMOTE_BLE_WRITE_FAIL_FAST=false to wait {GATT_OP_TIMEOUT:?} per write instead)"
+            )),
+        ))
+    }
+}
 
 struct Observation {
     device: DeviceHandle,
@@ -61,10 +138,28 @@ struct ScanSubscription {
 /// as dead.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a single ATT transaction (a characteristic read or write) may run before it is
+/// reported as [ErrorKind::Timeout].
+///
+/// btleplug can fail to *complete* a transaction rather than completing it with an error: on
+/// macOS a write-with-response that the peripheral answers with an ATT error never resolves and
+/// never yields an `Err`, so an unbounded await parks the command task forever. That is not just
+/// slow reporting — the transport chains same-device writes, and a write task that never finishes
+/// never drops its completion sender, so every later write to that device blocks behind it. It
+/// also holds one of the `MAX_INFLIGHT_OPS` permits for good, so enough hung writes starve every
+/// other op too. Nothing unwedges it on its own: the client's timeout is client-side only and the
+/// protocol has no cancel op.
+///
+/// Kept below the client SDK's 15s default op timeout so the client gets a real, explained error
+/// from the agent rather than expiring undiagnosed, while leaving far more room than a healthy
+/// GATT round-trip needs. Mirrors `EngineBleBackend.GATT_OP_TIMEOUT` in the Kotlin agent.
+const GATT_OP_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl BtleplugBackend {
     pub async fn new(
         registry: PeripheralRegistry,
         liveness_interval: Duration,
+        fail_fast_on_degraded_writes: bool,
     ) -> Result<Self, AgentError> {
         let manager = Manager::new().await.map_err(|e| {
             AgentError::new(
@@ -96,6 +191,7 @@ impl BtleplugBackend {
             connected,
             registry,
             scan_identity,
+            write_degraded: DegradedWrites::new(fail_fast_on_degraded_writes),
         };
         backend.spawn_event_listener();
         backend.spawn_liveness_prober(liveness_interval);
@@ -376,6 +472,35 @@ async fn probe_liveness(peripheral: &Peripheral) -> bool {
         .is_ok_and(|result| result.is_ok())
 }
 
+/// Bounds one ATT transaction by [GATT_OP_TIMEOUT], see that constant for why.
+///
+/// Expiry is reported as [ErrorKind::Timeout] rather than as the op's own failure kind
+/// (ReadFailed/WriteFailed): a transaction that never completes has an *unknown* outcome — the
+/// peripheral may have received and applied it — so claiming "the radio said no" would assert more
+/// than is known. Timeout is the honest "no answer" kind, and it stays retry-safe because writes
+/// are not idempotent, so a policy still won't blind-retry a possibly-applied write.
+///
+/// The inner `Result` is the operation's own, left for the caller to map to its failure kind.
+async fn gatt_op<T, E>(
+    op: &str,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<Result<T, E>, AgentError> {
+    match tokio::time::timeout(GATT_OP_TIMEOUT, future).await {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            tracing::warn!(
+                op,
+                ?GATT_OP_TIMEOUT,
+                "ATT transaction did not complete; reporting TIMEOUT"
+            );
+            Err(AgentError::new(
+                ErrorKind::Timeout,
+                Some(format!("{op} did not complete within {GATT_OP_TIMEOUT:?}")),
+            ))
+        }
+    }
+}
+
 /// Reports an unsolicited drop to the owning client and the registry, and stops tracking the
 /// device — shared by the adapter event listener and the active liveness prober, the two
 /// independent ways a drop can be noticed. A no-op if the device isn't tracked (e.g. an
@@ -496,6 +621,10 @@ impl BleBackend for BtleplugBackend {
             })?;
         }
 
+        // A newly (re-)established connection is the one thing observed to clear degraded
+        // writes (DegradedWrites' doc) — the prior wedge doesn't carry over.
+        self.write_degraded.clear(&device.value);
+
         // Track the owning client's channel so an unsolicited drop can be reported.
         self.connected
             .lock()
@@ -567,9 +696,8 @@ impl BleBackend for BtleplugBackend {
     ) -> Result<ResultPayload, AgentError> {
         let peripheral = self.find_peripheral(device).await?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
-        let bytes = peripheral
-            .read(&characteristic)
-            .await
+        let bytes = gatt_op("read", peripheral.read(&characteristic))
+            .await?
             .map_err(|e| AgentError::new(ErrorKind::ReadFailed, Some(e.to_string())))?;
         Ok(ResultPayload::Bytes { value: bytes })
     }
@@ -581,6 +709,10 @@ impl BleBackend for BtleplugBackend {
         value: &[u8],
         with_response: bool,
     ) -> Result<(), AgentError> {
+        if let Some(rejection) = self.write_degraded.rejection(&device.value, with_response) {
+            return Err(rejection);
+        }
+
         let peripheral = self.find_peripheral(device).await?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
         let write_type = if with_response {
@@ -588,10 +720,15 @@ impl BleBackend for BtleplugBackend {
         } else {
             btleplug::api::WriteType::WithoutResponse
         };
-        peripheral
-            .write(&characteristic, value, write_type)
-            .await
-            .map_err(|e| AgentError::new(ErrorKind::WriteFailed, Some(e.to_string())))
+        let result = gatt_op(
+            "write",
+            peripheral.write(&characteristic, value, write_type),
+        )
+        .await;
+        if with_response && matches!(result, Err(ref e) if e.kind == ErrorKind::Timeout) {
+            self.write_degraded.mark_degraded(&device.value);
+        }
+        result?.map_err(|e| AgentError::new(ErrorKind::WriteFailed, Some(e.to_string())))
     }
 
     async fn request_mtu(
@@ -743,12 +880,104 @@ fn scan_matches(filters: &[ScanFilter], advertisement: &AdvertisementDto) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::{coalesce_identity, scan_matches};
+    use super::{DegradedWrites, coalesce_identity, scan_matches};
     use crate::protocol::{
+        errors::ErrorKind,
         events::AdvertisementDto,
         op::{DeviceHandle, ScanFilter},
     };
     use std::collections::{BTreeMap, HashMap};
+
+    // --- degraded-write fail-fast ---------------------------------------------------------
+    // The condition itself (btleplug dropping write completions after an ATT error) reproduces
+    // only on hardware; what is testable here is the gate — that the state is tracked, that the
+    // switch actually switches, and that the short-circuit reports the same kind as waiting would.
+
+    const DEVICE: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn writes_are_not_degraded_until_one_fails_to_complete() {
+        let degraded = DegradedWrites::new(true);
+        assert!(
+            degraded.rejection(DEVICE, true).is_none(),
+            "a device with no stalled write must not be short-circuited"
+        );
+    }
+
+    #[test]
+    fn a_stalled_write_marks_the_connection_and_short_circuits_later_with_response_writes() {
+        let degraded = DegradedWrites::new(true);
+        degraded.mark_degraded(DEVICE);
+
+        assert!(degraded.is_degraded(DEVICE));
+        let rejection = degraded
+            .rejection(DEVICE, true)
+            .expect("a degraded device must short-circuit a with-response write");
+        // Same kind the caller would have got by waiting out GATT_OP_TIMEOUT — the point of the
+        // short-circuit is latency, not a different outcome.
+        assert_eq!(rejection.kind, ErrorKind::Timeout);
+        assert!(
+            rejection
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("reconnect")),
+            "the message should tell the operator what recovers it, got: {:?}",
+            rejection.message
+        );
+    }
+
+    /// Regression test (Rig A, 2026-07-28): a degraded connection must still let
+    /// WriteWithoutResponse through, since it never awaits the ATT response that actually
+    /// wedges (see [DegradedWrites]'s doc).
+    #[test]
+    fn a_degraded_device_still_lets_write_without_response_through() {
+        let degraded = DegradedWrites::new(true);
+        degraded.mark_degraded(DEVICE);
+
+        assert!(degraded.is_degraded(DEVICE));
+        assert!(
+            degraded.rejection(DEVICE, false).is_none(),
+            "WriteWithoutResponse never awaits the ATT response that degrades, so it must not be short-circuited"
+        );
+    }
+
+    #[test]
+    fn degradation_is_per_device_not_agent_wide() {
+        let degraded = DegradedWrites::new(true);
+        degraded.mark_degraded(DEVICE);
+
+        assert!(
+            degraded.rejection("other-device", true).is_none(),
+            "one peripheral's stalled writes must not short-circuit a different peripheral"
+        );
+    }
+
+    #[test]
+    fn disabling_fail_fast_keeps_the_unmodified_behaviour_even_once_degraded() {
+        let degraded = DegradedWrites::new(false);
+        degraded.mark_degraded(DEVICE);
+
+        assert!(
+            degraded.is_degraded(DEVICE),
+            "the state is still tracked for logging"
+        );
+        assert!(
+            degraded.rejection(DEVICE, true).is_none(),
+            "with fail-fast off, a degraded device must still attempt the write"
+        );
+    }
+
+    #[test]
+    fn a_fresh_connection_clears_the_degraded_state() {
+        let degraded = DegradedWrites::new(true);
+        degraded.mark_degraded(DEVICE);
+        assert!(degraded.is_degraded(DEVICE));
+
+        degraded.clear(DEVICE);
+
+        assert!(!degraded.is_degraded(DEVICE));
+        assert!(degraded.rejection(DEVICE, true).is_none());
+    }
 
     #[test]
     fn retains_last_known_name_and_uuids_when_a_later_packet_omits_them() {

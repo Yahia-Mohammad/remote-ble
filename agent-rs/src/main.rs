@@ -64,6 +64,14 @@ struct Args {
     /// Log format: full (default) or json (for journald/Loki setups).
     #[arg(long, default_value = "full", env = "REMOTE_BLE_LOG_FORMAT")]
     log_format: String,
+
+    /// Short-circuit write-with-response on a connection whose writes have stopped completing,
+    /// instead of waiting out the full GATT op timeout on every subsequent write. Workaround for
+    /// a btleplug defect (confirmed on hardware, Rig A 2026-07-28): see
+    /// `ble::btleplug_impl::DegradedWrites`. Mirrors the Kotlin agent's
+    /// `REMOTE_BLE_WRITE_FAIL_FAST`; turn off to get the unmodified (wait-it-out) behavior back.
+    #[arg(long, default_value_t = true, env = "REMOTE_BLE_WRITE_FAIL_FAST")]
+    write_fail_fast: bool,
 }
 
 #[tokio::main]
@@ -104,11 +112,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_slots: 8,
     };
 
+    tracing::info!(
+        "Degraded-write fail-fast: {} (REMOTE_BLE_WRITE_FAIL_FAST)",
+        if args.write_fail_fast { "on" } else { "off" }
+    );
+
     let registry = PeripheralRegistry::new(lease_config);
     let ble_backend = Arc::new(
         BtleplugBackend::new(
             registry.clone(),
             Duration::from_millis(args.liveness_probe_ms),
+            args.write_fail_fast,
         )
         .await?,
     );

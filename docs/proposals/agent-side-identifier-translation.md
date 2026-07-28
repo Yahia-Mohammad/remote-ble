@@ -158,3 +158,48 @@ A gap found in review, fixed in both agents plus the client — **no wire change
   unaffected (identity fast-path; handles pass through and stay valid wherever the OS keeps them
   stable across agent restarts). Fixing the restart case would need the wire to carry real handles
   back to the client (rejected in this proposal's non-goals) or persistent agent state.
+
+## Upstream panic on unparseable handles — no client-side pre-screen (added 2026-07-28)
+
+Investigated while fixing the simulated agent handing clients unparseable handles. **No code change
+in this repo**; recorded so the finding isn't re-derived.
+
+- **The behaviour.** `deviceHandleToIdentifier("sim-hrm-1")` on a macOS-host JVM prints a Rust panic
+  to stderr (`panicked at src/peripheral_id.rs:21:53`) before uniffi's `catch_unwind` converts it to
+  `InternalException`, which the client's `try`/`catch` turns into `RemoteIdentifierUnavailableException`.
+  The Kotlin-facing behaviour is already correct — this is stderr noise on a *handled* path. One panic
+  is emitted **per failed call**, so a client iterating foreign-format advertisements sees it repeatedly.
+- **The unwrap is Kable's, not btleplug's.** The panic path `src/peripheral_id.rs` is *relative*, i.e.
+  the crate being compiled — btleplug appears in the same shipped dylib under absolute registry paths
+  (`.../btleplug-0.12.0/src/corebluetooth/...`). The source is `JuulLabs/kable` →
+  `kable-btleplug-ffi/src/peripheral_id.rs`, where the `#[uniffi::constructor]` does
+  `uuid::Uuid::parse_str(&value).unwrap()`. **All three** platform constructors do this — Linux is
+  `serde_json::from_str(...).unwrap()`, Windows is `BDAddr::from_str(...).unwrap()` — so the
+  `BLUEZ_JSON` path panics the same way, not just `UUID`. Still present in Kable 0.44.3; we pin 0.43.1.
+- **Worth reporting upstream.** Kable's FFI `Error` enum already carries `Uuid(String)` and
+  `InvalidBDAddr(String)`, and uniffi supports fallible constructors, so the fix is `-> Self` →
+  `-> Result<Self, Error>` plus `map_err` in three places — no new error type. That fixes it for every
+  caller and removes the stderr noise at the source.
+- **`panic = "abort"` risk is lower than it looks.** The dylib is prebuilt by JuulLabs and shipped
+  inside `kable-btleplug-ffi-*.jar` (darwin/linux/win32) — we never compile it. The crate is
+  `crate-type = ["cdylib"]` with no `[profile.release]` override, so it is default `panic = "unwind"`,
+  and switching would break uniffi's whole error model at once (its `rust_call` is built on
+  `catch_unwind`), not just this call site. Nothing we can defend against by screening one caller.
+- **Rejected: pre-screening the string in `deviceHandleToIdentifier`.** A *sound* screen is
+  constructible — deliberately a **superset** of what `Uuid::parse_str` accepts, so it only rejects
+  what Rust certainly rejects:
+  `^(\{[0-9a-fA-F-]{32,36}}|urn:uuid:[0-9a-fA-F-]{32,36}|[0-9a-fA-F-]{32,36})$`. Cross-validated
+  against the real parser over a 38-case corpus: 0 unsound, 21 pre-rejected (including `sim-hrm-1`,
+  MACs, bluez JSON, whitespace-padded UUIDs), 6 ambiguous falling through. Rejected anyway because:
+  it deletes nothing (the `try`/`catch` must stay for `BLUEZ_JSON`, Windows, and UUID-ish-but-invalid
+  input), it is incomplete by construction, it does nothing for the `panic = "abort"` concern, and
+  **the property cannot be enforced in CI** — `jvmTest` runs on `ubuntu-latest` and the only macOS job
+  in `build.yml` is the iOS klib compile check, so "this regex agrees with `Uuid::parse_str`" is
+  testable only on a dev Mac. Windows' `BDAddr` grammar is unverifiable from any host we have.
+- **The real fix is upstream of all of this:** `BleBackend.handleFormat` / format negotiation stops the
+  SDK feeding unparseable handles at the source.
+- **Measured grammar** (macOS host, Kable 0.43.1), for whoever revisits this. Accepted: hyphenated
+  (either case), braced-hyphenated, `urn:uuid:` + hyphenated (hex either case), simple 32-hex.
+  Rejected: braced-*simple*, `urn:uuid:` + simple, `urn:UUID:` (**the prefix must be lowercase** even
+  though the hex need not be), and any leading/trailing whitespace. A hand-rolled regex would plausibly
+  get this wrong in both directions.

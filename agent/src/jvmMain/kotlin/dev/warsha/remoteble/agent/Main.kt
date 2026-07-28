@@ -46,6 +46,15 @@ fun main(args: Array<String>) {
             ?: AgentConfig().transportGrace,
         livenessProbeInterval = System.getenv("REMOTE_BLE_LIVENESS_PROBE_MS")?.toLongOrNull()?.milliseconds
             ?: AgentConfig().livenessProbeInterval,
+        // Strict parse: a typo'd value fails startup rather than silently taking the default,
+        // because this switch changes an operator-visible failure mode.
+        failFastOnDegradedWrites = System.getenv("REMOTE_BLE_WRITE_FAIL_FAST")
+            ?.takeIf { it.isNotBlank() }
+            ?.let {
+                it.toBooleanStrictOrNull()
+                    ?: error("REMOTE_BLE_WRITE_FAIL_FAST must be 'true' or 'false', got '$it'")
+            }
+            ?: AgentConfig().failFastOnDegradedWrites,
         simulationProfile = simulationProfile,
     )
     val app = startKoin { modules(agentModule(config)) }
@@ -61,6 +70,14 @@ fun main(args: Array<String>) {
     Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, $radio)" }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
     Logger.info(LogTags.AGENT) { "Liveness probe: every ${config.livenessProbeInterval}" }
+    // Stated at startup because it is a workaround for a backend defect, not a neutral default:
+    // an operator should be able to see from the log which behaviour this process has.
+    if (simulationProfile == null) {
+        Logger.info(LogTags.AGENT) {
+            "Degraded-write fail-fast: ${if (config.failFastOnDegradedWrites) "on" else "off"} " +
+                "(REMOTE_BLE_WRITE_FAIL_FAST)"
+        }
+    }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
     Logger.info(LogTags.AGENT) { "Status dashboard: http://localhost:${config.port}/" }
 

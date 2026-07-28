@@ -3,6 +3,7 @@ package dev.warsha.remoteble.agent
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
+import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -64,6 +65,16 @@ class EngineBleBackend(
     // standalone scope so plain `EngineBleBackend()` (tests) works; the DI graph injects the shared
     // agent scope so the watchers are torn down with the process, not leaked.
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    /**
+     * Whether to short-circuit writes on a connection whose writes have stopped completing.
+     *
+     * This is a workaround for a backend defect, so it is a deliberate, operator-visible switch
+     * rather than silent special-casing: see [markWriteDegraded] for the defect and
+     * `REMOTE_BLE_WRITE_FAIL_FAST` for the control. Turn it off to get the unmodified behaviour
+     * back — in particular once the underlying backend delivers ATT errors properly, at which point
+     * the degraded state can no longer be entered anyway.
+     */
+    private val failFastOnDegradedWrites: Boolean = true,
 ) : BleBackend {
 
     override val capabilities: Set<String> = buildSet {
@@ -85,6 +96,15 @@ class EngineBleBackend(
     // this stays a synchronous lock rather than a suspend-only Mutex.
     private val lock = SynchronizedObject()
     private val peripherals = mutableMapOf<DeviceHandle, Peripheral>()
+
+    /**
+     * Devices whose writes have stopped completing — see [markWriteDegraded].
+     *
+     * Keyed by handle and cleared whenever the [Peripheral] is discarded ([disconnect]) or a fresh
+     * connection is established ([connect]), because a new connection is the only thing observed to
+     * clear the underlying condition.
+     */
+    private val writeDegraded = mutableSetOf<DeviceHandle>()
 
     // Native unsolicited-drop stream (see [connectionDrops]). DROP_OLDEST + a small buffer so a slow
     // or absent collector can never suspend the per-connection watcher that emits here; the polling
@@ -144,6 +164,9 @@ class EngineBleBackend(
     override suspend fun connect(device: DeviceHandle) {
         val peripheral = resolve(device)
         bleOp(ErrorKind.CONNECTION_FAILED) { peripheral.connect() }
+        // A newly established connection is the one thing observed to clear the degraded-write
+        // condition, so this is where the flag is dropped (see [markWriteDegraded]).
+        synchronized(lock) { writeDegraded.remove(device) }
         Logger.debug(LogTags.ENGINE) { "Kable connect ok [dev=${device.value}]" }
         scope.launch { watchForUnsolicitedDrop(device, peripheral) }
     }
@@ -169,7 +192,10 @@ class EngineBleBackend(
         AgentError(ErrorKind.DISCONNECTED, message = status?.let { it::class.simpleName } ?: "peer disconnected")
 
     override suspend fun disconnect(device: DeviceHandle) {
-        val peripheral = synchronized(lock) { peripherals.remove(device) } ?: return
+        val peripheral = synchronized(lock) {
+            writeDegraded.remove(device)
+            peripherals.remove(device)
+        } ?: return
         try {
             peripheral.disconnect()
             Logger.debug(LogTags.ENGINE) { "Kable disconnect ok [dev=${device.value}]" }
@@ -230,15 +256,82 @@ class EngineBleBackend(
     override suspend fun read(device: DeviceHandle, char: CharRef): ByteArray {
         val peripheral = connectedPeripheral(device)
         val characteristic = peripheral.findCharacteristic(char)
-        return bleOp(ErrorKind.READ_FAILED) { peripheral.read(characteristic) }
+        return gattOp(ErrorKind.READ_FAILED, "read") { peripheral.read(characteristic) }
     }
 
     override suspend fun write(device: DeviceHandle, char: CharRef, value: ByteArray, withResponse: Boolean) {
         val peripheral = connectedPeripheral(device)
         val characteristic = peripheral.findCharacteristic(char)
         val writeType = if (withResponse) WriteType.WithResponse else WriteType.WithoutResponse
-        bleOp(ErrorKind.WRITE_FAILED) { peripheral.write(characteristic, value, writeType) }
+
+        degradedWriteRejection(device, withResponse)?.let { throw AgentException(it) }
+
+        try {
+            gattOp(ErrorKind.WRITE_FAILED, "write") { peripheral.write(characteristic, value, writeType) }
+        } catch (e: AgentException) {
+            if (withResponse && e.error.kind == ErrorKind.TIMEOUT) markWriteDegraded(device)
+            throw e
+        }
     }
+
+    /**
+     * Records that this device's writes have stopped completing.
+     *
+     * Confirmed on hardware (Rig A, 2026-07-28): once btleplug has one write-with-response answered
+     * by an ATT error, it stops delivering write completions for that peripheral entirely — later
+     * writes reach the peripheral and are accepted, but no completion ever arrives. Reads are
+     * unaffected, and a *fresh* connection writes normally (measured at 66ms), so tearing the
+     * connection down is the only observed recovery.
+     *
+     * Without [failFastOnDegradedWrites] every subsequent write costs a full [GATT_OP_TIMEOUT]
+     * before failing, which is a poor failure mode for a connection that cannot succeed. Recording
+     * the state lets [write] answer immediately with the identical error instead.
+     *
+     * Note this only becomes reachable *because* [gattOp] bounds the operation — an unbounded hung
+     * write never returns to mark anything.
+     */
+    // internal (not private): EngineBleBackendJvmTest drives the degraded-write gate directly.
+    internal fun markWriteDegraded(device: DeviceHandle) {
+        val newlyDegraded = synchronized(lock) { writeDegraded.add(device) }
+        if (newlyDegraded) {
+            Logger.warn(LogTags.ENGINE) {
+                "write did not complete [dev=${device.value}]; treating this connection's writes as " +
+                    "degraded until it is re-established" +
+                    if (failFastOnDegradedWrites) "" else " (fail-fast disabled; later writes will still wait)"
+            }
+        }
+    }
+
+    /**
+     * The rejection [write] should raise before touching the radio, or `null` to proceed normally.
+     *
+     * Split out from [write] so the gate — including [failFastOnDegradedWrites] — is testable
+     * without a radio; [write] itself needs a live connection.
+     *
+     * Reports [ErrorKind.TIMEOUT], the *same* kind and therefore the same client-visible outcome as
+     * letting [gattOp] expire on this write. That is the point: this changes how long the failure
+     * takes, not what the failure means.
+     *
+     * Only applies to [withResponse] writes. The degraded state protects against a
+     * write-with-response completion that never arrives ([markWriteDegraded]'s doc);
+     * WriteWithoutResponse has no ATT response to await in the first place (resumes on local
+     * hand-off, see docs/phase7-bringup.md), so it can't be affected by that wedge and must not be
+     * short-circuited by it — doing so broke the documented "WWR still returns Ok" guarantee on
+     * real hardware (Rig A, 2026-07-28).
+     */
+    // internal (not private): EngineBleBackendJvmTest drives this directly.
+    internal fun degradedWriteRejection(device: DeviceHandle, withResponse: Boolean): AgentError? {
+        if (!withResponse || !failFastOnDegradedWrites || !isWriteDegraded(device)) return null
+        return AgentError(
+            ErrorKind.TIMEOUT,
+            message = "writes on this connection are not completing; reconnect the device " +
+                "(set REMOTE_BLE_WRITE_FAIL_FAST=false to wait $GATT_OP_TIMEOUT per write instead)",
+        )
+    }
+
+    // internal (not private): EngineBleBackendJvmTest drives the degraded-write gate directly.
+    internal fun isWriteDegraded(device: DeviceHandle): Boolean =
+        synchronized(lock) { device in writeDegraded }
 
     override fun observe(device: DeviceHandle, char: CharRef): Flow<ByteArray> {
         val peripheral = connectedPeripheral(device)
@@ -256,7 +349,7 @@ class EngineBleBackend(
     @OptIn(ExperimentalApi::class)
     override suspend fun readRssi(device: DeviceHandle): Int {
         val peripheral = connectedPeripheral(device)
-        val rssi = bleOp(ErrorKind.READ_FAILED) { peripheral.rssi() }
+        val rssi = gattOp(ErrorKind.READ_FAILED, "rssi") { peripheral.rssi() }
         // Defensive: Kable's btleplug backend returns Int.MIN_VALUE when it has no cached value. This
         // backend only advertises the `rssi` capability where rssi() is a real connected read
         // (agentRssiSupported()), so this guards a stub/edge case rather than a normal path — surface
@@ -286,13 +379,13 @@ class EngineBleBackend(
     override suspend fun readDescriptor(device: DeviceHandle, desc: DescRef): ByteArray {
         val peripheral = connectedPeripheral(device)
         val descriptor = peripheral.findDescriptor(desc)
-        return bleOp(ErrorKind.READ_FAILED) { peripheral.read(descriptor) }
+        return gattOp(ErrorKind.READ_FAILED, "readDescriptor") { peripheral.read(descriptor) }
     }
 
     override suspend fun writeDescriptor(device: DeviceHandle, desc: DescRef, value: ByteArray) {
         val peripheral = connectedPeripheral(device)
         val descriptor = peripheral.findDescriptor(desc)
-        bleOp(ErrorKind.WRITE_FAILED) { peripheral.write(descriptor, value) }
+        gattOp(ErrorKind.WRITE_FAILED, "writeDescriptor") { peripheral.write(descriptor, value) }
     }
 
     // --- helpers ---
@@ -306,6 +399,44 @@ class EngineBleBackend(
         } catch (t: Throwable) {
             bleError(failure, message = t.message)
         }
+
+    /**
+     * [bleOp] for a single ATT transaction (read/write of a characteristic or descriptor, RSSI),
+     * bounded by [GATT_OP_TIMEOUT].
+     *
+     * The bound exists because a native stack can fail to *complete* a transaction at all rather
+     * than completing it with an error: on btleplug/macOS a write-with-response that the peripheral
+     * answers with an ATT error never returns and never throws, so an unbounded [bleOp] parks its
+     * caller forever. That is not merely slow reporting — [BleAgent] chains same-device writes, and
+     * a write that never returns never completes its turn, so *every* later write to that device
+     * blocks behind it until the peripheral is disconnected. Nothing else unwedges it: the client's
+     * own timeout is client-side only, and the protocol has no cancel op, so the agent-side coroutine
+     * is never cancelled. Bounding here lets the `finally` that completes the write turn actually run.
+     *
+     * Deliberately NOT applied to [connect], which is legitimately long-running and has its own
+     * connection-level semantics.
+     *
+     * Expiry is reported as [ErrorKind.TIMEOUT], not as [failure]: when a transaction never
+     * completes, the operation's fate is *unknown* — the peripheral may well have received and
+     * applied it. Reporting e.g. WRITE_FAILED would assert "the radio said no", a stronger claim
+     * than the evidence supports (see the two ErrorKind groupings in `Errors.kt`). TIMEOUT is the
+     * honest "no answer" kind, and it keeps the retry decision safe: it is transient, but
+     * `Op.Write.isIdempotent` is false, so a policy still won't blind-retry a possibly-applied write.
+     */
+    // internal (not private): EngineBleBackendJvmTest exercises the timeout and the mapping
+    // directly, which needs no radio — a real hung write reproduces only on hardware.
+    internal suspend fun <T> gattOp(failure: ErrorKind, op: String, block: suspend () -> T): T {
+        val result = withTimeoutOrNull(GATT_OP_TIMEOUT) {
+            runCatching { block() }
+        } ?: run {
+            Logger.warn(LogTags.ENGINE) { "$op did not complete within $GATT_OP_TIMEOUT; reporting TIMEOUT" }
+            bleError(ErrorKind.TIMEOUT, message = "$op did not complete within $GATT_OP_TIMEOUT")
+        }
+        return result.getOrElse { t ->
+            if (t is CancellationException) throw t
+            bleError(failure, message = t.message)
+        }
+    }
 
     /** Resolves [device] and fails with [ErrorKind.NOT_CONNECTED] unless it is connected. */
     private fun connectedPeripheral(device: DeviceHandle): Peripheral =
@@ -358,6 +489,16 @@ class EngineBleBackend(
 
         /** How long [checkLiveness] waits for its probe read before treating the link as dead. */
         val LIVENESS_PROBE_TIMEOUT = 5.seconds
+
+        /**
+         * How long a single ATT transaction may run before [gattOp] reports [ErrorKind.TIMEOUT].
+         *
+         * Chosen to sit below `AgentSession.DEFAULT_TIMEOUT` (15s) so the client receives a real,
+         * explained error from the agent instead of expiring on its own with no diagnosis, while
+         * still leaving far more headroom than a healthy GATT round-trip needs (milliseconds to a
+         * few hundred ms, even on a slow link with a long connection interval).
+         */
+        val GATT_OP_TIMEOUT = 10.seconds
 
         /** Client Characteristic Configuration Descriptor UUID — the [checkLiveness] probe of last resort. */
         val CCCD_UUID = Uuid.parse("00002902-0000-1000-8000-00805f9b34fb")

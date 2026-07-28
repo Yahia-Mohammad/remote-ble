@@ -185,8 +185,11 @@ live WebSocket generation is permitted per `(principal, stable client id)` — a
 Desktop/headless agents **bind loopback by default**; a non-loopback bind requires at least one
 credential (or the explicit `REMOTE_BLE_ALLOW_INSECURE_LAN` development override, which logs a
 prominent unencrypted-service warning). The supported encrypted deployment is a TLS-terminating
-reverse proxy or VPN with a local-only upstream. The SDK owns no identity system beyond these
-bearer credentials; it is a hook, not a framework.
+reverse proxy or VPN with a local-only upstream — see
+[tls-proxy-recipe.md](tls-proxy-recipe.md) for the verified `wss://` recipe (Caddy config, CA
+handling, and the checks that prove the proxy forwards the bearer header and fails closed on an
+untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
+hook, not a framework.
 
 ---
 
@@ -691,6 +694,17 @@ hold for **both** unless noted.
   `discover_services()` on each tracked connection every `liveness_interval`
   (`REMOTE_BLE_LIVENESS_PROBE_MS` on both). Either path — native-reported or actively probed —
   feeds the same disconnect handling.
+- *Degraded-write fail-fast* (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, Kotlin agent). Confirmed
+  on hardware: once btleplug has had one write-with-response answered by an ATT error, it stops
+  delivering write completions for that peripheral for the rest of the connection — later writes
+  reach the peripheral and are accepted, but nothing ever comes back. Reads are unaffected, and only
+  re-establishing the connection recovers it. With this on, the first write to expire
+  `EngineBleBackend.GATT_OP_TIMEOUT` marks the connection and subsequent writes are rejected
+  immediately with the *same* `TIMEOUT` error they would have got by waiting — the change is
+  latency, not semantics. Set it to `false` to run without the workaround (the state is still
+  tracked and logged, writes just go to the radio and wait as before). It is stated in the startup
+  log so the running behaviour is visible, and it becomes moot once the backend delivers ATT errors
+  properly, since the degraded state can then never be entered.
 - *Lease grace timers.* Both registries schedule a per-lease release on "owner gone" and cancel
   it on "owner back". On expiry the lease is freed **and** the warm radio link is torn down via
   an injected teardown (KMP `onRelease`, Rust `set_teardown` → `BleBackend::disconnect`). This is

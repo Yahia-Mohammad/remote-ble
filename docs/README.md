@@ -32,12 +32,15 @@ maintainer-internal and are not part of the published docs.
 | [release-candidate.md](release-candidate.md) | 0.10.0 version source, artifact inventory, and pre-tag approval checklist |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
+| [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | **Not started** — making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
 | [pr8-validation-plan.md](pr8-validation-plan.md) | The PR8 hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
+| [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The supported `wss://` recipe** (`TLS-PROXY-01`) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
+| [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) | **Rig A real-radio evidence** — per-case results, the two peripheral defects that had to be fixed before the rig could run, the operator prerequisites, and what remains |
 | [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
 | [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 

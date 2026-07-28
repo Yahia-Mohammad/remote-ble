@@ -3,8 +3,9 @@
 Evidence record for [pr8-validation-plan.md](pr8-validation-plan.md) Rig A, per that document's
 evidence rule (host/device details, agent version, exact command, redacted result per case).
 
-**Session:** 2026-07-27/28 · **Status:** Case 1 closed on both agents; see [Remaining](#remaining) for
-what's left.
+**Sessions:** 2026-07-27, 2026-07-28 (afternoon), 2026-07-28 (evening) ·
+**Status: Rig A COMPLETE — all 8 cases closed on both agents.** See
+[Remaining](#remaining) for the follow-ups this rig produced and what carries to other rigs.
 
 ## Rig
 
@@ -490,23 +491,64 @@ the runner's 15 s patience), completed a full scan (40 devices).
 
 ## Remaining
 
-1. ~~**Case 1**~~ — **done 2026-07-28**, both agents: 12 passed, 0 failed, 2 known-failing, all 14
-   steps reached. See the continuation section above.
-2. **Case 2** — client-side `State.Disconnected`. Driver built
-   (`:e2e-runner:peripheralStateRun`), three attempts on 2026-07-28 all inconclusive due to
-   accumulated radio/bond instability late in a long session — run this **first** next time, before
-   anything else has a chance to wedge the Mac's Bluetooth stack.
-3. **Case 3** — two-client authorization; needs a two-client harness.
-4. ~~**Case 5**~~ — **done 2026-07-28**, with a scope correction: reconcile/resume confirmed live
-   (transport blip and full agent restart both auto-resumed, no rescan), but genuine identifier
-   *rewriting* is structurally unreachable on Rig A with any client this repo ships — see the
-   continuation section above and `pr8-validation-plan.md`'s case 5 note.
-5. ~~**Case 6**~~ — **done 2026-07-28**, Kotlin agent: burst/ordering half closed, 2.78x measured
-   improvement, order confirmed on the peripheral's own log.
-6. ~~**Case 7**~~ — **done 2026-07-28**: Battery/Device-Info confirmed live against the
-   (rebuilt) health peripheral.
-7. ~~**Kotlin-agent repeats**~~ of cases 4, 6, 8 — **done 2026-07-28**, all PASS, identical
-   results to their `agent-rs` runs.
+**All eight cases are closed on both agents.** What remains is not Rig A work.
 
-Case 3 still needs observation the current runners do not provide (a two-client harness). Case 2's
-driver exists and works — it just needs a clean rig session to confirm against.
+| Case | Outcome |
+|---|---|
+| 1 — full 14-step E2E | done, both agents: 12 passed, 0 failed, 2 known-failing (btleplug ATT gaps) |
+| 2 — unsolicited disconnect | done, both agents; the plan's stimulus was invalid and has been corrected |
+| 3 — two-client authorization | done, both agents (Kotlin 11/11, `agent-rs` 10/11 + 1 gated) |
+| 4 — `setConnParams` | done, both agents: cleanly `UNSUPPORTED` |
+| 5 — reconcile under translation | done, with a scope correction: identifier *rewriting* is unreachable on this rig |
+| 6 — WWR burst / ordering | done, both agents; 2.78x measured, order confirmed on the peripheral's log |
+| 7 — Battery / Device Info | done |
+| 8 — descriptors | done, both agents |
+
+### Defects this rig found
+
+Six, none of which the unit suites could have caught. Four are fixed, one is a corrected test
+premise, one is open by decision.
+
+| Finding | State |
+|---|---|
+| Degraded-write fail-fast wrongly gated `WriteWithoutResponse` (Kotlin) | fixed, regression-tested |
+| `agent-rs` had no fail-fast at all — same write-poisoning | fixed, ported with tests |
+| `agent-rs` answered `UNSUPPORTED` before authorizing (case 3) | fixed, gate removed after XPASS |
+| A single stalled liveness probe tore down healthy connections (both agents) | fixed, two consecutive failures now required |
+| `agent-rs` cannot re-resolve a handle after disconnect (case 3) | **open by decision** — a cache was tried and reverted; see case 3 |
+| "Force disconnect all" never terminates the link (case 2) | test premise corrected in the validation plan |
+
+Two build/tooling gaps were fixed in passing: `e2e-runner:jvmRun` did not forward stdin when launched
+non-interactively, and `agent/run-agent.sh` forwarded only `REMOTE_BLE_TOKEN` through `open`,
+silently dropping every other `REMOTE_BLE_*` setting — which made `REMOTE_BLE_WRITE_FAIL_FAST`
+unreachable on the macOS Kotlin agent, the one rig where the workaround matters.
+
+### Carried to other rigs
+
+- **Rig B** — whether the Android/Apple native Kable backends deliver ATT errors correctly. Both of
+  case 1's XFAIL gates are btleplug-specific; an XPASS with `REMOTE_BLE_E2E_BTLEPLUG=false` is the
+  signal to remove them. Also worth re-checking `BleBackend.checkLiveness`'s premise there.
+- **Rig D or a Windows host** — the only place genuine identifier *rewriting* can be exercised
+  (case 5's scope correction).
+
+### Method notes worth keeping
+
+These cost real time this session and are cheap to avoid next time.
+
+1. **Never change the instrument and the stimulus in the same run.** Case 2 produced three
+   successive wrong conclusions this way, each overturned by the next piece of evidence. Change one
+   variable; re-run; then change the other.
+2. **Verify the stimulus actually did something before trusting a negative result.** Nine runs
+   measured a link that was never severed. The peripheral app's own "disconnected" log line was its
+   internal bookkeeping, not a stack callback.
+3. **Bonds are two-sided.** Checking only the Mac's paired-device list wrongly cleared the rig; the
+   phone held a `BOND_TYPE_PERSISTENT` record named "Mac" the whole time. Check both:
+   `adb shell dumpsys bluetooth_manager | rg "Bonded devices"`.
+4. **A GATT read on an unbonded peripheral can provoke pairing**, and a rejected pairing is itself a
+   genuine unsolicited drop — which will masquerade as whatever you were trying to measure.
+5. **Restart the peripheral app and confirm with `:e2e-runner:scanRun` before every run.** After any
+   Bluetooth toggle, Android's advertiser frequently fails to restart while still logging
+   `STARTED — advertising`. A scan that lists other devices but not `RBTestPeripheral` is the
+   peripheral's fault, not the agent's.
+6. **`adb shell input tap` is silently dropped when the display has slept or locked.** Pin it with
+   `adb shell svc power stayon usb`; the keyguard still needs a human.

@@ -39,13 +39,19 @@ class ConnectionWatcher(
         launch { collectNativeDrops() }
 
         var sinceLiveness = Duration.ZERO
+        // Consecutive failed *deep* probes per handle; see [LIVENESS_FAILURES_BEFORE_DROP].
+        val deepFailures = mutableMapOf<String, Int>()
         while (isActive) {
             delay(interval)
             sinceLiveness += interval
             val deepCheck = sinceLiveness >= livenessInterval
             if (deepCheck) sinceLiveness = Duration.ZERO
 
-            for (lease in registry.snapshot()) {
+            val leases = registry.snapshot()
+            // Drop counters for handles no longer leased, so this can't grow with process lifetime.
+            deepFailures.keys.retainAll(leases.mapTo(mutableSetOf()) { it.handle })
+
+            for (lease in leases) {
                 if (!lease.connected) continue
                 // This loop is the agent's single, shared liveness watchdog: one lease's probe or
                 // disconnect handling must never be able to terminate it, or every other
@@ -54,11 +60,45 @@ class ConnectionWatcher(
                 try {
                     val handle = DeviceHandle(lease.handle)
                     val alive = if (deepCheck) backend.checkLiveness(handle) else backend.isConnected(handle)
-                    if (!alive) {
-                        Logger.warn(LogTags.WATCHER) {
-                            "liveness probe failed [dev=${lease.handle} deepCheck=$deepCheck] — declaring unsolicited disconnect"
+                    when {
+                        // Only a *deep* success clears the count. A shallow tick reads the platform's
+                        // cached state, which is exactly what goes stale when a peripheral vanishes —
+                        // letting it reset the counter would mean the deep probe could never reach
+                        // the threshold, since shallow ticks run between every pair of deep ones.
+                        alive && deepCheck -> deepFailures.remove(lease.handle)
+                        alive -> Unit
+                        // A cached-state check is the platform's own answer, not an I/O attempt: if
+                        // it says disconnected, it is. Act immediately, as before.
+                        !deepCheck -> {
+                            Logger.warn(LogTags.WATCHER) {
+                                "device reported disconnected [dev=${lease.handle}] — declaring unsolicited disconnect"
+                            }
+                            registry.onUnsolicitedDisconnect(lease.handle, lease.owner)
                         }
-                        registry.onUnsolicitedDisconnect(lease.handle, lease.owner)
+                        // A deep probe does real I/O, so a single failure is weak evidence: it can
+                        // mean the peripheral is gone, or merely that this round trip did not come
+                        // back in time. Confirmed on hardware (Rig A case 3, 2026-07-28) — a probe
+                        // read of an encrypted characteristic blocked on a macOS pairing dialog,
+                        // timed out, and tore down a perfectly healthy connection. Requiring
+                        // consecutive failures costs one extra interval on a genuine drop, which the
+                        // native `connectionDrops` stream usually reports long before this loop
+                        // anyway (measured at 145ms on Rig A), and removes that whole class of
+                        // false positive.
+                        else -> {
+                            val consecutive = (deepFailures[lease.handle] ?: 0) + 1
+                            deepFailures[lease.handle] = consecutive
+                            if (consecutive >= LIVENESS_FAILURES_BEFORE_DROP) {
+                                Logger.warn(LogTags.WATCHER) {
+                                    "liveness probe failed $consecutive time(s) in a row [dev=${lease.handle}] — declaring unsolicited disconnect"
+                                }
+                                deepFailures.remove(lease.handle)
+                                registry.onUnsolicitedDisconnect(lease.handle, lease.owner)
+                            } else {
+                                Logger.info(LogTags.WATCHER) {
+                                    "liveness probe failed [dev=${lease.handle}] ($consecutive/$LIVENESS_FAILURES_BEFORE_DROP) — not declaring a drop yet"
+                                }
+                            }
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -87,5 +127,25 @@ class ConnectionWatcher(
                 Logger.warn(LogTags.WATCHER) { "native drop handler failed for ${drop.device.value}: ${t.message}" }
             }
         }
+    }
+
+    companion object {
+        /**
+         * Consecutive failed *deep* liveness probes before a device is declared dropped.
+         *
+         * A deep probe is a real GATT round trip, so one failure does not distinguish "the
+         * peripheral is gone" from "this round trip did not return in time". The second reading is
+         * not hypothetical: on Rig A (2026-07-28) a probe read of an encrypted characteristic
+         * blocked on a macOS pairing dialog until [EngineBleBackend.LIVENESS_PROBE_TIMEOUT] and the
+         * watchdog tore down a healthy connection. The probe cannot avoid that by choosing a safer
+         * characteristic — encryption is a GATT *security permission*, not a property bit, so it is
+         * not visible in the discovered table.
+         *
+         * Two is deliberately the smallest value that removes single-stall false positives. The cost
+         * is one extra `livenessInterval` before a genuine silent drop is declared; the backend's
+         * native [BleBackend.connectionDrops] stream normally reports a real drop far sooner
+         * (measured at 145ms on Rig A), so this loop is the backstop, not the primary detector.
+         */
+        const val LIVENESS_FAILURES_BEFORE_DROP = 2
     }
 }

@@ -68,22 +68,49 @@ type ScanIdentity = (Option<String>, Vec<String>);
 /// tests without hardware) so the gate itself is unit-testable headless.
 struct DegradedWrites {
     fail_fast: bool,
-    degraded: Mutex<HashSet<String>>,
+    state: Mutex<DegradedState>,
+}
+
+#[derive(Default)]
+struct DegradedState {
+    /// Per-device connection generation, bumped by [DegradedWrites::advance_generation].
+    ///
+    /// The condition is a property of one *connection*, but a stalled write outlives it: nothing
+    /// cancels an in-flight op when the link drops, so a write that hangs can still be waiting out
+    /// [GATT_OP_TIMEOUT] long after the client has reconnected. Comparing generations is how
+    /// [DegradedWrites::mark_degraded] tells that late timeout apart from a live one.
+    generations: HashMap<String, u64>,
+    degraded: HashSet<String>,
 }
 
 impl DegradedWrites {
     fn new(fail_fast: bool) -> Self {
         Self {
             fail_fast,
-            degraded: Mutex::new(HashSet::new()),
+            state: Mutex::new(DegradedState::default()),
         }
     }
 
     /// Records that `device`'s write-with-response completions have stopped arriving. A no-op
     /// (not even a log) if it's already marked, so a burst of stalled writes to the same device
     /// only logs once.
-    fn mark_degraded(&self, device: &str) {
-        let newly_degraded = self.degraded.lock().insert(device.to_string());
+    ///
+    /// `generation` is the connection the stalled write belonged to, captured before it ran. If the
+    /// device has moved on since, the write is reporting on a connection that no longer exists and
+    /// is ignored — otherwise a write that hangs, drops, and expires after the client has already
+    /// reconnected would immediately poison the fresh, healthy connection.
+    fn mark_degraded(&self, device: &str, generation: u64) {
+        let mut state = self.state.lock();
+        if state.generations.get(device).copied().unwrap_or(0) != generation {
+            drop(state);
+            tracing::debug!(
+                device,
+                "ignoring a stalled write from a previous connection; the current one is unaffected"
+            );
+            return;
+        }
+        let newly_degraded = state.degraded.insert(device.to_string());
+        drop(state);
         if newly_degraded {
             tracing::warn!(
                 device,
@@ -93,13 +120,51 @@ impl DegradedWrites {
         }
     }
 
-    /// A newly (re-)established connection is the one thing observed to clear this.
-    fn clear(&self, device: &str) {
-        self.degraded.lock().remove(device);
+    /// Clears `device`'s degraded state after a write-with-response actually completed on
+    /// `generation` — direct evidence the condition has lifted.
+    ///
+    /// Only reachable with `fail_fast` off, since fail-fast stops a degraded device's with-response
+    /// writes before they reach the radio. That is exactly the configuration where it matters:
+    /// without it a device that recovered would stay marked for the rest of the connection, and the
+    /// once-only warning above would never fire again for a genuine later stall.
+    fn mark_recovered(&self, device: &str, generation: u64) {
+        let mut state = self.state.lock();
+        if state.generations.get(device).copied().unwrap_or(0) != generation {
+            return;
+        }
+        let recovered = state.degraded.remove(device);
+        drop(state);
+        if recovered {
+            tracing::info!(
+                device,
+                "write completed again; this connection's writes are no longer degraded"
+            );
+        }
+    }
+
+    /// Starts a new connection generation for `device` and drops the state tied to the previous
+    /// one. Called from both `connect` and `disconnect` because both end a connection's life: a
+    /// re-established connection is the one thing observed to clear the degraded-write condition,
+    /// and a torn-down one cannot be degraded at all.
+    fn advance_generation(&self, device: &str) {
+        let mut state = self.state.lock();
+        let next = state.generations.get(device).copied().unwrap_or(0) + 1;
+        state.generations.insert(device.to_string(), next);
+        state.degraded.remove(device);
+    }
+
+    /// The connection generation `device` is currently on; 0 before it has ever been connected.
+    fn generation(&self, device: &str) -> u64 {
+        self.state
+            .lock()
+            .generations
+            .get(device)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn is_degraded(&self, device: &str) -> bool {
-        self.degraded.lock().contains(device)
+        self.state.lock().degraded.contains(device)
     }
 
     /// The rejection a write-with-response should raise before touching the radio, or `None` to
@@ -154,6 +219,21 @@ const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// from the agent rather than expiring undiagnosed, while leaving far more room than a healthy
 /// GATT round-trip needs. Mirrors `EngineBleBackend.GATT_OP_TIMEOUT` in the Kotlin agent.
 const GATT_OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Consecutive failed liveness probes before a device is declared dropped.
+///
+/// A probe is a real GATT round trip, so a single failure does not distinguish a peripheral that is
+/// gone from a round trip that merely did not return in time — and the second case is not
+/// hypothetical: a probe read of an encrypted characteristic can block on a host pairing dialog
+/// until [LIVENESS_PROBE_TIMEOUT], which on Rig A (2026-07-28) tore down a healthy connection on the
+/// Kotlin agent. The probe cannot avoid it by choosing a safer characteristic, because encryption is
+/// a GATT security *permission* and not visible in the discovered table.
+///
+/// Costs one extra `liveness_interval` before a genuine silent drop is declared. The adapter's own
+/// `DeviceDisconnected` event normally reports a real drop far sooner (measured at 145ms on Rig A),
+/// so this loop is the backstop, not the primary detector. Mirrors
+/// `ConnectionWatcher.LIVENESS_FAILURES_BEFORE_DROP` in the Kotlin agent.
+const LIVENESS_FAILURES_BEFORE_DROP: u32 = 2;
 
 impl BtleplugBackend {
     pub async fn new(
@@ -214,6 +294,8 @@ impl BtleplugBackend {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // first tick fires immediately; nothing to probe yet
+            // Consecutive failed probes per handle; see [LIVENESS_FAILURES_BEFORE_DROP].
+            let mut failures: HashMap<String, u32> = HashMap::new();
             loop {
                 ticker.tick().await;
                 let handles: Vec<String> = connected.lock().keys().cloned().collect();
@@ -230,15 +312,42 @@ impl BtleplugBackend {
                         continue;
                     }
                 };
+                // Forget handles that are no longer tracked, so this cannot grow with uptime.
+                failures.retain(|handle, _| handles.contains(handle));
+
                 for handle in handles {
                     // Not listed by the adapter anymore -> treat as gone, same as a failed probe.
                     let alive = match by_id.get(&handle) {
                         Some(peripheral) => probe_liveness(peripheral).await,
                         None => false,
                     };
-                    if !alive {
-                        tracing::warn!("Active liveness probe found {} unresponsive", handle);
+                    if alive {
+                        failures.remove(&handle);
+                        continue;
+                    }
+                    // A probe is a real GATT round trip, so one failure does not distinguish "the
+                    // peripheral is gone" from "this round trip did not return in time". Confirmed
+                    // on hardware (Rig A case 3, 2026-07-28) on the Kotlin agent, whose probe read
+                    // of an encrypted characteristic blocked on a macOS pairing dialog, timed out,
+                    // and tore down a healthy connection. Mirrors
+                    // `ConnectionWatcher.LIVENESS_FAILURES_BEFORE_DROP`.
+                    let consecutive = failures.entry(handle.clone()).or_insert(0);
+                    *consecutive += 1;
+                    if *consecutive >= LIVENESS_FAILURES_BEFORE_DROP {
+                        tracing::warn!(
+                            handle,
+                            consecutive = *consecutive,
+                            "Active liveness probe found device unresponsive; declaring a drop"
+                        );
+                        failures.remove(&handle);
                         report_unsolicited_disconnect(&connected, &registry, &handle);
+                    } else {
+                        tracing::info!(
+                            handle,
+                            consecutive = *consecutive,
+                            threshold = LIVENESS_FAILURES_BEFORE_DROP,
+                            "Liveness probe failed; not declaring a drop yet"
+                        );
                     }
                 }
             }
@@ -379,6 +488,19 @@ impl BtleplugBackend {
         }
     }
 
+    /// Resolves a handle by walking `Adapter::peripherals()`.
+    ///
+    /// **Known divergence from the Kotlin agent** (Rig A case 3, 2026-07-28): on macOS btleplug
+    /// drops a peripheral from that list once it disconnects with no scan running, so a client that
+    /// connects, disconnects, then reconnects gets `UNKNOWN_DEVICE` and must rescan first. Kable
+    /// builds a `Peripheral` straight from the identifier and has no such dependency.
+    ///
+    /// Retaining connected peripherals in a cache and falling back to it was tried and **reverted**:
+    /// the handle then resolved, but `connect()` on the retained handle never completed (no
+    /// `DeviceConnected`, no error, ~45 s to the client's own timeout). That trades a fast,
+    /// actionable error for an opaque hang, which is worse. Until there is a way to re-establish
+    /// from a bare identifier, `UNKNOWN_DEVICE` — which tells the client exactly what to do — is the
+    /// better answer.
     async fn find_peripheral(&self, device: &DeviceHandle) -> Result<Peripheral, AgentError> {
         find_peripheral_by_id(&self.adapter, &device.value).await
     }
@@ -621,9 +743,10 @@ impl BleBackend for BtleplugBackend {
             })?;
         }
 
-        // A newly (re-)established connection is the one thing observed to clear degraded
-        // writes (DegradedWrites' doc) — the prior wedge doesn't carry over.
-        self.write_degraded.clear(&device.value);
+        // A newly (re-)established connection is the one thing observed to clear degraded writes
+        // (DegradedWrites' doc), and it also retires any write still running against the previous
+        // connection.
+        self.write_degraded.advance_generation(&device.value);
 
         // Track the owning client's channel so an unsolicited drop can be reported.
         self.connected
@@ -643,6 +766,10 @@ impl BleBackend for BtleplugBackend {
         // event listener treats the resulting DeviceDisconnected as solicited and
         // stays quiet — we report the DISCONNECTED state ourselves below.
         let sender = self.connected.lock().remove(&device.value);
+
+        // Retire the generation too: a connection that no longer exists can't be degraded, and a
+        // write still running against it must not degrade its successor.
+        self.write_degraded.advance_generation(&device.value);
 
         if let Ok(peripheral) = self.find_peripheral(device).await {
             let _ = peripheral.disconnect().await;
@@ -720,13 +847,25 @@ impl BleBackend for BtleplugBackend {
         } else {
             btleplug::api::WriteType::WithoutResponse
         };
+        // Captured before the write, which may run for the full GATT_OP_TIMEOUT: by the time it
+        // resolves the client may have dropped and reconnected, and this write's outcome then
+        // describes a connection that is already gone. See DegradedState::generations.
+        let generation = self.write_degraded.generation(&device.value);
         let result = gatt_op(
             "write",
             peripheral.write(&characteristic, value, write_type),
         )
         .await;
-        if with_response && matches!(result, Err(ref e) if e.kind == ErrorKind::Timeout) {
-            self.write_degraded.mark_degraded(&device.value);
+        if with_response {
+            match &result {
+                Err(e) if e.kind == ErrorKind::Timeout => {
+                    self.write_degraded.mark_degraded(&device.value, generation)
+                }
+                Ok(Ok(())) => self
+                    .write_degraded
+                    .mark_recovered(&device.value, generation),
+                _ => {}
+            }
         }
         result?.map_err(|e| AgentError::new(ErrorKind::WriteFailed, Some(e.to_string())))
     }
@@ -907,7 +1046,7 @@ mod tests {
     #[test]
     fn a_stalled_write_marks_the_connection_and_short_circuits_later_with_response_writes() {
         let degraded = DegradedWrites::new(true);
-        degraded.mark_degraded(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
 
         assert!(degraded.is_degraded(DEVICE));
         let rejection = degraded
@@ -932,7 +1071,7 @@ mod tests {
     #[test]
     fn a_degraded_device_still_lets_write_without_response_through() {
         let degraded = DegradedWrites::new(true);
-        degraded.mark_degraded(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
 
         assert!(degraded.is_degraded(DEVICE));
         assert!(
@@ -944,7 +1083,7 @@ mod tests {
     #[test]
     fn degradation_is_per_device_not_agent_wide() {
         let degraded = DegradedWrites::new(true);
-        degraded.mark_degraded(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
 
         assert!(
             degraded.rejection("other-device", true).is_none(),
@@ -955,7 +1094,7 @@ mod tests {
     #[test]
     fn disabling_fail_fast_keeps_the_unmodified_behaviour_even_once_degraded() {
         let degraded = DegradedWrites::new(false);
-        degraded.mark_degraded(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
 
         assert!(
             degraded.is_degraded(DEVICE),
@@ -970,13 +1109,73 @@ mod tests {
     #[test]
     fn a_fresh_connection_clears_the_degraded_state() {
         let degraded = DegradedWrites::new(true);
-        degraded.mark_degraded(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
         assert!(degraded.is_degraded(DEVICE));
 
-        degraded.clear(DEVICE);
+        degraded.advance_generation(DEVICE);
 
         assert!(!degraded.is_degraded(DEVICE));
         assert!(degraded.rejection(DEVICE, true).is_none());
+    }
+
+    /// Nothing cancels an in-flight op when a link drops, so a write that hangs can still be
+    /// waiting out [GATT_OP_TIMEOUT] long after the client has reconnected. Marking on the bare
+    /// handle would let that late timeout degrade the *fresh* connection, which — with fail-fast on
+    /// by default — fails every subsequent with-response write on a healthy connection.
+    #[test]
+    fn a_stalled_write_from_a_previous_connection_does_not_degrade_the_current_one() {
+        let degraded = DegradedWrites::new(true);
+        let when_the_write_started = degraded.generation(DEVICE);
+        // The client dropped and reconnected while that write was still hanging.
+        degraded.advance_generation(DEVICE);
+
+        degraded.mark_degraded(DEVICE, when_the_write_started);
+
+        assert!(
+            !degraded.is_degraded(DEVICE),
+            "a previous connection's stall must not carry over"
+        );
+        assert!(degraded.rejection(DEVICE, true).is_none());
+    }
+
+    #[test]
+    fn a_stalled_write_on_the_current_connection_still_degrades_it() {
+        // The guard above must not over-reach: a stall reported against the live generation is the
+        // real case the workaround exists for.
+        let degraded = DegradedWrites::new(true);
+        degraded.advance_generation(DEVICE);
+
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
+
+        assert!(degraded.is_degraded(DEVICE));
+    }
+
+    #[test]
+    fn a_completed_write_clears_the_degraded_state() {
+        // Reachable with fail-fast off, where a degraded device's writes still reach the radio: one
+        // that completes is direct evidence the condition has lifted.
+        let degraded = DegradedWrites::new(false);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
+        assert!(degraded.is_degraded(DEVICE));
+
+        degraded.mark_recovered(DEVICE, degraded.generation(DEVICE));
+
+        assert!(!degraded.is_degraded(DEVICE));
+    }
+
+    #[test]
+    fn a_completed_write_from_a_previous_connection_does_not_clear_the_current_one() {
+        let degraded = DegradedWrites::new(false);
+        let when_the_write_started = degraded.generation(DEVICE);
+        degraded.advance_generation(DEVICE);
+        degraded.mark_degraded(DEVICE, degraded.generation(DEVICE));
+
+        degraded.mark_recovered(DEVICE, when_the_write_started);
+
+        assert!(
+            degraded.is_degraded(DEVICE),
+            "a previous connection's success says nothing about the current one"
+        );
     }
 
     #[test]

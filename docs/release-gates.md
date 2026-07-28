@@ -8,6 +8,8 @@ disclosed advisories and leaked historical secrets cannot wait for the next code
 |---|---|---|
 | Cross-agent conformance | `./gradlew conformanceTest` plus `agent-rs` `cargo test --locked` | PR, `main`, manual, weekly |
 | Published JVM consumer | Publishes `:protocol`, `:log`, and `:client-sdk` to Maven local, then builds `consumer-tests/jvm` using only their Maven coordinates | PR, `main`, manual, weekly |
+| Published Android consumer | Same publication, then builds `consumer-tests/android` — resolves the `.aar` variant (`client-sdk-android` → `protocol-android`, `log-android`) | PR, `main`, manual, weekly |
+| Published KMP/Apple consumer | Same publication, then compiles `consumer-tests/kmp` for `iosArm64` + `iosSimulatorArm64` — resolves the klib variants. **macOS runner** (Kotlin/Native Apple targets do not cross-compile) | PR, `main`, manual, weekly |
 | Kotlin coverage | Kover merges JVM tests for `:protocol`, `:log`, `:client-sdk`, and `:agent` into XML/HTML artifacts | PR, `main`, manual, weekly |
 | Rust coverage | Tarpaulin's LLVM engine emits and archives a Cobertura XML line-coverage report | PR, `main`, manual, weekly |
 | Secret policy | Gitleaks scans the repository and reachable Git history | PR, `main`, manual, weekly |
@@ -27,11 +29,19 @@ the JVM/Gradle dependency graph; Cargo has the additional advisory and license p
 - Kover reports JVM execution only; its upstream support does not collect Kotlin/Native or Android
   device-test coverage. Tarpaulin measures Rust on the Linux CI host. The reports are measured
   evidence, not a substitute for PR8's platform and hardware validation.
-- `consumer-tests/jvm` is intentionally an independent Gradle build. It proves that the POMs resolve
-  from Maven local without composite-build or project-dependency leakage. Android and KMP/iOS clean
-  consumers remain release-candidate evidence: the JVM fixture is complete locally, while Android
-  and KMP/iOS clean-consumer resolution must be recorded against staging or released coordinates
-  before tag approval.
+- The three `consumer-tests/*` fixtures are intentionally independent Gradle builds. They prove the
+  POMs and Gradle metadata resolve from Maven local without composite-build or project-dependency
+  leakage. One per published variant, because `jvm`, `android` (`.aar`) and Apple (klib) select
+  through different metadata attributes and can break independently — a closure complete for one can
+  be broken for another. Each was verified to fail on an unpublished version, so none can pass
+  vacuously.
+- **These gates still do not discharge the release-candidate requirement on their own.** They resolve
+  from **Maven local**; clean-consumer resolution must additionally be recorded against staging or
+  released coordinates before tag approval ([release-candidate.md](release-candidate.md) step 3).
+- The Android fixture pins Kotlin explicitly: AGP 9's built-in Kotlin compiler (2.2.0) cannot read
+  this SDK's 2.4.0 metadata, so a stock AGP 9 consumer fails to compile. That is a genuine downstream
+  requirement, not a fixture quirk — see
+  [build-and-testing.md](build-and-testing.md) for the consumer-side fix.
 - No workflow substitutes for `TLS-PROXY-01`, live-radio, iOS lifecycle, or Ubuntu/Pi BlueZ container
   evidence. Those stay in PR8's hardware-validation bundle.
 - `cargo deny` allows only the explicit permissive license set in its checked-in policy. Any future

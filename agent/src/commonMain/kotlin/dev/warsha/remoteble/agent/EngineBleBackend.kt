@@ -100,11 +100,22 @@ class EngineBleBackend(
     /**
      * Devices whose writes have stopped completing — see [markWriteDegraded].
      *
-     * Keyed by handle and cleared whenever the [Peripheral] is discarded ([disconnect]) or a fresh
-     * connection is established ([connect]), because a new connection is the only thing observed to
-     * clear the underlying condition.
+     * Keyed by handle and cleared by [advanceConnectionGeneration] whenever the connection ends or
+     * is re-established, because a new connection is the only thing observed to clear the underlying
+     * condition — and, with fail-fast off, by [clearWriteDegraded] when a write completes again.
      */
     private val writeDegraded = mutableSetOf<DeviceHandle>()
+
+    /**
+     * Per-device connection generation, bumped by [advanceConnectionGeneration].
+     *
+     * The degraded-write condition is a property of one *connection*, but a stalled write outlives
+     * it: nothing cancels an in-flight op when the link drops (the agent reports the disconnect and
+     * moves on), so a write that hangs can still be waiting out [GATT_OP_TIMEOUT] long after the
+     * client has reconnected. Comparing generations is how [markWriteDegraded] tells that late
+     * timeout apart from one belonging to the connection that is actually live.
+     */
+    private val generations = mutableMapOf<DeviceHandle, Long>()
 
     // Native unsolicited-drop stream (see [connectionDrops]). DROP_OLDEST + a small buffer so a slow
     // or absent collector can never suspend the per-connection watcher that emits here; the polling
@@ -165,8 +176,8 @@ class EngineBleBackend(
         val peripheral = resolve(device)
         bleOp(ErrorKind.CONNECTION_FAILED) { peripheral.connect() }
         // A newly established connection is the one thing observed to clear the degraded-write
-        // condition, so this is where the flag is dropped (see [markWriteDegraded]).
-        synchronized(lock) { writeDegraded.remove(device) }
+        // condition, and it also retires any write still running against the previous one.
+        advanceConnectionGeneration(device)
         Logger.debug(LogTags.ENGINE) { "Kable connect ok [dev=${device.value}]" }
         scope.launch { watchForUnsolicitedDrop(device, peripheral) }
     }
@@ -192,10 +203,10 @@ class EngineBleBackend(
         AgentError(ErrorKind.DISCONNECTED, message = status?.let { it::class.simpleName } ?: "peer disconnected")
 
     override suspend fun disconnect(device: DeviceHandle) {
-        val peripheral = synchronized(lock) {
-            writeDegraded.remove(device)
-            peripherals.remove(device)
-        } ?: return
+        // Retire the generation before tearing the link down: a connection that no longer exists
+        // can't be degraded, and a write still running against it must not degrade its successor.
+        advanceConnectionGeneration(device)
+        val peripheral = synchronized(lock) { peripherals.remove(device) } ?: return
         try {
             peripheral.disconnect()
             Logger.debug(LogTags.ENGINE) { "Kable disconnect ok [dev=${device.value}]" }
@@ -266,13 +277,41 @@ class EngineBleBackend(
 
         degradedWriteRejection(device, withResponse)?.let { throw AgentException(it) }
 
+        // Captured before the write, which may run for the full GATT_OP_TIMEOUT: by the time it
+        // resolves the client may have dropped and reconnected, and this write's outcome then
+        // describes a connection that is already gone. See [generations].
+        val generation = generationOf(device)
         try {
             gattOp(ErrorKind.WRITE_FAILED, "write") { peripheral.write(characteristic, value, writeType) }
+            if (withResponse) clearWriteDegraded(device, generation)
         } catch (e: AgentException) {
-            if (withResponse && e.error.kind == ErrorKind.TIMEOUT) markWriteDegraded(device)
+            if (withResponse && e.error.kind == ErrorKind.TIMEOUT) markWriteDegraded(device, generation)
             throw e
         }
     }
+
+    /**
+     * Starts a new connection generation for [device] and drops the state tied to the previous one.
+     *
+     * Called from both [connect] and [disconnect] because both end a connection's life: a
+     * re-established connection is the one thing observed to clear the degraded-write condition,
+     * and a torn-down one cannot be degraded at all.
+     */
+    // internal (not private): EngineBleBackendJvmTest advances the generation to prove a stalled
+    // write from a previous connection can't degrade the current one — otherwise that needs a radio.
+    internal fun advanceConnectionGeneration(device: DeviceHandle) {
+        // Read the counter inline rather than via generationOf(): nesting the lock would rely on
+        // SynchronizedObject being reentrant, which isn't guaranteed across targets.
+        synchronized(lock) {
+            generations[device] = (generations[device] ?: 0L) + 1
+            writeDegraded.remove(device)
+        }
+    }
+
+    /** The connection generation [device] is currently on; 0 before it has ever been connected. */
+    // internal (not private): paired with [advanceConnectionGeneration] for the same test.
+    internal fun generationOf(device: DeviceHandle): Long =
+        synchronized(lock) { generations[device] ?: 0L }
 
     /**
      * Records that this device's writes have stopped completing.
@@ -289,15 +328,48 @@ class EngineBleBackend(
      *
      * Note this only becomes reachable *because* [gattOp] bounds the operation — an unbounded hung
      * write never returns to mark anything.
+     *
+     * [generation] is the connection the stalled write belonged to, captured before it ran. If the
+     * device has moved on since, the write is reporting on a connection that no longer exists and
+     * is ignored — otherwise a write that hangs, drops, and expires after the client has already
+     * reconnected would immediately poison the fresh, healthy connection.
      */
     // internal (not private): EngineBleBackendJvmTest drives the degraded-write gate directly.
-    internal fun markWriteDegraded(device: DeviceHandle) {
-        val newlyDegraded = synchronized(lock) { writeDegraded.add(device) }
-        if (newlyDegraded) {
-            Logger.warn(LogTags.ENGINE) {
+    internal fun markWriteDegraded(device: DeviceHandle, generation: Long = generationOf(device)) {
+        // null = stale (a previous connection's write), true = newly degraded, false = already known.
+        val newlyDegraded = synchronized(lock) {
+            if ((generations[device] ?: 0L) != generation) null else writeDegraded.add(device)
+        }
+        when (newlyDegraded) {
+            null -> Logger.debug(LogTags.ENGINE) {
+                "ignoring a stalled write from a previous connection [dev=${device.value}]; " +
+                    "the current connection is unaffected"
+            }
+            true -> Logger.warn(LogTags.ENGINE) {
                 "write did not complete [dev=${device.value}]; treating this connection's writes as " +
                     "degraded until it is re-established" +
                     if (failFastOnDegradedWrites) "" else " (fail-fast disabled; later writes will still wait)"
+            }
+            false -> Unit
+        }
+    }
+
+    /**
+     * Clears [device]'s degraded state after a write-with-response actually completed on
+     * [generation] — direct evidence the condition [markWriteDegraded] describes has lifted.
+     *
+     * Only reachable with [failFastOnDegradedWrites] off, since fail-fast stops a degraded device's
+     * with-response writes before they reach the radio. That is exactly the configuration where it
+     * matters: without it, a device that recovered would stay marked for the rest of the connection
+     * and the once-only warning above would never fire again for a genuine later stall.
+     */
+    private fun clearWriteDegraded(device: DeviceHandle, generation: Long) {
+        val recovered = synchronized(lock) {
+            if ((generations[device] ?: 0L) != generation) false else writeDegraded.remove(device)
+        }
+        if (recovered) {
+            Logger.info(LogTags.ENGINE) {
+                "write completed again [dev=${device.value}]; this connection's writes are no longer degraded"
             }
         }
     }

@@ -69,6 +69,59 @@ jobs:
           VERSION="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
           ./gradlew -p consumer-tests/jvm check -PremoteBleVersion="$VERSION"
 
+  consumer-android:
+    name: Published Android consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The fixture is a standalone Gradle build, so it cannot see the repo's local.properties;
+      # it resolves the SDK location from ANDROID_HOME, which this action guarantees.
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Publish SDK dependency closure to Maven local
+        run: ./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal :client-sdk:publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false
+
+      # Resolves the `.aar` variant (client-sdk-android -> protocol-android, log-android), which the
+      # JVM gate never touches: Android selects through different Gradle metadata attributes and can
+      # break independently of a healthy `jvm` closure.
+      - name: Compile a clean Android consumer against published coordinates
+        run: |
+          VERSION="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
+          ./gradlew -p consumer-tests/android compileDebugKotlin -PremoteBleVersion="$VERSION"
+
+  consumer-apple:
+    name: Published KMP/Apple consumer
+    # Kotlin/Native Apple targets only build on macOS — this gate cannot run on the Linux runners
+    # the other consumer gates use.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Publish SDK dependency closure to Maven local
+        run: ./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal :client-sdk:publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false
+
+      # Resolves the klib variants (client-sdk-iosarm64 / -iossimulatorarm64 and their protocol/log
+      # counterparts). Explicit compile tasks rather than `check`: these fixtures carry no tests, so
+      # `check` would pass without compiling anything.
+      - name: Compile a clean KMP/Apple consumer against published coordinates
+        run: |
+          VERSION="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
+          ./gradlew -p consumer-tests/kmp compileKotlinIosArm64 compileKotlinIosSimulatorArm64 -PremoteBleVersion="$VERSION"
+
   simulated-socket-e2e:
     name: Simulated agent socket E2E
     runs-on: ubuntu-latest

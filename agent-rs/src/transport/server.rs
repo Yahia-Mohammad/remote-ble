@@ -1072,10 +1072,22 @@ impl AgentServer {
                 }
                 OpResult::from_unit(result)
             }
-            _ => OpResult::err(AgentError::new(
-                ErrorKind::Unsupported,
-                Some("Operation not supported on this agent".into()),
-            )),
+            // Ops this agent does not implement. Authorization still runs first when the op names a
+            // device: a client that does not own it must get the same PERIPHERAL_BUSY the supported
+            // ops give, not an answer about the agent's capabilities. Answering UNSUPPORTED first
+            // was a real divergence from the Kotlin agent, whose `BleAgent` authorizes in every
+            // device-bearing branch (found by Rig A case 3, 2026-07-28).
+            unsupported => {
+                if let Some(device) = unsupported.device_handle()
+                    && let Err(e) = registry.authorize_connected(&device.value, client_id)
+                {
+                    return OpResult::err(e);
+                }
+                OpResult::err(AgentError::new(
+                    ErrorKind::Unsupported,
+                    Some("Operation not supported on this agent".into()),
+                ))
+            }
         }
     }
 }
@@ -1084,7 +1096,7 @@ impl AgentServer {
 mod tests {
     use super::*;
     use crate::protocol::{
-        op::{CharRef, DescRef, DeviceHandle, ScanFilter},
+        op::{CharRef, ConnProfile, DescRef, DeviceHandle, ScanFilter},
         results::ResultPayload,
     };
     use crate::registry::peripheral_lease::LeaseConfig;
@@ -1806,6 +1818,63 @@ mod tests {
             matches!(result, OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy)
         );
         assert_eq!(fake.reads.load(Ordering::Relaxed), 0);
+    }
+
+    /// Regression (Rig A case 3, 2026-07-28): an op this agent does not implement must still be
+    /// *authorized* before it is answered. `ReadRssi` and `SetConnParams` fall through to the
+    /// catch-all arm, which used to reply `Unsupported` without consulting the registry — so a
+    /// non-owner got a different error kind than it does for every supported op, diverging from the
+    /// Kotlin agent (whose `BleAgent` authorizes in every device-bearing branch).
+    #[tokio::test]
+    async fn non_owner_is_rejected_even_for_ops_this_agent_does_not_implement() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        for op in [
+            Op::ReadRssi {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            Op::SetConnParams {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                profile: ConnProfile::Balanced,
+                hint: None,
+            },
+        ] {
+            let result =
+                AgentServer::execute_op(op, context("other", &backend, &registry, 1)).await;
+            assert!(
+                matches!(result, OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy),
+                "a non-owner must get PERIPHERAL_BUSY, not an answer about agent capabilities"
+            );
+        }
+    }
+
+    /// The owner, by contrast, gets the honest capability answer.
+    #[tokio::test]
+    async fn the_owner_still_gets_unsupported_for_ops_this_agent_does_not_implement() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::ReadRssi {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Err { error } if error.kind == ErrorKind::Unsupported));
     }
 
     /// LEASE-DISCONNECT-01: `Op::Disconnect` releases the lease immediately, with no transport

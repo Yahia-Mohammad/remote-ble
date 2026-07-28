@@ -70,7 +70,19 @@ struct Args {
     /// a btleplug defect (confirmed on hardware, Rig A 2026-07-28): see
     /// `ble::btleplug_impl::DegradedWrites`. Mirrors the Kotlin agent's
     /// `REMOTE_BLE_WRITE_FAIL_FAST`; turn off to get the unmodified (wait-it-out) behavior back.
-    #[arg(long, default_value_t = true, env = "REMOTE_BLE_WRITE_FAIL_FAST")]
+    // `action = Set` rather than the `bool` default of `SetTrue`, so the flag can actually be
+    // turned *off*: a SetTrue flag whose default is already `true` can only ever re-affirm it,
+    // and neither `--write-fail-fast false` nor `=false` parses. With Set + an optional value,
+    // `--write-fail-fast false`, `--write-fail-fast=false` and the env var all work, while a bare
+    // `--write-fail-fast` still means `true`.
+    #[arg(
+        long,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true",
+        env = "REMOTE_BLE_WRITE_FAIL_FAST"
+    )]
     write_fail_fast: bool,
 }
 

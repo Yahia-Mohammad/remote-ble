@@ -154,3 +154,17 @@ tasks.register<JavaExec>("peripheralStateRun") {
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
     mainClass.set("dev.warsha.remoteble.e2e.PeripheralStateMainKt")
 }
+
+// Two-client authorization on a real radio: client A holds the lease, client B may still scan but
+// every device-bearing op must be refused with PERIPHERAL_BUSY (Rig A case 3). Both clients run in
+// this one process — WebSocketAgentTransport mints a random clientId per instance, so they are
+// distinct sessions to the agent, which is exactly what ownership keys on.
+//   ./gradlew :e2e-runner:twoClientRun --args "ws://localhost:8080/agent"
+tasks.register<JavaExec>("twoClientRun") {
+    group = "application"
+    description = "Two-client authorization against a leased peripheral (Rig A case 3)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.TwoClientMainKt")
+}

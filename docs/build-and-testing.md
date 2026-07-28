@@ -64,10 +64,33 @@ REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 80
 ```
 
 For the 0.10.0 release-candidate consumer gate, publish the three modules to Maven local and compile
-the independent fixture: `./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal
-:client-sdk:publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false`, then
-`./gradlew -p consumer-tests/jvm clean compileKotlin -PremoteBleVersion=0.10.0`. The full gate
-inventory and intentional hardware boundaries are in [release-gates.md](release-gates.md).
+the independent fixtures. There are **three**, one per published variant, because the `jvm`,
+`android` (`.aar`) and Apple (klib) artifacts resolve through different Gradle metadata and can fail
+independently — a closure that is complete for one can be broken for another.
+
+```sh
+./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal :client-sdk:publishToMavenLocal \
+  -PRELEASE_SIGNING_ENABLED=false
+./gradlew -p consumer-tests/jvm     clean compileKotlin        -PremoteBleVersion=0.10.0
+./gradlew -p consumer-tests/kmp     compileKotlinIosArm64 compileKotlinIosSimulatorArm64 \
+  -PremoteBleVersion=0.10.0
+ANDROID_HOME=<sdk> ./gradlew -p consumer-tests/android compileDebugKotlin -PremoteBleVersion=0.10.0
+```
+
+Each fixture is a standalone Gradle build resolving **coordinates only**, never a project dependency,
+and each fails on an unpublished version — verified, so the gates have teeth.
+
+> **Android consumers on AGP 9 must put KGP 2.4+ on the build classpath.** AGP 9.3.0's *built-in*
+> Kotlin compiler is 2.2.0, which reads metadata only up to 2.3.0, while this SDK publishes 2.4.0
+> metadata — so a stock AGP 9 Android module fails to compile against it with
+> *"was compiled with an incompatible version of Kotlin"*. Declaring
+> `id("org.jetbrains.kotlin.multiplatform") version "2.4.10" apply false` in the consumer's `plugins`
+> block fixes it (the mechanism the root build already relies on for `:android-client`). Note the
+> separate `org.jetbrains.kotlin.android` plugin is a hard error under AGP 9. This is a real
+> downstream requirement found by the Android fixture and belongs in the release notes.
+
+The full gate inventory and intentional hardware boundaries are in
+[release-gates.md](release-gates.md).
 
 > `agent/run-agent.sh` exists because a bare `:agent:jvmRun` is killed by macOS TCC on first
 > CoreBluetooth use — see [agent.md](agent.md#the-runnable-agent-jvm--main) for the full story.

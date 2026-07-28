@@ -209,6 +209,49 @@ class EngineBleBackendJvmTest {
         )
     }
 
+    /**
+     * Nothing cancels an in-flight op when a link drops, so a write that hangs can still be waiting
+     * out GATT_OP_TIMEOUT long after the client has reconnected. Marking on the bare handle would
+     * let that late timeout degrade the *fresh* connection, which — with fail-fast on by default —
+     * fails every subsequent with-response write on a connection that is perfectly healthy.
+     */
+    @Test
+    fun aStalledWriteFromAPreviousConnectionDoesNotDegradeTheCurrentOne() {
+        val backend = EngineBleBackend()
+        val whenTheWriteStarted = backend.generationOf(DEVICE)
+        // The client dropped and reconnected while that write was still hanging.
+        backend.advanceConnectionGeneration(DEVICE)
+
+        backend.markWriteDegraded(DEVICE, generation = whenTheWriteStarted)
+
+        assertFalse(backend.isWriteDegraded(DEVICE), "a previous connection's stall must not carry over")
+        assertNull(backend.degradedWriteRejection(DEVICE, withResponse = true))
+    }
+
+    @Test
+    fun aStalledWriteOnTheCurrentConnectionStillDegradesIt() {
+        // The guard above must not over-reach: a stall reported against the live generation is the
+        // real case the workaround exists for.
+        val backend = EngineBleBackend()
+        backend.advanceConnectionGeneration(DEVICE)
+
+        backend.markWriteDegraded(DEVICE, generation = backend.generationOf(DEVICE))
+
+        assertTrue(backend.isWriteDegraded(DEVICE))
+    }
+
+    @Test
+    fun reconnectingClearsTheDegradedState() {
+        val backend = EngineBleBackend()
+        backend.markWriteDegraded(DEVICE)
+        assertTrue(backend.isWriteDegraded(DEVICE))
+
+        backend.advanceConnectionGeneration(DEVICE)
+
+        assertFalse(backend.isWriteDegraded(DEVICE), "a re-established connection is the observed recovery")
+        assertNull(backend.degradedWriteRejection(DEVICE, withResponse = true))
+    }
+
     private companion object {
         val DEVICE = DeviceHandle("11111111-2222-3333-4444-555555555555")
     }

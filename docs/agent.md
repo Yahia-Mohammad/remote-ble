@@ -694,7 +694,8 @@ hold for **both** unless noted.
   `discover_services()` on each tracked connection every `liveness_interval`
   (`REMOTE_BLE_LIVENESS_PROBE_MS` on both). Either path — native-reported or actively probed —
   feeds the same disconnect handling.
-- *Degraded-write fail-fast* (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, Kotlin agent). Confirmed
+- *Degraded-write fail-fast* (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, on both reference
+  agents; `agent-rs` also accepts `--write-fail-fast <true|false>`). Confirmed
   on hardware: once btleplug has had one write-with-response answered by an ATT error, it stops
   delivering write completions for that peripheral for the rest of the connection — later writes
   reach the peripheral and are accepted, but nothing ever comes back. Reads are unaffected, and only

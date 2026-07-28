@@ -142,6 +142,33 @@ pub enum Op {
     },
 }
 
+impl Op {
+    /// The device this op targets, or `None` for the device-less ops (`scan.*`, `observe.stop`).
+    ///
+    /// Read-only counterpart to `translate::map_op_device`; add new device-bearing variants to
+    /// both. Used by the dispatcher so that ops this agent does not implement are still
+    /// *authorized* before they are answered — see the catch-all arm in `transport::server`.
+    pub fn device_handle(&self) -> Option<&DeviceHandle> {
+        match self {
+            Op::ScanStart { .. } | Op::ScanStop { .. } | Op::ObserveStop { .. } => None,
+            Op::Connect { device }
+            | Op::Disconnect { device }
+            | Op::Discover { device }
+            | Op::Read { device, .. }
+            | Op::Write { device, .. }
+            | Op::ObserveStart { device, .. }
+            | Op::RequestMtu { device, .. }
+            | Op::ReadDescriptor { device, .. }
+            | Op::WriteDescriptor { device, .. }
+            | Op::Pair { device }
+            | Op::Unpair { device }
+            | Op::RequestConnectionPriority { device, .. }
+            | Op::ReadRssi { device }
+            | Op::SetConnParams { device, .. } => Some(device),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanStartPayload {

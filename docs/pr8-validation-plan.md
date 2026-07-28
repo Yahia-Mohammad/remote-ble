@@ -32,8 +32,13 @@ suite has grown substantially — this is the first real-radio run against that 
 1. **Full `:e2e-runner` 14-step run**, both agents (Kotlin `:agent` **and** `agent-rs`) — scan,
    connect, discover, read (exact), write with/without response, negotiated MTU, notify (no
    miss/dup), disconnect. `phase7-bringup.md` steps 0–3.
-2. **F3 unsolicited disconnect** — "Force disconnect all" on the peripheral mid-session; confirm
-   both agents emit the drop event and the client reaches `State.Disconnected`.
+2. **F3 unsolicited disconnect** — an unsolicited BLE-level drop mid-session; confirm both agents
+   emit the drop event and the client reaches `State.Disconnected`.
+   **Stimulus corrected (2026-07-28, see [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) case 2):**
+   *not* "Force disconnect all" — Android's `BluetoothGattServer.cancelConnection()` releases the
+   server's reference without terminating a link the central established, so the radio stays up and
+   the case silently measures nothing. Kill the link for real: `adb shell cmd bluetooth_manager
+   disable`, power the peripheral down, or take it out of range.
 3. **Two-client authorization on real radio** — client B scans and can see client A's leased
    device but read/write/observe/configure/disconnect all fail; run against both agents.
 4. **`setConnParams`** — `LOW_POWER`/`BALANCED`/`LOW_LATENCY` returns `Ok` on the Android agent;

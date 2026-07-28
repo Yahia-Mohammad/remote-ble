@@ -165,39 +165,201 @@ re-confirmation of `TLS-PROXY-01` case 5.
 
 ### Case 2 — F3 unsolicited disconnect
 
-**Partial, still.** Agent half confirmed on `agent-rs`: tapping *Force disconnect all* mid-session
-produced `btleplug event received: DeviceDisconnected(PeripheralId(...))` and the connection was
-retired.
+**PASS on both agents, 2026-07-28 (evening).** The client reaches `State.Disconnected` on a genuine
+unsolicited BLE drop. `agent-rs` — btleplug/CoreBluetooth reports it in **145 ms**:
 
-Built [`PeripheralStateMain.kt`](../e2e-runner/src/jvmMain/kotlin/dev/warsha/remoteble/e2e/PeripheralStateMain.kt)
-(`:e2e-runner:peripheralStateRun`) for the client half — every prior runner in this doc only watched
-*transport* (WebSocket) state, which a BLE-level drop correctly leaves untouched; this one watches
-`Peripheral.state` directly. **Attempted three times on 2026-07-28, none conclusive**, each for a
-different reason:
+```
+agent   16:02:08.666  btleplug event received: DeviceConnected(PeripheralId(003af0e7-…))
+rig     16:02:18      phone Bluetooth switched off      (real link-layer teardown)
+agent   16:02:18.811  btleplug event received: DeviceDisconnected(PeripheralId(003af0e7-…))
+agent   16:02:18.811  BLE device disconnected (unsolicited): 003af0e7-…
+client                PASS after 2.24s — State.Disconnected, reason "peer disconnected"
+```
 
-1. Connected, tapped Force disconnect all — no observable event at all within 60s, even though the
-   agent log confirmed the connection was live. Later traced to a stray Bluetooth **bond** between
-   the Mac and phone (accepted accidentally mid-Case-6, see case 6's evidence) that appears to have
-   suppressed the disconnect from reaching CoreBluetooth.
-2. After clearing the bond (forget device + Bluetooth toggle): got a `PASS` in ~10s — too fast to
-   have been a real tap. The agent log showed why: `liveness probe failed ... declaring unsolicited
-   disconnect`, i.e. the agent's own health-check timed out the connection, not a genuine
-   `DeviceDisconnected` from btleplug. False positive, not counted.
-3. Repeated with an explicit stability check (held `Connected` for 8s before tapping) — the phone's
-   own event log confirmed `FORCED DISCONNECT` fired, but no BLE-level event of any kind reached the
-   agent within 60s.
+Kotlin agent (`:agent`, Kable engine on macOS) — **PASS in 2.86 s**, native path, same stimulus:
 
-**Read on this:** not a product defect as far as this session can tell — three different failure
-shapes across three attempts points at accumulated radio/bond instability from a very long single
-session (this doc's Case 5/6/7 sections each separately needed a Bluetooth toggle, a bond removal,
-or an agent restart to recover a wedged Mac-side Bluetooth stack). The driver itself is sound (it
-correctly detected and reported the state transition in attempt 2, just for the wrong underlying
-reason). **Needs a fresh rig session** — ideally the first thing run, before any of the other cases
-have had a chance to leave the radio in a strange state — to get a clean confirmation.
+```
+agent   DEBUG  Kable state → Disconnected [dev=c474d8cf-…] : unsolicited drop
+agent   INFO   unsolicited disconnect [c=8 dev=c474d8cf-… reason=peer disconnected]
+client         PASS after 2.86s — reason AgentError(kind=DISCONNECTED, message="peer disconnected")
+```
+
+The Kotlin agent **self-attributes**, unlike `agent-rs`: its poll path leaves the reason `null` and
+its native path populates it. Both appear in this session's log, which is what validates the
+discriminator —
+
+```
+WARN  liveness probe failed [dev=77369175-…] — declaring unsolicited disconnect
+INFO  unsolicited disconnect [dev=77369175-… reason=null]              ← poll path
+DEBUG Kable state → Disconnected [dev=c474d8cf-…] : unsolicited drop
+INFO  unsolicited disconnect [dev=c474d8cf-… reason=peer disconnected] ← native path
+```
+
+— so on the Kotlin agent a non-null reason on the wire is sufficient proof the native path fired.
+(The `null` run above was an aborted attempt where the stimulus fired during the driver's 8 s
+stability hold; the driver correctly self-aborted as INCONCLUSIVE rather than banking it.)
+
+**The validation plan's stimulus is invalid and must be changed.** *Force disconnect all* on an
+Android peripheral does **not** terminate the link. `BluetoothGattServer.cancelConnection()` releases
+the GATT *server's* reference to a connection the remote central established; it does not send a
+link-layer terminate. The app still logs `CONNECTIONS: 0` and `CentralDisconnected` — that is its own
+bookkeeping, not a stack callback — so the peripheral looks like it disconnected while the radio link
+is still up. Use a real teardown instead (`adb shell cmd bluetooth_manager disable`, powering the
+peripheral down, or walking it out of range).
+
+**Controlled matrix.** Eight runs; the last two are the controls that made the result attributable:
+
+| Stimulus | Link probe | Outcome | Native `DeviceDisconnected`? |
+|---|---|---|---|
+| Force disconnect (×6) | off | FAILED, nothing in up to 240 s | none |
+| Force disconnect (×2) | on, 10 s | "PASS" in 16-19 s | yes — but see below |
+| Force disconnect (control B) | off | FAILED, nothing in 90 s | none |
+| **Bluetooth off (control C)** | off | **PASS in 2.24 s** | **yes, 145 ms** |
+
+Control B vs C isolates the stimulus: the tap does nothing, a real teardown works instantly.
+
+**The two middle runs were an artifact — do not cite them.** They passed only because the newly-added
+link probe issues a GATT read, which on an unbonded link provokes a macOS pairing request; the
+operator rejected it, and the rejection tore the connection down. That *is* a real unsolicited drop,
+which is why a native event appeared — but it was caused by the probe, not by the stimulus under
+test, and the 16-19 s timing is the pairing dialog, not a supervision timeout. Interpreting them as a
+pass was wrong. **Lesson: never introduce the instrument and change the stimulus in the same run**;
+both were changed together here, and the result was attributed to the wrong one.
+
+**Retractions.** Two earlier readings in this section were wrong and are withdrawn:
+
+- That btleplug/CoreBluetooth "never reports a peer-initiated disconnect on macOS." It reports it in
+  145 ms. The six silent runs were the invalid stimulus, not a backend gap. Nothing about this case
+  belongs on Rig B.
+- That a "wedged CoreBluetooth peripheral identity" explained the failures. Control B failed against
+  a fresh `PeripheralId`, so identity was never the variable. (The identity does rotate on every
+  peripheral-app restart, which is what made the correlation look real.)
+
+**Method notes for the next rig session.**
+
+- *Verify the stimulus before trusting a negative.* `PeripheralStateMain` takes a link-probe interval
+  (arg 5; `0` disables) that issues a GATT read through the window — a read can only succeed over a
+  live link. Leave it **off** by default: on an unbonded peripheral it provokes pairing and can
+  manufacture the very drop being measured. Turn it on only to prove a link is still up, and expect
+  a pairing prompt when you do.
+- *The reason field does not discriminate on `agent-rs`.* It hardcodes
+  `reason: Some("peer disconnected")` in `report_unsolicited_disconnect`, the single path shared by
+  its native handler and its liveness prober. Attribute a PASS from
+  `btleplug event received: DeviceDisconnected` at `--log-level debug`, not from the wire reason.
+  Only the Kotlin agent leaves the poll path's reason `null`.
+- *The peripheral app stops advertising after a disconnect* — re-tap **START SERVER** between runs,
+  and confirm with `:e2e-runner:scanRun` before concluding anything from a scan timeout.
+- *`adb shell input tap` is silently dropped when the phone's display has slept.* Pin it with
+  `adb shell svc power stayon usb`.
+
+**One more operational trap:** after any phone-Bluetooth toggle, Android's advertiser frequently
+fails to restart even though the app logs `STARTED — advertising RBTestPeripheral`. Force-stop and
+relaunch the app, tap **START SERVER**, and confirm with `:e2e-runner:scanRun` before every run. A
+scan that returns other devices but not `RBTestPeripheral` is the peripheral's fault, not the
+agent's — checking that distinction takes one command and saves a wasted run.
+
+**Case 2 is complete.** Both agents confirmed on a real teardown, native path verified in each
+agent's own log.
 
 ### Case 3 — Two-client authorization on real radio
 
-**Not started.**
+**PASS on both agents, 2026-07-28 (evening).** Kotlin agent **11/11**; `agent-rs` **10/11 with 1
+gated** after the fixes below (8/11 with 3 gated as first run). No check failed on either agent — client B was never allowed through any device-bearing
+operation, which is what this case exists to prove.
+
+New driver [`TwoClientMain.kt`](../e2e-runner/src/jvmMain/kotlin/dev/warsha/remoteble/e2e/TwoClientMain.kt)
+(`:e2e-runner:twoClientRun`). **Two sessions in one process is a faithful harness, not a shortcut:**
+ownership keys on `session_key(principal, clientId)` and `WebSocketAgentTransport` mints `clientId`
+as a fresh `Uuid.random()` per instance, so two transports are two distinct clients to the agent. A
+second physical device would add no coverage. Cross-*principal* auth is a different question, already
+covered by `AUTH-PRINCIPAL-01`'s paired tests. Ops go through `AgentSession.request` rather than the
+`Peripheral` facade because this case asserts on the *typed error*, which the facade converts to
+exceptions.
+
+```
+PASS  B can still scan and see the leased device
+PASS  B's connect / read / write / observe / discover / disconnect  — PERIPHERAL_BUSY
+PASS  A's own read still works while B is refused
+PASS  B can connect once A releases                   (Kotlin agent)
+```
+
+**Two `agent-rs` divergences were found, gated rather than accommodated** (assertions left intact so
+an XPASS signals a stale gate — same practice as the conformance suite). One is now **fixed**; one is
+not, for a reason worth recording.
+
+1. **Capability was checked before authorization — FIXED 2026-07-28, gate removed.** `ReadRssi` and `SetConnParams` fall to a catch-all
+   `_ => OpResult::err(Unsupported)` arm in `transport/server.rs` that never calls
+   `authorize_connected`, so a non-owner gets `UNSUPPORTED` where the Kotlin agent gives
+   `PERIPHERAL_BUSY` (its `BleAgent` authorizes in every device-bearing branch first). The plan's
+   requirement is still met — the op *is* refused — and nothing device-specific leaks, since the
+   capability set is already public from the handshake. The catch-all now authorizes first via a new
+   `Op::device_handle()` accessor (read-only counterpart to `translate::map_op_device`, so new
+   device-bearing variants must be added to both). Two unit tests pin it: a non-owner gets
+   `PERIPHERAL_BUSY`, the owner still gets the honest `UNSUPPORTED`. Re-confirmed on the rig.
+2. **A handle stops resolving after disconnect — NOT fixed; a fix was tried and reverted.** `agent-rs` resolves handles by scanning
+   `adapter.peripherals()`, and btleplug drops a peripheral from that list once it disconnects with
+   no scan running — so B's reconnect after A released returned `UNKNOWN_DEVICE`, and a client must
+   rescan before it can reconnect. The Kotlin agent builds a Kable `Peripheral` straight from the
+   identifier and has no such dependency. This is the more consequential of the two: it changes the
+   reconnect contract between the agents.
+
+   **Retaining connected peripherals in a cache, with `find_peripheral` falling back to it, was
+   implemented and then reverted.** On the rig the handle did resolve — but `connect()` on the
+   retained handle never completed: no `DeviceConnected`, no error, ~45 s until the client's own
+   timeout, surfacing as an opaque `TIMEOUT` with no message. That trades a fast, actionable error
+   for a silent stall, which is worse for a caller — `UNKNOWN_DEVICE` at least says exactly what to
+   do. The rationale is recorded on `BtleplugBackend::find_peripheral` so it is not attempted blind
+   again. Closing this properly needs a way to re-establish from a bare identifier, which btleplug
+   does not currently offer.
+
+**A third finding, from the run that exposed it.** The first attempt failed on `A's own read` because
+the driver targeted "the first readable characteristic", which on an Android peripheral is one of the
+platform's own SIG services (`00001849`/`00002b93`, Volume Control) — those require encryption, so
+the read raised a pairing dialog and stalled. Two things came out of that:
+
+- The driver now prefers a **vendor** (non-SIG-base) service, falling back to any readable one.
+  Encryption requirements are a GATT *security permission*, not a property bit, so `properties.read`
+  cannot identify a safe target — service-UUID class is the only signal available client-side.
+- **`GATT_OP_TIMEOUT` was exercised by an unplanned real stall** and behaved exactly as designed:
+  `TIMEOUT — read did not complete within 10s`, instead of parking the command coroutine forever.
+  First field exercise of that fix outside a deliberate test.
+
+**Related agent finding — the liveness probe could kill a healthy connection. FIXED in both agents.**
+In an earlier attempt
+(default 15 s probe interval) the agent's own watchdog tore down client A's connection:
+
+```
+INFO  device connected [c=13 dev=004302b7-…]
+WARN  liveness probe failed [dev=004302b7-… deepCheck=true] — declaring unsolicited disconnect
+INFO  unsolicited disconnect [c=13 dev=004302b7-… reason=null]
+```
+
+`checkLiveness` probes with a real GATT read on the first readable characteristic; when that one
+demands encryption the read blocks on a pairing dialog, `LIVENESS_PROBE_TIMEOUT` (5 s) expires, and
+the watchdog declares a **false** unsolicited disconnect on a link that was never in trouble. It has
+the same unavoidable blind spot as the driver did — it cannot tell which characteristic will demand
+pairing, because encryption is a GATT security *permission* and is not visible in the discovered
+table.
+
+**Fix: both agents now require two consecutive failed deep probes before declaring a drop**
+(`ConnectionWatcher.LIVENESS_FAILURES_BEFORE_DROP`, and the same constant in `btleplug_impl.rs`). One
+stalled round trip is weak evidence; two in a row is not. The cost is one extra probe interval before
+a genuine silent drop is declared, which matters little given the native stream reports a real drop
+in ~145 ms (case 2) — this loop is the backstop, not the primary detector.
+
+> A first cut of the fix was wrong in an instructive way: it let *any* successful check reset the
+> counter. But the shallow per-tick check reads the platform's cached state — precisely what goes
+> stale when a peripheral vanishes — so it reset the counter between every pair of deep probes and
+> the threshold could never be reached. The pre-existing
+> `deepLivenessProbeCatchesAStaleConnectedState` test caught it. Only a successful *deep* probe
+> clears the count.
+
+Case 3 was still run with `REMOTE_BLE_LIVENESS_PROBE_MS=300000` so the watchdog could not interfere
+with a case that is not about liveness.
+
+> The Kotlin 11/11 run predates the PASS/XFAIL reporting split, but the assertions themselves did not
+> change — only how a non-`PERIPHERAL_BUSY` refusal is reported. Every Kotlin check returned
+> `PERIPHERAL_BUSY` or `Ok`, so it is 11/11 under either build.
 
 ### Case 4 — `setConnParams`
 

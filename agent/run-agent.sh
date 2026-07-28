@@ -75,7 +75,14 @@ echo "==> Launching agent on ws://0.0.0.0:$PORT/agent (logs: $LOG)…"
 : > "$LOG"
 OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
   --env "AGENT_LIBJVM=$LIBJVM" --env "AGENT_CP=$CP")
-[ -n "${REMOTE_BLE_TOKEN:-}" ] && OPEN_ARGS+=(--env "REMOTE_BLE_TOKEN=$REMOTE_BLE_TOKEN")
+# `open` starts the app through LaunchServices, which does NOT inherit this shell's environment —
+# only what's passed with --env reaches the agent. Forward every REMOTE_BLE_* variable rather than
+# an allowlist: the agent reads a growing set of them (token, liveness interval, grace windows,
+# log level, REMOTE_BLE_WRITE_FAIL_FAST), and an allowlist silently drops the ones it hasn't been
+# taught, which looks exactly like the setting having no effect.
+while IFS='=' read -r name _; do
+  OPEN_ARGS+=(--env "$name=${!name}")
+done < <(env | grep '^REMOTE_BLE_[A-Z0-9_]*=' || true)
 open "${OPEN_ARGS[@]}" --args dev/warsha/remoteble/agent/MainKt "$PORT"
 
 MATCH="RemoteBleAgent.app/Contents/MacOS/agent-launcher"

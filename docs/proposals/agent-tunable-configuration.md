@@ -3,13 +3,15 @@
 **Status:** proposal, not started — with one exception already landed, described below. Raised
 2026-07-28 during Rig A hardware validation.
 
-> **Precedent already set.** `REMOTE_BLE_WRITE_FAIL_FAST` (Kotlin agent, default `true`) shipped
-> ahead of this proposal because it gates a *workaround for a backend defect*, and shipping that
-> un-switchable would have meant the agent silently special-casing a vendor bug. It follows the
-> shape recommended here: an `AgentConfig` field, a `REMOTE_BLE_*` environment variable, strict
-> parsing that fails startup on a bad value rather than falling back, and a startup log line so the
-> running behaviour is visible. Use it as the reference implementation for the rest of category A —
-> and note it is Kotlin-only, so `agent-rs` parity is outstanding.
+> **Precedent already set.** `REMOTE_BLE_WRITE_FAIL_FAST` (default `true`) shipped ahead of this
+> proposal because it gates a *workaround for a backend defect*, and shipping that un-switchable
+> would have meant the agent silently special-casing a vendor bug. It follows the shape recommended
+> here: an `AgentConfig` field, a `REMOTE_BLE_*` environment variable, strict parsing that fails
+> startup on a bad value rather than falling back, and a startup log line so the running behaviour
+> is visible. It is now on **both** reference agents — `agent-rs` reads the same environment
+> variable and additionally exposes `--write-fail-fast <true|false>`, and both accept only `true`
+> or `false` (a typo fails startup rather than silently taking the default). Use it as the
+> reference implementation for the rest of category A.
 **Scope:** the Kotlin agent (`:agent`, all four hosts) and `agent-rs`. Not the client SDK.
 
 ## Why this matters

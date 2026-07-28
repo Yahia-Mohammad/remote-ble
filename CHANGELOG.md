@@ -26,6 +26,24 @@ protocol version: **1**.
 
 ### Added
 
+- **Clean-consumer gates for the Android and Apple publication variants.** `consumer-tests/android`
+  and `consumer-tests/kmp` join the existing JVM fixture, each a standalone Gradle build resolving
+  Maven coordinates only. They exist because `jvm`, `android` (`.aar`) and Apple (klib) artifacts are
+  selected through different Gradle metadata and can fail independently — a closure that is complete
+  for one can be broken for another. Both resolve the full closure
+  (`client-sdk-android` → `protocol-android` + `log-android`, and the `iosarm64` equivalents) and
+  both were verified to fail on an unpublished version, so neither can pass vacuously. Wired into
+  `release-gates.yml`; the Apple gate runs on macOS because Kotlin/Native Apple targets do not
+  cross-compile.
+
+  > **Android consumers on AGP 9 must put KGP 2.4+ on their build classpath.** AGP 9.3.0's built-in
+  > Kotlin compiler is 2.2.0 and reads metadata only to 2.3.0, while this SDK publishes 2.4.0
+  > metadata — so a stock AGP 9 module fails with *"was compiled with an incompatible version of
+  > Kotlin"*. Add `id("org.jetbrains.kotlin.multiplatform") version "2.4.10" apply false` to the
+  > consumer's `plugins` block. Note the older `org.jetbrains.kotlin.android` plugin is a hard error
+  > under AGP 9, so the obvious remedy is the wrong one. Found by the new Android gate; the JVM gate
+  > cannot detect it.
+
 - **Multi-architecture Rust-agent image workflow.** PR/main builds smoke-test the amd64 image; a
   version-tag workflow publishes an amd64/arm64 GHCR manifest with semantic/commit tags, OCI labels,
   Buildx SBOM/provenance, and an archived digest after the shared version guard passes.
@@ -84,6 +102,23 @@ protocol version: **1**.
 
 ### Fixed
 
+- **A non-owner can no longer learn anything about a leased device from `agent-rs`.** Operations the
+  Rust agent does not implement (`rssi`, `conn.params`) fell to a catch-all arm that answered
+  `UNSUPPORTED` without consulting the lease registry, so a client that did not own the peripheral
+  got a capability answer where the Kotlin agent gives `PERIPHERAL_BUSY`. Both agents now authorize
+  first. Found by the new two-client rig case on real radio, and confirmed fixed there.
+
+- **A single stalled liveness probe no longer tears down a healthy connection.** Both agents now
+  require two consecutive failed deep probes before declaring an unsolicited disconnect. A probe is a
+  real GATT round trip, so one failure cannot distinguish "the peripheral is gone" from "this round
+  trip did not return in time" — and the second case is not hypothetical: on real hardware a probe
+  read of an encrypted characteristic blocked on a host pairing dialog until the probe timeout, and
+  the watchdog dropped a link that was never in trouble. The probe cannot dodge this by choosing a
+  safer characteristic, because encryption is a GATT security *permission* and is not visible in the
+  discovered table. The cost is one extra probe interval before a genuine silent drop is declared;
+  the native disconnect stream reports real drops in ~145 ms, so this loop is the backstop rather
+  than the primary detector.
+
 - **A stalled ATT transaction no longer wedges an agent's write chain.** Both reference agents now
   bound a single characteristic read/write at 10s (below the client SDK's 15s default op timeout)
   and report `TIMEOUT` when it expires, instead of awaiting the backend indefinitely. Confirmed on
@@ -105,7 +140,8 @@ protocol version: **1**.
   unverified on hardware.
 
 - **Writes on a connection that has stopped completing them now fail immediately**
-  (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, Kotlin agent). Follow-up hardware verification of
+  (`REMOTE_BLE_WRITE_FAIL_FAST`, default `true`, both reference agents; `agent-rs` also takes
+  `--write-fail-fast`). Follow-up hardware verification of
   the bound above found the gap has a second symptom: after one write-with-response is answered by
   an ATT error, btleplug delivers no further write completions for that peripheral *at all* — the
   peripheral's own log shows later writes arriving and being accepted with error injection already
@@ -114,7 +150,9 @@ protocol version: **1**.
   costs a full 10s before failing. The short-circuit reports the same `TIMEOUT` error the wait
   would have produced — it changes latency, not semantics — and the switch exists so the workaround
   can be turned off deliberately rather than the agent silently special-casing a backend defect.
-  The setting is printed at startup. The E2E step "a failed write never poisons the session" is
+  The state is scoped to a single connection generation, so a write that stalls, drops, and only
+  times out after the client has already reconnected cannot degrade the fresh connection; with
+  fail-fast off, a write that completes again clears it. The setting is printed at startup. The E2E step "a failed write never poisons the session" is
   gated as XFAIL on btleplug-backed agents for the same reason as the step above it: no agent-side
   handling can make it pass while the backend behaves this way.
 

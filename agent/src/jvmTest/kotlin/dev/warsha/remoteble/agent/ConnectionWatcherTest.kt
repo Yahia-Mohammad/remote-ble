@@ -87,10 +87,55 @@ class ConnectionWatcherTest {
         backend.livenessOverride = false
         advanceTimeBy(tick * 2) // crosses the 3rd tick, where the deep probe runs
         runCurrent()
+        assertTrue(
+            registry.snapshot().single { it.handle == handle }.connected,
+            "one failed probe is not enough — see LIVENESS_FAILURES_BEFORE_DROP",
+        )
+
+        advanceTimeBy(tick * 3) // the second consecutive deep-probe failure
+        runCurrent()
 
         val lease = registry.snapshot().single { it.handle == handle }
         assertFalse(lease.connected, "the deep liveness probe should catch a stale 'connected' link")
         assertTrue(lease.inGrace, "watcher should have started the release grace")
+    }
+
+    /**
+     * Regression (Rig A case 3, 2026-07-28): a *single* failed deep probe must not tear the
+     * connection down. A probe read of an encrypted characteristic blocked on a macOS pairing
+     * dialog, timed out, and the watchdog declared a drop on a link that was perfectly healthy.
+     * The probe cannot dodge this by picking a safer characteristic — encryption is a GATT security
+     * permission, not a property bit — so the guard has to be "confirm it twice".
+     */
+    @Test
+    fun oneFailedDeepProbeDoesNotDeclareADropAndRecoveryClearsIt() = runTest {
+        val backend = FakeBleBackend()
+        backend.connect(DeviceHandle(handle))
+        val registry = PeripheralRegistry(backgroundScope, leaseGrace = 10.seconds)
+        registry.acquire(handle, owner)
+        registry.onConnected(handle, owner)
+        ConnectionWatcher(registry, backend, backgroundScope, interval = tick, livenessInterval = tick * 3).start()
+
+        // One stalled probe — a pairing dialog, a busy stack, a slow round trip.
+        backend.livenessOverride = false
+        advanceTimeBy(tick * 3)
+        runCurrent()
+        assertTrue(
+            registry.snapshot().single { it.handle == handle }.connected,
+            "a single stalled probe must not disconnect a live peripheral",
+        )
+
+        // It answers again: the counter resets, so a later isolated failure still won't drop it.
+        backend.livenessOverride = null
+        advanceTimeBy(tick * 3)
+        runCurrent()
+        backend.livenessOverride = false
+        advanceTimeBy(tick * 3)
+        runCurrent()
+
+        val lease = registry.snapshot().single { it.handle == handle }
+        assertTrue(lease.connected, "a recovered probe must reset the consecutive-failure count")
+        assertFalse(lease.inGrace)
     }
 
     @Test

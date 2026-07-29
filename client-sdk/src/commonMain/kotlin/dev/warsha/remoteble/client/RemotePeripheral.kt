@@ -114,6 +114,28 @@ public class RemotePeripheral(
                 }
             }
             .launchIn(scope)
+
+        // A dead agent sends no `conn.state` event — it cannot, it is gone — so the branch above
+        // never fires and `state` used to sit at `Connected` indefinitely while every operation
+        // failed TRANSPORT_LOST (Rig B case 5, follow-up 12). A Kable consumer that gates on
+        // `state.collect { … }` therefore waited forever for a transition that could not arrive.
+        //
+        // Deliberately keyed on GAVE_UP rather than DISCONNECTED: a transport blip with a live
+        // reconnect episode really is recoverable, and the agent may still be holding the BLE link
+        // on our behalf, so tearing the peripheral down on every blip would be worse than the bug.
+        // Once reconnect is exhausted (or was never enabled) that justification is gone.
+        session.transportState
+            .filter { it == TransportState.GAVE_UP || it == TransportState.INCOMPATIBLE_PROTOCOL }
+            .onEach { transport ->
+                if (_state.value !is State.Disconnected) {
+                    Logger.info(LogTags.PERIPHERAL) {
+                        "transport unrecoverable ($transport) — disconnecting [dev=${handle.value}]"
+                    }
+                    teardownConnection()
+                    _state.value = State.Disconnected(null)
+                }
+            }
+            .launchIn(scope)
     }
 
     override suspend fun connect(): CoroutineScope {

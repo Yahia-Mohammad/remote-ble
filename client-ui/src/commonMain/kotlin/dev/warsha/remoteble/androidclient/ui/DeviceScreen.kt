@@ -144,6 +144,9 @@ private fun AgentStateBanner(agentState: TransportState, modifier: Modifier = Mo
     val (text, color) = when (agentState) {
         TransportState.CONNECTING -> "Reconnecting to agent…" to AppColors.warning
         TransportState.DISCONNECTED -> "Agent disconnected — device status below may be stale" to AppColors.danger
+        // Distinct wording because the user's options differ: the message above describes a state
+        // the client is actively working its way out of, this one does not.
+        TransportState.GAVE_UP -> "Agent unreachable — reconnect attempts stopped" to AppColors.danger
         TransportState.INCOMPATIBLE_PROTOCOL -> "Agent protocol is incompatible — update the client or agent" to AppColors.danger
         TransportState.CONNECTED -> return // caller doesn't show the banner in this case
     }

@@ -17,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertFailsWith
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -123,6 +124,81 @@ class ErrorPathTest {
             withTimeout(10.seconds) { peripheral.state.first { it is State.Disconnected } }
             assertEquals(null, peripheral.services.value)
             peripheral.close()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun kablePeripheralDisconnectsWhenTheAgentDiesAndReconnectIsExhausted() = runBlocking {
+        // Rig B case 5 / follow-up 12: a killed agent sends no `conn.state` event — it cannot —
+        // so `state` sat at Connected forever while every op failed TRANSPORT_LOST. A Kable app
+        // gating on `state.collect { … }` waited for a transition that could never arrive.
+        val port = freePort()
+        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
+            .also { it.startAndAwaitReady(port) }
+        val session = DefaultAgentSession(
+            WebSocketAgentTransport(
+                "ws://localhost:$port/agent", scope, httpClient,
+                // Bounded so the give-up arrives promptly; unbounded is the production default and
+                // would (correctly) keep the peripheral Connected while it kept trying.
+                reconnect = ReconnectPolicy(
+                    backoff = Backoff(20.milliseconds, 40.milliseconds),
+                    maxAttempts = 2,
+                ),
+            ),
+            CborProtocolCodec(),
+            scope,
+        )
+        try {
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+            val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
+            peripheral.connect()
+            assertIs<State.Connected>(peripheral.state.value)
+
+            // The agent dies. No graceful disconnect, no wire event — exactly the case 5 stimulus.
+            server.stop()
+
+            withTimeout(15.seconds) { peripheral.state.first { it is State.Disconnected } }
+            assertEquals(null, peripheral.services.value)
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun kablePeripheralStaysConnectedWhileReconnectIsStillTrying() = runBlocking {
+        // The other half of the decision, and the reason this is not "disconnect on any drop":
+        // a transport blip is genuinely recoverable and the agent may still hold the BLE link, so
+        // tearing down on every drop would be worse than the bug it fixes.
+        val port = freePort()
+        var server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
+            .also { it.startAndAwaitReady(port) }
+        val session = DefaultAgentSession(
+            WebSocketAgentTransport(
+                "ws://localhost:$port/agent", scope, httpClient,
+                reconnect = ReconnectPolicy(backoff = Backoff(50.milliseconds, 200.milliseconds)),
+            ),
+            CborProtocolCodec(),
+            scope,
+        )
+        try {
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+            val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
+            peripheral.connect()
+            assertIs<State.Connected>(peripheral.state.value)
+
+            server.stop()
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
+            // Unbounded reconnect: still trying, so the peripheral must NOT have been torn down.
+            assertIs<State.Connected>(peripheral.state.value)
+
+            server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
+                .also { it.startAndAwaitReady(port) }
+            withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+            assertIs<State.Connected>(peripheral.state.value)
         } finally {
             server.stop()
         }

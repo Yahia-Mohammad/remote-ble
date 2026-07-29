@@ -102,6 +102,17 @@ The design keeps them separate end to end: `TransportState` lives on the session
 The reconnection policy (below) is built so that the transport layer can recover
 transparently *without* fabricating BLE-state changes.
 
+**One refinement, added 0.10.0 after Rig B case 5.** Keeping the two separate is right while the
+transport might still recover; it stops being right once it definitively cannot. A killed agent
+sends no `ConnectionState` event — it cannot — so a peripheral that only ever moves on wire events
+sat at `Connected` indefinitely while every operation failed `TRANSPORT_LOST`, and a Kable consumer
+gating on `state.collect { … }` waited for a transition that could never arrive. `TransportState`
+therefore distinguishes `DISCONNECTED` ("a reconnect episode is running — still a blip") from
+`GAVE_UP` ("nothing is going to fix this"), and `RemotePeripheral` moves to `Disconnected` **only**
+on the latter. The rule is unchanged for blips, which is the case it was written for; what is new
+is that "the transport is never coming back" is not a blip, and continuing to report `Connected`
+there is not separation of concerns, it is a false claim about the radio.
+
 ### Reconnection
 
 **Policy: auto-replay subscriptions, surface the drop — but never synthesize a BLE

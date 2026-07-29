@@ -323,6 +323,15 @@ class DefaultAgentSession(
                         Logger.info(LogTags.SESSION) { "transport lost — failing in-flight requests" }
                         failAllPending()
                     }
+                    TransportState.GAVE_UP -> {
+                        // Same session-level handling as a drop — in-flight requests fail with
+                        // TRANSPORT_LOST either way. The difference is downstream: RemotePeripheral
+                        // watches for this specifically, because it is the point at which
+                        // "recoverable blip" stops being a defensible reading (follow-up 12).
+                        _readiness.value = SessionReadiness.DISCONNECTED
+                        Logger.warn(LogTags.SESSION) { "transport gave up — failing in-flight requests" }
+                        failAllPending()
+                    }
                     TransportState.INCOMPATIBLE_PROTOCOL -> {
                         _readiness.value = SessionReadiness.INCOMPATIBLE_PROTOCOL
                         Logger.warn(LogTags.SESSION) { "protocol incompatible — failing in-flight requests" }

@@ -679,10 +679,23 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
     `instance.start(wait = false)` binds asynchronously the throw lands on a coroutine worker with
     no handler, aborting the process. Fixed by fixing finding 8; separately, a bind failure should
     be reportable as `AgentStartResult.Failed` rather than being unobservable.
-12. **`Peripheral.state` stays `Connected` after the agent dies** (case 5). Every op returns
-    `TRANSPORT_LOST`, but the state flow a Kable app actually observes never moves, and no wire
-    event is emitted. Needs a decision: is an indefinite `Connected` the intended "recoverable
-    transport blip" semantics, or should transport loss drive the peripheral to `Disconnected`?
+12. **`Peripheral.state` stays `Connected` after the agent dies** (case 5) — **DECIDED AND FIXED
+    2026-07-29 (evening).** Decision: `Disconnected` **once reconnect gives up**, not on any drop.
+
+    `TransportState` gained `GAVE_UP` — dropped with nothing retrying (the policy exhausted its
+    attempts, or reconnect was disabled) — as distinct from `DISCONNECTED`, which means a recovery
+    episode is still running. `RemotePeripheral` tears down and moves to `Disconnected` only on
+    `GAVE_UP` (or `INCOMPATIBLE_PROTOCOL`). A blip leaves it `Connected`, because the agent may
+    genuinely still be holding the BLE link and disconnecting on every blip would be worse than the
+    defect. A deliberate `close()` stays `DISCONNECTED`: "gave up" is news, and it is not news to
+    whoever called `close()`.
+
+    Two tests pin the two halves against each other — one that a dead agent with exhausted
+    reconnect reaches `Disconnected`, one that an unbounded-reconnect blip does **not** — and each
+    mutation (removing the reaction; reacting to plain `DISCONNECTED` too) killed exactly one of
+    them. `design-decisions.md`'s "never synthesize a BLE disconnect on an IP blip" is refined
+    rather than contradicted: it holds for blips, which is the case it was written for, and an
+    unrecoverable transport is not a blip.
 13. **The background-caveat strings** (case 3) — **fixed in four places**, one more than first
     counted: the `ios-agent/Info.plist` comment, `IosAgentEntry`'s `keepScreenOnNotice`, Rig B
     case 3 in [pr8-validation-plan.md](pr8-validation-plan.md), and `ios-agent/README.md`'s

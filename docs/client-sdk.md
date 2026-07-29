@@ -32,7 +32,9 @@ One bidirectional, message-oriented, **BLE-agnostic** link to one agent at an op
 endpoint.
 
 ```kotlin
-enum class TransportState { CONNECTING, CONNECTED, DISCONNECTED }
+// GAVE_UP = dropped and not retrying (reconnect exhausted, or disabled): distinct from
+// DISCONNECTED, which means a recovery attempt is still in progress.
+enum class TransportState { CONNECTING, CONNECTED, DISCONNECTED, GAVE_UP, INCOMPATIBLE_PROTOCOL }
 
 interface AgentTransport {
     val state: StateFlow<TransportState>

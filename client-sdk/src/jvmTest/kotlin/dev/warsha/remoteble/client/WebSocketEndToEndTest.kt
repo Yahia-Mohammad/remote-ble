@@ -741,7 +741,29 @@ class WebSocketEndToEndTest {
         // Initial connect fails (no server) and arms the bounded loop; it must give up, not spin.
         runCatching { transport.connect() }
         withTimeout(5.seconds) { gaveUp.await() }
-        assertEquals(TransportState.DISCONNECTED, transport.state.value)
+        // GAVE_UP, not DISCONNECTED: this used to rest at DISCONNECTED, which made "still
+        // retrying" and "stopped retrying" indistinguishable to every observer — the root of
+        // RemotePeripheral.state sitting at Connected forever (Rig B follow-up 12).
+        assertEquals(TransportState.GAVE_UP, transport.state.value)
+    }
+
+    @Test
+    fun onGaveUpSeesTheGiveUpStateItWasTriggeredBy() = runBlocking {
+        // The callback is a caller's hook and may read the transport; it must not observe the
+        // state that preceded its own trigger.
+        val port = freePort()
+        val observed = CompletableDeferred<TransportState>()
+        lateinit var transport: WebSocketAgentTransport
+        transport = WebSocketAgentTransport(
+            "ws://localhost:$port/agent", scope, httpClient,
+            reconnect = ReconnectPolicy(
+                backoff = Backoff(20.milliseconds, 40.milliseconds),
+                maxAttempts = 2,
+                onGaveUp = { observed.complete(transport.state.value) },
+            ),
+        )
+        runCatching { transport.connect() }
+        assertEquals(TransportState.GAVE_UP, withTimeout(5.seconds) { observed.await() })
     }
 
     private companion object {

@@ -213,10 +213,25 @@ class WebSocketAgentTransport(
             Logger.warn(LogTags.TRANSPORT) { "INCOMPATIBLE_PROTOCOL [cid=$clientId]" }
             return
         }
-        _state.value = TransportState.DISCONNECTED
-        Logger.info(LogTags.TRANSPORT) { "DISCONNECTED [cid=$clientId]" }
-        if (reconnect.enabled && !closed) {
-            scope.launch { reconnectWithBackoff() }
+        when {
+            closed -> {
+                // A deliberate close(). Stays DISCONNECTED: GAVE_UP exists to tell an observer
+                // something unexpected happened and will not be repaired, which is not news to
+                // whoever called close().
+                _state.value = TransportState.DISCONNECTED
+                Logger.info(LogTags.TRANSPORT) { "DISCONNECTED (closed) [cid=$clientId]" }
+            }
+            reconnect.enabled -> {
+                _state.value = TransportState.DISCONNECTED
+                Logger.info(LogTags.TRANSPORT) { "DISCONNECTED [cid=$clientId]" }
+                scope.launch { reconnectWithBackoff() }
+            }
+            else -> {
+                // Dropped with no policy to retry it. Saying DISCONNECTED here would invite every
+                // observer to wait for a recovery that nothing is going to attempt.
+                _state.value = TransportState.GAVE_UP
+                Logger.info(LogTags.TRANSPORT) { "GAVE_UP (reconnect disabled) [cid=$clientId]" }
+            }
         }
     }
 
@@ -242,7 +257,13 @@ class WebSocketAgentTransport(
             } catch (_: Throwable) {
                 if (maxAttempts != null && attempt >= maxAttempts) {
                     Logger.error(LogTags.TRANSPORT) { "reconnect gave up after $attempt attempt(s) [cid=$clientId]" }
-                    if (!closed) reconnect.onGaveUp?.invoke()
+                    // Publish the give-up *before* the callback: an onGaveUp handler that reads
+                    // this transport's state must not observe the state that preceded its own
+                    // trigger. The state is the SDK's signal; the callback stays the caller's hook.
+                    if (!closed) {
+                        _state.value = TransportState.GAVE_UP
+                        reconnect.onGaveUp?.invoke()
+                    }
                     return
                 }
                 Logger.warn(LogTags.TRANSPORT) {

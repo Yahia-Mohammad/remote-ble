@@ -139,14 +139,61 @@ class AgentRunnerTest {
         graph.dispose()
     }
 
+    /**
+     * Rig B case 4 regression (`docs/pr8-rig-b-evidence.md` finding 8): `stop()` must actually stop
+     * the WebSocket server, not merely close the Koin graph.
+     *
+     * On hardware this defect left the agent listening *and authenticating* after the user tapped
+     * Stop — while the UI showed the `Start` button — and made the next Start abort the process on
+     * `EADDRINUSE`. Nothing here caught it because the suite only ever asserted the lease half of
+     * teardown; `serverStopped` was derived from `graphClosed`, so it read `true` no matter what.
+     */
+    @Test
+    fun stopStopsTheServerAndDoesNotInferTheResultFromTheGraphClose() = runBlocking {
+        val graph = TestGraph()
+        val runner = AgentRunner({ graph }, Unit)
+        assertEquals(AgentStartResult.Started, runner.start(AgentConfig()))
+
+        val result = runner.stop()
+
+        assertEquals(1, graph.stopServerCalls, "stop() must stop the WebSocket server")
+        assertTrue(result.serverStopped)
+        assertTrue(result.graphClosed)
+        graph.dispose()
+    }
+
+    /**
+     * The other half of the same finding: a server that fails to stop must be *reported* as such.
+     * Deriving `serverStopped` from `graphClosed` made the result structurally incapable of saying
+     * "the port is still open", which is exactly what the operator needed to know.
+     */
+    @Test
+    fun aServerThatFailsToStopIsReportedRatherThanAssumedStopped() = runBlocking {
+        val graph = TestGraph(onStopServer = { error("port still bound") })
+        val runner = AgentRunner({ graph }, Unit)
+        assertEquals(AgentStartResult.Started, runner.start(AgentConfig()))
+
+        val result = runner.stop()
+
+        assertEquals(1, graph.stopServerCalls)
+        assertFalse(result.serverStopped, "a failed server stop must not report success")
+        // Teardown is still best-effort: one failing step must not strand the graph or the state.
+        assertTrue(result.graphClosed)
+        assertFalse(runner.running.value)
+        assertEquals(AgentRunnerState.STOPPED, runner.state.value)
+        graph.dispose()
+    }
+
     private class TestGraph(
         private val onStart: () -> Unit = {},
+        private val onStopServer: () -> Unit = {},
     ) : AgentRunnerGraph {
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         override val monitor = AgentMonitor()
         override val registry = PeripheralRegistry(scope)
         var startCalls = 0
         var closeCalls = 0
+        var stopServerCalls = 0
         val disconnects = mutableListOf<DeviceHandle>()
 
         override fun start() {
@@ -156,6 +203,11 @@ class AgentRunnerTest {
 
         override suspend fun disconnect(handle: DeviceHandle) {
             disconnects += handle
+        }
+
+        override fun stopServer() {
+            stopServerCalls++
+            onStopServer()
         }
 
         override fun close() {

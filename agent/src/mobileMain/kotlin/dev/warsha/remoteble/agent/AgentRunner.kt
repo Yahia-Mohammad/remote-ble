@@ -5,11 +5,13 @@ import dev.warsha.remoteble.agent.di.agentModule
 import dev.warsha.remoteble.protocol.DeviceHandle
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import org.koin.core.KoinApplication
 import org.koin.dsl.koinApplication
@@ -39,6 +41,18 @@ internal interface AgentRunnerGraph {
     val registry: PeripheralRegistry
     fun start()
     suspend fun disconnect(handle: DeviceHandle)
+
+    /**
+     * Stops the WebSocket server. Separate from [close] because closing the Koin graph does **not**
+     * stop it: Koin only runs a definition's `onClose` callback when dropping it, the module
+     * declares none, and [AgentWebSocketServer] is not `AutoCloseable`, so nothing would ever call
+     * its `stop()`. Leaving it running kept the agent listening *and authenticating* after the user
+     * tapped Stop, and made the next Start abort the process on `EADDRINUSE` — see Rig B case 4
+     * (`docs/pr8-rig-b-evidence.md`, findings 8 and 10). `Main.kt` never had this bug because the
+     * desktop shutdown hook calls `server.stop()` explicitly; this is the mobile equivalent.
+     */
+    fun stopServer()
+
     fun close()
 }
 
@@ -57,6 +71,7 @@ private class KoinAgentRunnerGraph(config: AgentConfig) : AgentRunnerGraph {
     }
 
     override suspend fun disconnect(handle: DeviceHandle) = backend.disconnect(handle)
+    override fun stopServer() = server.stop()
     override fun close() = application.close()
 }
 
@@ -161,7 +176,22 @@ class AgentRunner private constructor(
         // Best-effort: teardown must complete even if a step throws (e.g. a double-close slipping
         // through, or a server already stopped) so `running` still flips and callers don't see an
         // uncaught throwable on a fire-and-forget teardown scope.
-        val graphClosed = runCatchingNonCancellation { currentGraph.close() }.isSuccess
+        //
+        // Stop the server *before* closing the graph, matching the order `Main.kt`'s shutdown hook
+        // uses (disconnect leases, then `server.stop()`), and report the two outcomes separately:
+        // this used to derive `serverStopped` from `graphClosed`, which asserted a teardown that
+        // never happened.
+        //
+        // Off the caller's dispatcher, because both of these *block*: Ktor's `stop()` waits out its
+        // grace + timeout (600ms by default) and `Koin.close()` is synchronous. The UI calls this
+        // straight from the composition scope (`AgentApp`'s `onStop`), which is `Dispatchers.Main`
+        // — blocking there would freeze the screen for the whole teardown, and on Kotlin/Native
+        // Main is the one dispatcher worth keeping free.
+        val (serverStopped, graphClosed) = withContext(Dispatchers.Default) {
+            val stopped = runCatchingNonCancellation { currentGraph.stopServer() }.isSuccess
+            val closed = runCatchingNonCancellation { currentGraph.close() }.isSuccess
+            stopped to closed
+        }
         // Flipped last (not inside the lock) so a concurrent start() early-returns on the still-true
         // `running` guard for the whole teardown window rather than racing a half-torn-down graph.
         _running.value = false
@@ -170,7 +200,7 @@ class AgentRunner private constructor(
             wasRunning = true,
             disconnectAttempts = leases.size,
             disconnectFailures = disconnectFailures,
-            serverStopped = graphClosed,
+            serverStopped = serverStopped,
             graphClosed = graphClosed,
         )
     }

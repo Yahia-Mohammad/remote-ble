@@ -30,7 +30,9 @@ public class RemotePeripheralFactory(
  * The one place the local-vs-remote decision lives. The returned [Peripheral] is
  * the same type either way, so the app logic consuming it is identical.
  *
- * - [BleMode.LOCAL] uses Kable's platform [Peripheral] builder (local radio).
+ * - [BleMode.LOCAL] uses Kable's platform [Peripheral] builder (local radio), with
+ *   [applyPlatformWorkarounds] applied first — the caller's [kableLogging] block runs last and can
+ *   therefore still override anything it sets.
  * - [BleMode.REMOTE] requires a [RemoteAdvertisement] (from a [RemoteScanner]) and
  *   an [AgentSession].
  */
@@ -41,7 +43,10 @@ public fun peripheralFor(
     session: AgentSession? = null,
     kableLogging: (PeripheralBuilder.() -> Unit)? = null,
 ): Peripheral = when (mode) {
-    BleMode.LOCAL -> Peripheral(advertisement) { kableLogging?.invoke(this) }
+    BleMode.LOCAL -> Peripheral(advertisement) {
+        applyPlatformWorkarounds()
+        kableLogging?.invoke(this)
+    }
     BleMode.REMOTE -> {
         require(advertisement is RemoteAdvertisement) { "REMOTE mode requires a RemoteAdvertisement" }
         requireNotNull(session) { "REMOTE mode requires an AgentSession" }

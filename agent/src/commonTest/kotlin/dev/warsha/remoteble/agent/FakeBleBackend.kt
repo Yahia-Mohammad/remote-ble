@@ -2,6 +2,7 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.BleBondState
+import dev.warsha.remoteble.protocol.BleRadioState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -17,6 +18,8 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 
@@ -41,6 +44,13 @@ class FakeBleBackend(
 
     // Lets tests drive the native unsolicited-drop stream (see BleBackend.connectionDrops).
     val connectionDropSignals = MutableSharedFlow<ConnectionDrop>(extraBufferCapacity = 8)
+
+    // Lets tests drive the host radio state (see BleBackend.radioState). Set [radioObservable] to
+    // false to model a backend that cannot see its radio at all (the JVM/btleplug case), which is
+    // a different thing from one that reports the radio is off.
+    val radioSignals = MutableStateFlow(BleRadioState.ON)
+    var radioObservable: Boolean = true
+    override val radioState: StateFlow<BleRadioState>? get() = radioSignals.takeIf { radioObservable }
 
     val connectCalls = mutableListOf<DeviceHandle>()
     val disconnectCalls = mutableListOf<DeviceHandle>()

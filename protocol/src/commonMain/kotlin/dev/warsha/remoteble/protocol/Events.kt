@@ -61,10 +61,49 @@ sealed interface AgentEvent {
      */
     @Serializable @SerialName("conn.slots")
     data class SlotState(val free: Int, val total: Int) : AgentEvent
+
+    /**
+     * The state of the agent host's Bluetooth radio itself, emitted on every transition and
+     * once on handshake so a client starts with a known value rather than inferring one.
+     * Gated behind the `radio.state` capability.
+     *
+     * This exists because a scan with the radio off is not an error on any platform — it
+     * simply yields nothing, which on the wire is indistinguishable from an empty room. A
+     * client that has this event can tell the two apart; one that has not negotiated it sees
+     * the pre-0.10.0 behaviour. See [ErrorKind.RADIO_OFF] for the solicited half.
+     */
+    @Serializable @SerialName("radio.state")
+    data class RadioState(val state: BleRadioState) : AgentEvent
 }
 
 @Serializable
 enum class BleConnState { CONNECTING, CONNECTED, DISCONNECTING, DISCONNECTED }
+
+/**
+ * The agent host's radio availability, as the agent's platform reports it.
+ *
+ * [UNKNOWN] is a real state, not a placeholder for "not implemented": CoreBluetooth reports
+ * `.unknown` until its central manager finishes powering up, so a client can legitimately see it
+ * briefly at session start. A backend with no radio-state signal at all does not advertise the
+ * `radio.state` capability and never emits this event.
+ */
+@Serializable
+enum class BleRadioState {
+    /** The radio is on and usable. */
+    ON,
+
+    /** The radio exists but is switched off. Scans will silently find nothing until it is on. */
+    OFF,
+
+    /** The host has not granted this app permission to use the radio. */
+    UNAUTHORIZED,
+
+    /** This host has no BLE radio at all. Not recoverable by user action. */
+    UNSUPPORTED,
+
+    /** Not yet determined — the platform has not reported an initial state. */
+    UNKNOWN,
+}
 
 @Serializable
 enum class BleBondState { NONE, BONDING, BONDED }

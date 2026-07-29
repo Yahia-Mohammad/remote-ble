@@ -64,4 +64,17 @@ object Capabilities {
      * behavior — a format mismatch surfaces on the client as an unavailable `.identifier`).
      */
     const val IDENTIFIER_TRANSLATION: String = "identifier.translate"
+
+    /**
+     * Unsolicited [AgentEvent.RadioState] events, plus [ErrorKind.RADIO_OFF] on ops attempted
+     * while the radio is off. Backend-level: only a backend that can actually observe its host's
+     * radio advertises it (Android's `BluetoothAdapter` and Apple's `CBCentralManager.state` can;
+     * the JVM/btleplug backend exposes no equivalent, so it does not).
+     *
+     * [ErrorKind.RADIO_OFF] is gated on this capability rather than being sent unconditionally,
+     * because an unknown enum name would fail a v1 client's decode — the same reasoning that keeps
+     * the gated *events* gated. A client without this capability keeps the pre-0.10.0 behaviour: a
+     * scan with the radio off completes normally and yields nothing.
+     */
+    const val RADIO_STATE: String = "radio.state"
 }

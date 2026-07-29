@@ -4,6 +4,7 @@ import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentException
+import dev.warsha.remoteble.protocol.BleRadioState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -38,6 +39,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -77,8 +79,19 @@ class EngineBleBackend(
     private val failFastOnDegradedWrites: Boolean = true,
 ) : BleBackend {
 
+    /**
+     * This host's radio state, where the platform lets us observe it (Android/iOS yes, JVM no).
+     * Taken from the process-wide [AgentRadio] rather than built per backend: it is one radio, and
+     * the agent UI observes the same source while the agent is stopped and this backend does not
+     * exist. Each client session collects the same [StateFlow].
+     */
+    override val radioState: StateFlow<BleRadioState>? = AgentRadio.source()
+
     override val capabilities: Set<String> = buildSet {
         add(Capabilities.DESCRIPTORS) // Kable exposes descriptor read/write on every platform.
+        // Only where the radio is genuinely observable — see [agentRadioStateSource] for why the
+        // JVM backend declines rather than reporting a constant ON.
+        if (radioState != null) add(Capabilities.RADIO_STATE)
         // Connected RSSI is a live read only on Kable's Android/Apple backends; the JVM/btleplug
         // backend returns cached advertisement RSSI (or Int.MIN_VALUE), so advertise it only where
         // readRssi() below is genuinely a connected read.

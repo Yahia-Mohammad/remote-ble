@@ -4,6 +4,7 @@ import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
+import dev.warsha.remoteble.protocol.BleRadioState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
@@ -861,5 +862,113 @@ class BleAgentTest {
         val slotAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
             .filterIsInstance<AgentEvent.SlotState>().first()
         assertEquals(2, slotAfterHello.free) // both slots free again — and the event now flows
+    }
+
+    @Test
+    fun radioStateIsStreamedFromHandshakeAndOnEveryTransition() = runTest {
+        val backend = FakeBleBackend()
+        backend.radioSignals.value = BleRadioState.OFF
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(setOf(Capabilities.RADIO_STATE))
+
+        val events = h.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.RadioState>()
+
+        // The state at handshake time, not merely the next transition: a client that connects while
+        // the radio is already off must learn that without waiting for the user to toggle it.
+        assertEquals(BleRadioState.OFF, events.first().state)
+
+        backend.radioSignals.value = BleRadioState.ON
+        assertEquals(BleRadioState.ON, events.first { it.state != BleRadioState.OFF }.state)
+    }
+
+    @Test
+    fun radioStateIsWithheldFromClientsThatDidNotNegotiateIt() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(emptySet()) // a v1 client: it has never heard of this event type
+        h.frames.filterIsInstance<ServerHello>().first()
+
+        backend.radioSignals.value = BleRadioState.OFF
+        // Drive a round-trip so the assertion is about ordering, not about being early.
+        h.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        val radio = withTimeoutOrNull(200) {
+            h.frames.filterIsInstance<Event>().map { it.event }
+                .filterIsInstance<AgentEvent.RadioState>().first()
+        }
+        assertNull(radio)
+    }
+
+    @Test
+    fun scanAndConnectFailWithRadioOffWhileTheRadioIsOff() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(setOf(Capabilities.RADIO_STATE))
+        h.frames.filterIsInstance<ServerHello>().first()
+        backend.radioSignals.value = BleRadioState.OFF
+
+        h.send(1, Op.ScanStart(1, emptyList()))
+        assertEquals(ErrorKind.RADIO_OFF, assertIs<OpResult.Err>(h.frames.reply(1)).error.kind)
+
+        h.send(2, Op.Connect(device))
+        assertEquals(ErrorKind.RADIO_OFF, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+
+        // And the gate lifts on its own once the radio comes back — RADIO_OFF is transient, so a
+        // client that retries has to actually be able to succeed.
+        backend.radioSignals.value = BleRadioState.ON
+        h.send(3, Op.Connect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+    }
+
+    @Test
+    fun radioOffIsNotReportedToAClientThatCouldNotDecodeIt() = runTest {
+        // Without the capability the pre-0.10.0 behaviour must be preserved exactly: the scan is
+        // accepted and simply finds nothing. Sending ErrorKind.RADIO_OFF here would be a name the
+        // client's decoder has never seen.
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(emptySet())
+        h.frames.filterIsInstance<ServerHello>().first()
+        backend.radioSignals.value = BleRadioState.OFF
+
+        h.send(1, Op.ScanStart(1, emptyList()))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+    }
+
+    @Test
+    fun anUnsupportedRadioIsNotReportedAsTransientlyOff() = runTest {
+        // UNSUPPORTED means there is no radio at all — not transient. Reporting it as RADIO_OFF
+        // would invite a client to retry forever, so the op is left to fail on its own terms.
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(setOf(Capabilities.RADIO_STATE))
+        h.frames.filterIsInstance<ServerHello>().first()
+        backend.radioSignals.value = BleRadioState.UNSUPPORTED
+
+        h.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+    }
+
+    @Test
+    fun aBackendThatCannotSeeItsRadioNeitherStreamsNorGates() = runTest {
+        // The JVM/btleplug case. The capability is negotiable in principle, but with no source
+        // there is nothing to say — and crucially, no op may be gated on an unknown.
+        val backend = FakeBleBackend()
+        backend.radioObservable = false
+        backend.radioSignals.value = BleRadioState.OFF // would gate, if it were observable
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.RADIO_STATE))
+        h.sendHello(setOf(Capabilities.RADIO_STATE))
+        h.frames.filterIsInstance<ServerHello>().first()
+
+        h.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        val radio = withTimeoutOrNull(200) {
+            h.frames.filterIsInstance<Event>().map { it.event }
+                .filterIsInstance<AgentEvent.RadioState>().first()
+        }
+        assertNull(radio)
     }
 }

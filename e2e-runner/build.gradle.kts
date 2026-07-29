@@ -202,3 +202,17 @@ tasks.register<JavaExec>("twoClientRun") {
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
     mainClass.set("dev.warsha.remoteble.e2e.TwoClientMainKt")
 }
+
+// Radio-state probe (RadioStateMain.kt): negotiates `radio.state`, prints every RadioState event
+// the agent pushes, and retries a scan every 5s so the solicited (RADIO_OFF) and unsolicited
+// (event) halves of gap 17 are visible side by side. Needs an agent that advertises the
+// capability — Android/iOS do, the JVM/btleplug agent does not (it cannot see its adapter).
+//   ./gradlew :e2e-runner:radioStateRun --args "ws://localhost:8080/agent 30"
+tasks.register<JavaExec>("radioStateRun") {
+    group = "application"
+    description = "Probe an agent's radio-state reporting while Bluetooth is toggled."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.RadioStateMainKt")
+}

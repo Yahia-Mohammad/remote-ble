@@ -45,6 +45,7 @@ enum class ErrorKind(val transient: Boolean) {
     TIMEOUT(transient = true),             // the agent may answer a later attempt
     TRANSPORT_LOST(transient = true),      // the IP link may reconnect
     INCOMPATIBLE_PROTOCOL(transient = false), // the peer has no mutually supported wire version
+    RADIO_OFF(transient = true),           // the agent host's radio is off; it can be switched back on
     ;
 
     companion object {

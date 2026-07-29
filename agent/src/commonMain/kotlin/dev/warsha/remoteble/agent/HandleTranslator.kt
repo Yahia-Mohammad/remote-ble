@@ -102,7 +102,9 @@ internal class HandleTranslator(
                 event.copy(device = DeviceHandle(toClient(event.device.value)))
             is AgentEvent.BondState ->
                 event.copy(device = DeviceHandle(toClient(event.device.value)))
-            is AgentEvent.Notification, is AgentEvent.SlotState -> event // no handle to translate
+            // No handle to translate. RadioState is host-wide rather than per-device by design —
+            // it answers "can this agent use its radio at all", which no device handle qualifies.
+            is AgentEvent.Notification, is AgentEvent.SlotState, is AgentEvent.RadioState -> event
         }
     }
 

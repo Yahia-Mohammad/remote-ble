@@ -4,6 +4,8 @@ import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.BleBondState
+import dev.warsha.remoteble.protocol.BleRadioState
+import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.ConnParamHint
 import dev.warsha.remoteble.protocol.ConnPriority
@@ -14,6 +16,7 @@ import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServiceNode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 
 /**
@@ -50,6 +53,18 @@ interface BleBackend {
      * appear here — that path emits its own `ConnectionState`.
      */
     fun connectionDrops(): Flow<ConnectionDrop> = emptyFlow()
+
+    /**
+     * This host's radio state, or `null` where the backend cannot observe it (fakes, the blackhole
+     * backend, and the JVM/btleplug backend — see [agentRadioStateSource]). Non-null is what makes
+     * the agent advertise [Capabilities.RADIO_STATE], so `null` and "always ON" are *not*
+     * interchangeable: the first says the agent cannot tell, the second asserts a fact.
+     *
+     * A [StateFlow] rather than a plain [Flow] because both halves of the feature need it — the
+     * agent streams transitions to clients, and it also reads `.value` synchronously to fail an op
+     * with [ErrorKind.RADIO_OFF] instead of letting a scan quietly return nothing.
+     */
+    val radioState: StateFlow<BleRadioState>? get() = null
 
     /** Streams advertisements while collected; stops scanning on cancellation. */
     fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto>

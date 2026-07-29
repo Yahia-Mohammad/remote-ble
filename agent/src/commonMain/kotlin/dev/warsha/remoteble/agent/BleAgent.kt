@@ -7,6 +7,7 @@ import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.AgentException
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
+import dev.warsha.remoteble.protocol.BleRadioState
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.ClientHello
@@ -266,6 +267,10 @@ class BleAgent(
                 reply(cmd.cid, OpResult.Err(it))
                 return
             }
+            radioUnavailableError(op)?.let {
+                reply(cmd.cid, OpResult.Err(it))
+                return
+            }
             when (op) {
                 is Op.Connect -> reply(cmd.cid, connect(op.device))
                 is Op.Disconnect -> {
@@ -387,6 +392,34 @@ class BleAgent(
             AgentError(ErrorKind.INVALID_REQUEST, message = "requested MTU must be between $MIN_MTU and $MAX_MTU")
         }
         else -> null
+    }
+
+    /**
+     * Fails the two ops that *need the radio to start something* when the host's radio is not
+     * usable, instead of letting them fail silently — a scan with the radio off completes normally
+     * and yields nothing, which is exactly the "empty room" ambiguity gap 17 is about.
+     *
+     * Scoped to `ScanStart`/`Connect` on purpose. Ops against an already-established link are left
+     * to fail on their own terms: the radio going off drops those links, and the backend reports
+     * that as a disconnect with its own error, which is more precise than a blanket radio error.
+     *
+     * Gated on the capability because [ErrorKind.RADIO_OFF] is a name a v1 client's decoder has
+     * never seen. [BleRadioState.UNAUTHORIZED] is reported with the same kind as
+     * [BleRadioState.OFF] — both are unusable-but-user-fixable, so both are `transient` — with the
+     * message carrying which one it is. [BleRadioState.UNSUPPORTED] is deliberately *not* gated
+     * here: it is not transient, so reporting it as `RADIO_OFF` would tell a client to retry
+     * something that can never succeed.
+     */
+    private fun radioUnavailableError(op: Op): AgentError? {
+        if (Capabilities.RADIO_STATE !in negotiated) return null
+        if (op !is Op.ScanStart && op !is Op.Connect) return null
+        return when (backend.radioState?.value) {
+            BleRadioState.OFF ->
+                AgentError(ErrorKind.RADIO_OFF, message = "the agent host's Bluetooth radio is off")
+            BleRadioState.UNAUTHORIZED ->
+                AgentError(ErrorKind.RADIO_OFF, message = "the agent host has not granted Bluetooth permission")
+            else -> null
+        }
     }
 
     private suspend fun connect(device: DeviceHandle): OpResult {
@@ -666,6 +699,38 @@ class BleAgent(
                     "identifierFormat=${hello.identifierFormat}",
             )
             Logger.warn(LogTags.SERVER) { "repeated hello ignored [c=$clientId]" }
+        }
+        if (first) startRadioStateFeed()
+    }
+
+    /**
+     * Streams this host's radio state to a client that negotiated `radio.state`, starting with the
+     * current value.
+     *
+     * Started from the handshake rather than from [start] because [negotiated] is only known once
+     * the hello lands, and an event sent before that would be exactly the un-negotiated event the
+     * gating exists to prevent. `StateFlow` replays its current value to a new collector, so the
+     * client's first event is the state at handshake time — a client should never have to wait for
+     * the user to toggle Bluetooth before it learns the radio was off all along.
+     */
+    private fun startRadioStateFeed() {
+        if (Capabilities.RADIO_STATE !in negotiated) return
+        val source = backend.radioState ?: return
+        scope.launch {
+            source.collect { state ->
+                // Contained like [onUnsolicitedDisconnect]: emit() writes to this client's socket,
+                // and a send that throws on an already-closing socket must not tear down the
+                // session's scope on the way out.
+                try {
+                    emit(AgentEvent.RadioState(state))
+                    observer.onClientLog(clientId, "radio state: $state")
+                    Logger.info(LogTags.ENGINE) { "radio state [c=$clientId]: $state" }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    observer.onClientLog(clientId, "failed to deliver radio state $state: ${t.message}")
+                }
+            }
         }
     }
 

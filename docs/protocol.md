@@ -73,6 +73,7 @@ object Capabilities {
     const val RSSI             = "rssi"          // Op.ReadRssi connected read (backend-level, Android/Apple)
     const val CONN_PARAMS      = "conn.params"   // Op.SetConnParams (backend-level, Android-only); ⊃ conn.priority
     const val SCAN_BATCH       = "scan.batch"    // AgentEvent.ScanResultBatch coalescing (agent-level)
+    const val RADIO_STATE      = "radio.state"   // AgentEvent.RadioState + ErrorKind.RADIO_OFF (backend-level, Android/Apple)
 }
 ```
 
@@ -233,6 +234,16 @@ is the body of an unsolicited `Event` frame:
 | `ConnectionState` | `conn.state` | `device: DeviceHandle`, `state: BleConnState`, `reason: AgentError?` | `device` |
 | `BondState` | `bond.state` | `device: DeviceHandle`, `state: BleBondState`, `reason: AgentError?` | `device` — **capability: `pairing`** |
 | `SlotState` | `conn.slots` | `free: Int`, `total: Int` | session-global — **capability: `slots`** |
+| `RadioState` | `radio.state` | `state: BleRadioState` | session-global — **capability: `radio.state`** |
+
+`RadioState` reports the **agent host's radio**, not any one link: `ON`, `OFF`, `UNAUTHORIZED`,
+`UNSUPPORTED`, or `UNKNOWN`. It is sent once at handshake with the state at that moment, then on
+every transition — a client that connects while the radio is already off must not have to wait for
+the user to toggle it before it can tell. It exists because a scan with the radio off is not an
+error on any platform: it succeeds and yields nothing, which is indistinguishable on the wire from
+an empty room. `UNKNOWN` is a genuine state (CoreBluetooth reports it until its central manager
+powers up), not a stand-in for "unimplemented" — an agent that cannot observe its radio does not
+advertise the capability at all, and so never sends this event.
 
 `ConnectionState` reports the **physical BLE link** state and is explicitly distinct
 from the IP transport state (see [the two state machines](README.md#the-two-state-machines-do-not-conflate-them)).
@@ -290,11 +301,21 @@ change. This is the *error* half of the retry decision — the *operation* half 
 | `WRITE_FAILED` | transient | `UNSUPPORTED` | permanent |
 | `CHARACTERISTIC_NOT_FOUND` | permanent | `TIMEOUT` | transient |
 | `NOT_CONNECTED` | transient | `TRANSPORT_LOST` | transient |
+| | | `INCOMPATIBLE_PROTOCOL` | permanent |
+| | | `RADIO_OFF` | transient |
 
 `gattStatus` carries the raw BLE-stack status when the radio answered. `TIMEOUT` and
 `TRANSPORT_LOST` are minted **client-side** by the session (the agent never sends
 them — by definition the agent was unreachable); everything else originates at the
-agent. See the full taxonomy discussion in
+agent.
+
+`RADIO_OFF` answers `ScanStart` and `Connect` when the agent host's own radio is off or
+unauthorised, and is sent **only to a client that negotiated `radio.state`** — an unknown enum name
+would fail a v1 client's decode, so an un-negotiated client keeps the pre-0.10.0 behaviour (the
+scan is accepted and finds nothing). It is deliberately *not* used for `BleRadioState.UNSUPPORTED`:
+that is permanent, and reporting it under a transient kind would invite an endless retry. Ops
+against an already-established link are also left alone — the radio going off drops those links,
+and the resulting disconnect is a more precise thing to report than a blanket radio error. See the full taxonomy discussion in
 [design-decisions.md](design-decisions.md#the-error-taxonomy-where-not-just-what).
 
 ### Retryability: `transient` × `isIdempotent`

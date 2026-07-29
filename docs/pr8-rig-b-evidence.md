@@ -628,13 +628,23 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
    temporary adapter rename" (`a9092e0`) renames the Bluetooth adapter to `RBTestPeripheral` while
    advertising. After a clean `Stop server` the adapter was still named `RBTestPeripheral`, so the
    restore half does not run. Leaves the test phone's Bluetooth name wrong until fixed by hand.
-7. **Report radio-unavailable state, on both platforms** (case 6, finding 9). Neither agent notices
-   Bluetooth being switched off; a scan then returns zero devices, identical to an empty room. Both
-   platforms already expose what is needed — `CBCentralManager.state` on Apple,
-   `BluetoothAdapter.isEnabled` + `ACTION_STATE_CHANGED` on Android — and neither is consumed.
-   Wants a `BleBackend`-level radio-state signal surfaced to the UI *and* over the wire, so a
-   remote client can tell "radio off" from "nothing in range". The cross-platform half matters more
-   than the iOS half below.
+7. **Report radio-unavailable state, on both platforms** (case 6, finding 9) — **IMPLEMENTED
+   2026-07-29 evening; verified on Android hardware, iOS not yet run.** A `BleBackend.radioState`
+   signal now feeds both the agent UI and the wire: `AgentEvent.RadioState` and
+   `ErrorKind.RADIO_OFF`, both gated behind the `radio.state` capability so a v1 client's decode
+   loop is untouched. Android uses `BluetoothAdapter` + `ACTION_STATE_CHANGED`, Apple uses
+   `CBCentralManager.state`, and the JVM/btleplug backend declines the capability because it cannot
+   observe its adapter at all.
+
+   Worth recording for the next person who reaches for it: **Kable's own `Bluetooth.availability`
+   is `@Deprecated` as of 0.43.1** — *"has inconsistent behavior across platforms. Will be removed
+   in a future release"* (JuulLabs/kable#737). It is the obvious-looking cross-platform answer and
+   it is a dead end. Checking the library's API first was right (note 8); the answer this time was
+   that the library had already given up on the problem.
+
+   Wire behaviour confirmed end-to-end against the Pixel 8 with a client negotiating the
+   capability: `ON` → scans accepted → `OFF` → `RADIO_OFF` → `ON` → accepted, driven by real
+   adapter toggles rather than injection. The iOS half compiles and is unverified on device.
 8. **iOS permission gating** — `IosAgentEntry` passes none of `startEnabled` / `permissionWarning` /
    `onRequestPermissionSettings`, where `MainActivity` passes all three (case 6). Note Android's
    gating keys on *runtime permissions*, not adapter state, so this is a narrower gap than item 7

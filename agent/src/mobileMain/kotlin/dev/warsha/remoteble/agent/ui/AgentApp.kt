@@ -28,11 +28,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.warsha.remoteble.agent.AgentMonitor
+import dev.warsha.remoteble.agent.AgentRadio
 import dev.warsha.remoteble.agent.AgentRunner
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.persistToken
+import dev.warsha.remoteble.protocol.BleRadioState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -68,6 +72,9 @@ fun AgentApp(
 ) {
     val scope = rememberCoroutineScope()
     val running by runner.running.collectAsState()
+    // Observed independently of [runner]: the radio can be off while the agent is stopped, which is
+    // exactly when the user is about to press Start. Null on platforms that cannot report it.
+    val radioState by remember { AgentRadio.source() ?: unobservableRadio }.collectAsState()
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
     var token by remember { mutableStateOf<String?>(null) }
     var tokenEdited by remember { mutableStateOf(false) }
@@ -127,6 +134,7 @@ fun AgentApp(
                         onStop = onStop,
                         permissionWarning = permissionWarning,
                         onRequestPermissionSettings = onRequestPermissionSettings,
+                        radioNotice = radioNoticeFor(radioState),
                     )
                 }
 
@@ -148,6 +156,13 @@ fun AgentApp(
 private const val MOBILE_LAN_BIND_HOST = "0.0.0.0"
 
 /**
+ * Stand-in for a platform that cannot observe its radio, so the composable collects one flow either
+ * way. `null` (rather than [BleRadioState.UNKNOWN]) because the two mean different things and only
+ * this one must stay silent forever: `UNKNOWN` is a state the platform reported.
+ */
+private val unobservableRadio: StateFlow<BleRadioState?> = MutableStateFlow(null)
+
+/**
  * Header panel: the title, Start/Stop control, agent address, masked auth-token field, and
  * (when starting is gated) the permission warning. Pure rendering — token state and the
  * start/stop actions are hoisted to the caller.
@@ -164,6 +179,7 @@ private fun AgentHeader(
     onStop: () -> Unit,
     permissionWarning: String?,
     onRequestPermissionSettings: (() -> Unit)?,
+    radioNotice: String?,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -207,6 +223,29 @@ private fun AgentHeader(
             }
         }
     }
+    // Shown whether or not the agent is running, and independently of the permission warning above:
+    // an adapter that is switched off and a permission that was never granted are different
+    // failures with different fixes, and treating them as one is what hid this on Android (Rig B
+    // case 6). A scan with the radio off succeeds and finds nothing, so without this line the UI
+    // is as silent as the wire was.
+    radioNotice?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    }
+}
+
+/**
+ * The user-facing sentence for a radio state, or `null` when there is nothing to say — the radio
+ * is fine, or this platform cannot tell (in which case claiming anything would be a guess).
+ *
+ * [BleRadioState.UNKNOWN] is deliberately silent too: on Apple it is the normal pre-initialisation
+ * value for the first moments after launch, and flashing "Bluetooth unavailable" during startup
+ * would train users to ignore the line that matters.
+ */
+internal fun radioNoticeFor(state: BleRadioState?): String? = when (state) {
+    BleRadioState.OFF -> "Bluetooth is off. Scans will find nothing until it is switched on."
+    BleRadioState.UNAUTHORIZED -> "Bluetooth permission is denied for this app."
+    BleRadioState.UNSUPPORTED -> "This device has no Bluetooth Low Energy radio."
+    BleRadioState.ON, BleRadioState.UNKNOWN, null -> null
 }
 
 // NOTE on keys: all three sections below feed the *same* LazyColumn (see AgentApp), so their

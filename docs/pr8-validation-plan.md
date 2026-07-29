@@ -88,17 +88,55 @@ peripheral in range (reuse Rig A's).
 2. **Ordinary session** — scan/connect/read/notify against the Rig A peripheral through the
    iOS-hosted agent, proving the shared `AgentRunner`/`EngineBleBackend` behaves the same as the
    Mac/Android hosts already validated in Rig A.
-3. **Screen-lock/background caveat** — background the app or lock the screen mid-session; confirm
-   the documented behavior: existing radio links may linger briefly, but no *new* inbound
-   WebSocket connections are accepted. Capture what an already-connected client observes.
+3. **Screen-lock/background caveat** — background the app or lock the screen mid-session and
+   capture what an already-connected client observes, *and* whether new inbound connections are
+   still accepted.
+   **Expectation corrected (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 3):**
+   this case previously asserted that "no *new* inbound WebSocket connections are accepted", which
+   the hardware disproved. `UIBackgroundModes: bluetooth-central` keeps the process — and therefore
+   the Ktor accept loop — scheduled while it holds an active CoreBluetooth link, so a backgrounded
+   agent with a client mid-session stays **fully reachable** (38/38 new connections accepted over
+   91 s). The restriction only applies with **no** BLE link, where the app suspends ~8 s after
+   backgrounding. Any re-run must include that no-link control, or it attributes to "backgrounding"
+   what is really "backgrounding without a link". The **screen-lock** half is still unrun: the
+   agent disables the idle timer while running, so it needs a manual lock.
 4. **Stop** — tap Stop (or navigate away); confirm `IosAgentSession` is disposed
-   (`Coordinator.deinit`), the radio/lease is released, and the dashboard is no longer reachable.
+   (`Coordinator.deinit`), the radio/lease is released, and the agent is no longer reachable.
+   **Found a defect (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 4):** the
+   radio was released but the WebSocket server kept listening *and authenticating*, and the next
+   Start aborted the process on `EADDRINUSE`. Fixed by having `AgentRunner.stop()` stop the server
+   explicitly. When re-running, probe the port after Stop — checking only that device operations
+   fail is what let this through, since they fail for the unrelated reason that the radio is gone.
+   Note "the dashboard" is unreachable on mobile in any case (case 1's scope correction).
 5. **Cancellation mid-operation** — start a scan or an active connection, then stop the agent app
    mid-flight; confirm clean teardown with no crash and no leaked native connections (the iOS
    analogue of `SHUTDOWN-01`).
-6. **Failure recovery** — deny the Bluetooth permission prompt on first launch and confirm a
-   graceful UI state (no crash, clear messaging); then grant it and confirm Start succeeds on
-   retry.
+6. **Failure recovery** — with the radio unavailable, confirm a graceful UI state (no crash, clear
+   messaging), then restore it and confirm the agent recovers.
+
+   **Stimulus corrected (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 6).**
+   This case used to say "deny the Bluetooth permission prompt on first launch". **There is no such
+   prompt** — on a fresh install of a fresh bundle id, none appeared at launch, at Start, or on the
+   first scan; the scan simply succeeded. The case was therefore unrunnable as written, not failing.
+
+   Use **Settings → Bluetooth → off** instead. It tests the same property (graceful degradation and
+   recovery when the radio is unavailable) via a stimulus that actually exists.
+   **It must be Settings, not Control Centre** — since iOS 11 the Control Centre toggle only
+   disconnects accessories and leaves Bluetooth available to apps, so using it applies no stimulus
+   at all and yields a false pass. Verify the stimulus landed before interpreting anything: a
+   `:e2e-runner:scanRun` that still reports devices means Bluetooth is on, whatever the toggle looks
+   like.
+
+   Sequence: baseline `scanRun` (confirm devices are seen) → Bluetooth off → `scanRun` again →
+   Stop, then Start with the radio still off (does Start report success?) → Bluetooth on →
+   `scanRun` without restarting the agent (does it recover on its own?).
+
+   **The real defect this case should be testing** is a wiring gap, not a prompt.
+   `MainActivity` (Android) passes `startEnabled = bluetoothGranted`, a `permissionWarning`, and
+   `onRequestPermissionSettings`. `IosAgentEntry` passes **none** of the three, so they default to
+   `true`/`null`/`null`: on iOS, Start is always enabled, there is no warning surface, and there is
+   no route to the app's settings page. Whatever the stimulus, that asymmetry is what to assert
+   against.
 
 **Exit:** all 6 pass; results archived per the evidence rule above.
 

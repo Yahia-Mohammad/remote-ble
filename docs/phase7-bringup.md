@@ -136,8 +136,10 @@ still exits zero. The expectation itself is deliberately unchanged — relaxing 
 would erase the distinction between "the radio rejected it" and "no answer, outcome unknown".
 
 The runner assumes a btleplug-backed agent, since both desktop reference agents are. When pointing
-it at the Android or Apple agent — whose native Kable backends are expected to deliver ATT errors
-properly, though this is **unverified on hardware** as of 2026-07-27 — declare it:
+it at the Android or Apple agent, declare it. The **Apple** backend is now **verified on hardware**
+(Rig B, 2026-07-29, iPhone-hosted agent): it reports `WRITE_FAILED` on an ATT error and does not
+poison the connection afterwards, so both gated steps pass outright and report XPASS when the gate
+is left on. The gap really is btleplug-specific. The **Android** backend remains unverified.
 
 ```sh
 REMOTE_BLE_E2E_BTLEPLUG=false REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080/agent"

@@ -173,7 +173,9 @@ private const val MOBILE_LAN_BIND_HOST = "0.0.0.0"
  * way. `null` (rather than [BleRadioState.UNKNOWN]) because the two mean different things and only
  * this one must stay silent forever: `UNKNOWN` is a state the platform reported.
  */
-private val unobservableRadio: StateFlow<BleRadioState?> = MutableStateFlow(null)
+// internal (not private): the iOS entry point derives its permission gate from the same source, and
+// needs the same "this platform cannot tell" stand-in when there is nothing to observe.
+internal val unobservableRadio: StateFlow<BleRadioState?> = MutableStateFlow(null)
 
 /**
  * Header panel: the title, Start/Stop control, agent address, masked auth-token field, and
@@ -268,6 +270,26 @@ internal fun radioNoticeFor(state: BleRadioState?): String? = when (state) {
     BleRadioState.UNSUPPORTED -> "This device has no Bluetooth Low Energy radio."
     BleRadioState.ON, BleRadioState.UNKNOWN, null -> null
 }
+
+/**
+ * Whether [state] is evidence that this app's Bluetooth **permission** is denied — the one radio
+ * condition that should gate the Start button, and the Apple analogue of Android's runtime-permission
+ * check in `MainActivity`.
+ *
+ * Deliberately narrow, and the exclusions are the point:
+ * - [BleRadioState.OFF] does **not** gate. Android does not gate Start on the adapter being off
+ *   either, and it should not: the user can switch Bluetooth on without leaving the app, the agent
+ *   is still a working server in the meantime, and since 0.10.0 a client asking it to scan gets a
+ *   typed `RADIO_OFF` rather than silence. [radioNoticeFor] says so on screen; that is the right
+ *   weight of response.
+ * - [BleRadioState.UNKNOWN] and `null` do not gate, because absence of evidence is not denial. On
+ *   Apple, `UNKNOWN` is the normal value for the first moments after launch, so gating on it would
+ *   disable Start on every cold start until the delegate fires.
+ * - [BleRadioState.UNSUPPORTED] does not gate: nothing the user can do in Settings fixes a device
+ *   with no BLE radio, so offering them a route there would be a dead end. The notice covers it.
+ */
+internal fun bluetoothPermissionDenied(state: BleRadioState?): Boolean =
+    state == BleRadioState.UNAUTHORIZED
 
 // NOTE on keys: all three sections below feed the *same* LazyColumn (see AgentApp), so their
 // item keys share one namespace. A raw client id and a raw log id are both small ints that

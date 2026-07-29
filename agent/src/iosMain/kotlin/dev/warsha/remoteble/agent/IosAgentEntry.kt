@@ -1,13 +1,20 @@
 package dev.warsha.remoteble.agent
 
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.window.ComposeUIViewController
 import dev.warsha.remoteble.agent.ui.AgentApp
+import dev.warsha.remoteble.agent.ui.bluetoothPermissionDenied
+import dev.warsha.remoteble.agent.ui.unobservableRadio
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import platform.Foundation.NSURL
 import platform.UIKit.UIApplication
+import platform.UIKit.UIApplicationOpenSettingsURLString
 import platform.UIKit.UIViewController
 
 /**
@@ -47,6 +54,15 @@ class IosAgentSession internal constructor() {
      * the restriction.
      */
     fun makeViewController(): UIViewController = ComposeUIViewController {
+        // Apple's analogue of Android's runtime-permission gate. `MainActivity` passes all three of
+        // these and this entry point passed none, so on iOS Start was always enabled, there was no
+        // warning surface, and there was no route to the app's settings page even when CoreBluetooth
+        // was reporting the permission denied outright. There is no permission *request* API to call
+        // here — iOS prompts implicitly on first CoreBluetooth use — so the authorization state is
+        // read from the same `CBCentralManager.state` source the rest of the agent uses, and the
+        // remedy offered is the Settings deep link rather than a prompt.
+        val radio by remember { AgentRadio.source() ?: unobservableRadio }.collectAsState()
+        val denied = bluetoothPermissionDenied(radio)
         AgentApp(
             runner = runner,
             addressLabel = { port ->
@@ -55,7 +71,19 @@ class IosAgentSession internal constructor() {
             },
             keepScreenOnNotice = "Keep this screen open — a backgrounded agent stops accepting " +
                 "new connections once its last Bluetooth link closes.",
+            startEnabled = !denied,
+            permissionWarning = if (denied) "Bluetooth permission is required to start the agent." else null,
+            onRequestPermissionSettings = if (denied) ::openAppSettings else null,
         )
+    }
+
+    /**
+     * Opens this app's page in Settings, the only place an iOS user can restore a denied Bluetooth
+     * permission — there is no in-app prompt to re-raise once it has been refused.
+     */
+    private fun openAppSettings() {
+        val url = NSURL(string = UIApplicationOpenSettingsURLString)
+        UIApplication.sharedApplication.openURL(url, options = emptyMap<Any?, Any>(), completionHandler = null)
     }
 
     /** Cancels the observing scope and best-effort stops the runner/radio/server. */

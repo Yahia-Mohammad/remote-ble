@@ -714,6 +714,17 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
     defect; the usable discriminator is whether the *caller's* job is still active. And on JVM/Ktor
     3.5 the failure is **synchronous** out of `start(wait = false)`, a third shape again. Handling
     only the shape in front of you is how this survived a whole rig.
+
+    **Confirmed on the iPhone 14** — the platform where this was a `SIGABRT` — with a test-only
+    build bound to `192.0.2.1` (TEST-NET-1; the device cannot hold it, so `EADDRNOTAVAIL`). PID
+    unchanged across the failed Start, no `Uncaught Kotlin exception`, no signal, button stayed on
+    `Start`, error line shown. Ktor logs `Application started` regardless but `Responding at http://…`
+    only on a bind that took — a cheap tell when reading these consoles.
+
+    Reproducing a bind failure on iOS needed two attempts, and the first is the instructive one:
+    **port 80 is bindable by a sandboxed iOS app** (the agent answered `401` on it), so the
+    "privileged ports need root" assumption produced a run that tested nothing while looking like a
+    pass — process alive, no crash, exactly the shape of a success. See method note 20.
 17. **The Apple scanner passes `nil` serviceUUIDs.** Kable logs CoreBluetooth's own warning on every
     scan: *"The recommended practice is to populate the serviceUUIDs parameter rather than leaving
     it nil."* Beyond the advisory, iOS **ignores** a nil-services scan entirely while the app is
@@ -858,3 +869,20 @@ Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md
     The comment sitting on the faulty line claimed the retention was handled. Written in good
     faith, wrong, and it made the code *look* audited — worse than no comment, because it answers
     the question a reviewer would otherwise ask.
+20. **Validate the stimulus before spending a run on it.** The first iOS bind-failure attempt bound
+    port 80, assuming a sandboxed app cannot take a privileged port. iOS allows it — the agent
+    answered `401` there. The run therefore produced "process alive, no crash, nothing on screen",
+    which is *indistinguishable from a pass* and was briefly written up as one. The operator's
+    "what exactly are you looking for?" is what reopened it.
+
+    The retry bound `192.0.2.1` (TEST-NET-1, unassignable → `EADDRNOTAVAIL`) and, crucially,
+    **proved that stimulus threw on the JVM first**, which cost seconds and no operator time. For a
+    negative test — one whose pass condition is "the bad thing did not happen" — a stimulus that
+    silently fails to fire looks exactly like success. Assert that the stimulus works before
+    trusting what the subject does with it.
+21. **A confident error message is a claim, and it can be wrong.** The bind failure surfaced as
+    *"Port 8080 is already in use. Stop whatever is holding it, then try again."* in a run where
+    nothing whatsoever held port 8080 — the address was simply unassignable. The message was
+    written when the only failure in view was a port conflict, and it hardened one instance into a
+    diagnosis. Now: *"Could not open port 8080. Another app may be using it."* Name what is certain,
+    suggest the likely cause, assert neither — and a test pins the wording so it cannot drift back.

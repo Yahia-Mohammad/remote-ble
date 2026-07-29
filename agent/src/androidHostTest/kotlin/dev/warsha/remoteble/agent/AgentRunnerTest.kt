@@ -98,9 +98,15 @@ class AgentRunnerTest {
         val runner = AgentRunner({ graph }, Unit)
 
         val failure = assertIs<AgentStartResult.Failed>(runner.start(AgentConfig()))
+        // Names the port (certain) without asserting a cause (not certain): a hardware run against
+        // an unassignable address produced this path while nothing held the port.
         assertTrue(
-            failure.message.contains("8080") && failure.message.contains("already in use"),
-            "expected an actionable port message, got: ${failure.message}",
+            failure.message.contains("8080"),
+            "expected the port to be named, got: ${failure.message}",
+        )
+        assertFalse(
+            failure.message.contains("is already in use"),
+            "the message must not assert a cause the bind failure does not establish",
         )
         assertEquals(AgentRunnerState.FAILED, runner.state.value)
         assertFalse(runner.running.value)

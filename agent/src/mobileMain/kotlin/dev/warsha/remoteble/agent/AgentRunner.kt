@@ -155,7 +155,12 @@ class AgentRunner private constructor(
             // process instead. The port is not a secret — the UI shows the address on every run.
             _state.value = AgentRunnerState.FAILED
             if (t is AgentBindException) {
-                AgentStartResult.Failed("Port ${t.port} is already in use. Stop whatever is holding it, then try again.")
+                // Deliberately "may be": a bind can fail for reasons other than a port conflict
+                // (an unassignable address, a sandbox denial), and the earlier wording asserted
+                // "is already in use" — which read as a confident diagnosis in a hardware run
+                // where nothing held the port at all. Name what is certain (the port did not
+                // open), suggest the likely cause, claim neither.
+                AgentStartResult.Failed("Could not open port ${t.port}. Another app may be using it.")
             } else {
                 AgentStartResult.Failed("Unable to start the agent; check the local log.")
             }

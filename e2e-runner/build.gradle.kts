@@ -38,6 +38,9 @@ tasks.withType<JavaExec>().configureEach {
 // advertisement its radio sees, then exits. The client has no radio of its own — it
 // only sends ops over WebSocket — so it runs as a plain JVM (no .app/TCC dance needed).
 //   ./gradlew :e2e-runner:scanRun --args "ws://localhost:8080/agent 15"
+// A third argument sends a service-UUID scan filter instead of scanning unfiltered — the variable
+// gap 15 turns on (Apple ignores a nil-serviceUUIDs scan while backgrounded):
+//   ./gradlew :e2e-runner:scanRun --args "ws://192.168.178.85:8080/agent 20 a1b2c3d4-0000-4000-8000-000000000001"
 tasks.register<JavaExec>("scanRun") {
     group = "application"
     description = "Run the scan-only client against a live agent."

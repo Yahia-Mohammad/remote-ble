@@ -58,8 +58,32 @@ asserted that new inbound connections "cannot be accepted" while backgrounded:
 CoreBluetooth connection, and a scheduled process keeps running its Ktor accept loop. So an agent
 with a client mid-session stays fully reachable; an idle one stops answering within seconds.
 
-Do not design around this. It is a side effect of a background mode declared for the radio, it
-disappears the moment the last link closes, and iOS additionally ignores a `nil`-serviceUUIDs scan
-while backgrounded — which is what Kable's Apple scanner passes today, so a backgrounded agent may
-serve an existing link yet be unable to discover anything. Foregrounded and unlocked remains the
-only supported way to run it.
+Do not design around this. It is a side effect of a background mode declared for the radio, and it
+disappears the moment the last link closes. Foregrounded and unlocked remains the only supported way
+to run it.
+
+### Discovery while backgrounded needs a service filter
+
+iOS ignores a `nil`-serviceUUIDs scan entirely while an app is backgrounded, and `nil` is what Kable's
+Apple scanner passes when a client sends no filter. This used to be recorded here as a prediction;
+it is now **measured** (2026-07-29, four runs with one variable changed, agent holding a BLE link
+throughout so the process stayed scheduled):
+
+| Scan through the iOS agent | Foregrounded | Backgrounded |
+|---|---|---|
+| unfiltered (`nil` serviceUUIDs) | **38 devices** | **0 devices** |
+| filtered on one service UUID | 1 (the test peripheral) | **1 (unaffected)** |
+
+The loss is total rather than degraded, and it is specific to discovery: across the same window the
+backgrounded agent served continuous GATT reads on its existing link and accepted every new inbound
+WebSocket connection. So a backgrounded agent can serve a session and simultaneously be unable to
+see anything new — unless the client scans **by service UUID**, which works normally.
+
+That is the remedy, and it is client-side: `RemoteScanner(session, listOf(ScanFilter(service = …)))`.
+The agent cannot fix it for the client, because it cannot invent the service the client is looking
+for. Verify with `:e2e-runner:scanRun`, whose third argument sends a service filter:
+
+```sh
+./gradlew :e2e-runner:scanRun --args "ws://<iphone-ip>:8080/agent 20"                                        # unfiltered
+./gradlew :e2e-runner:scanRun --args "ws://<iphone-ip>:8080/agent 20 a1b2c3d4-0000-4000-8000-000000000001"   # filtered
+```

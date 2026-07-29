@@ -42,9 +42,24 @@ If you prefer not to use XcodeGen, create an iOS App target by hand, add the fil
 
 ## The screen-lock caveat
 
-iOS does not support a backgrounded, listening TCP server — once the app backgrounds or the
-screen locks, nothing can reach this agent anymore (existing radio *links* may linger briefly
-under the `bluetooth-central` background mode, but new inbound WebSocket connections cannot be
-accepted). The `IosAgentSession` disables the idle timer while the agent is running so the screen
-can't auto-lock, and `AgentApp` shows an on-screen reminder to keep the app open — there is no way
-around this on iOS short of the user leaving the phone plugged in and unlocked.
+Keep the app foregrounded. `IosAgentSession` disables the idle timer while the agent is running so
+the screen can't auto-lock, and `AgentApp` shows a matching on-screen reminder.
+
+**The caveat is narrower than it used to read here.** Measured on hardware (Rig B case 3 —
+[`docs/pr8-rig-b-evidence.md`](../docs/pr8-rig-b-evidence.md)), where this section previously
+asserted that new inbound connections "cannot be accepted" while backgrounded:
+
+| Backgrounded 91 s with… | New inbound WebSocket connections |
+|---|---|
+| an active BLE link | **all accepted** (38/38), 92/92 GATT reads served |
+| no BLE link | **hang within ~8 s**, until foregrounded again |
+
+`UIBackgroundModes: bluetooth-central` keeps the *process* scheduled while it holds a
+CoreBluetooth connection, and a scheduled process keeps running its Ktor accept loop. So an agent
+with a client mid-session stays fully reachable; an idle one stops answering within seconds.
+
+Do not design around this. It is a side effect of a background mode declared for the radio, it
+disappears the moment the last link closes, and iOS additionally ignores a `nil`-serviceUUIDs scan
+while backgrounded — which is what Kable's Apple scanner passes today, so a backgrounded agent may
+serve an existing link yet be unable to discover anything. Foregrounded and unlocked remains the
+only supported way to run it.

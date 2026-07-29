@@ -165,8 +165,22 @@ class EngineBleBackend(
             send(
                 AdvertisementDto(
                     device = DeviceHandle(advertisement.identifier.toString()),
+                    // Only the advertised local name — deliberately NOT falling back to Kable's
+                    // `peripheralName` (the platform's cached GAP name). On Apple hosts Kable
+                    // leaves `name` null for a peripheral that advertises its local name in the
+                    // scan response rather than the primary PDU, and `peripheralName` then
+                    // answers with whatever CoreBluetooth has cached for that device — which is
+                    // the advertised name on a cold host but a stale one on a host that has seen
+                    // the device before. Rig B (2026-07-29) measured exactly that split: the same
+                    // peripheral read as `RBTestPeripheral` via the Mac agent and `Pixel 8` via
+                    // the iPhone agent. A null name is honest; a host-dependent one is not.
+                    // Identify such peripherals by [serviceUuids] instead.
                     name = advertisement.name,
                     rssi = advertisement.rssi,
+                    // The protocol has carried these since 0.8.x and `agent-rs` populates them,
+                    // but this backend never did, so every Kotlin-agent client saw an empty
+                    // service-UUID list and could not filter or identify by service.
+                    serviceUuids = advertisement.uuids.map { it.toString() },
                 ),
             )
         }

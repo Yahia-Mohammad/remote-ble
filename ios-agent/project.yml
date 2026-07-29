@@ -25,6 +25,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosagent
         INFOPLIST_FILE: Info.plist
         TARGETED_DEVICE_FAMILY: "1"
+        # The Kotlin framework is also named "RemoteBleAgent"; if the app's own Swift module shared
+        # that name, `import RemoteBleAgent` would resolve to itself ("part of module … ignoring
+        # import") and the framework's IosAgentEntryKt/IosAgentSession would be out of scope. Give
+        # the app a distinct module name so the import unambiguously targets the framework.
+        PRODUCT_MODULE_NAME: RemoteBleAgentApp
+        # :agent ships no iosX64 slice (Intel simulator was dropped), so the app must not try to
+        # build an x86_64 simulator slice — there'd be no framework arch to link against and the
+        # Kotlin symbols would appear "not in scope". Apple-Silicon simulators build arm64 anyway.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     dependencies:
       # Produced by `:agent:assembleRemoteBleAgentReleaseXCFramework -PiosFramework`.
       - framework: ../agent/build/XCFrameworks/release/RemoteBleAgent.xcframework

@@ -21,9 +21,18 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <!-- This app drives CoreBluetooth as a central (never advertises/is a peripheral), so only
-         the "central" background mode applies — and even that only helps already-connected
-         links, not accepting new inbound WebSocket connections while backgrounded (see the
-         on-screen notice in AgentApp/IosAgentEntry: the agent is only reachable foregrounded). -->
+         the "central" background mode applies.
+
+         It does more than keep existing links alive. Measured on hardware (Rig B case 3,
+         docs/pr8-rig-b-evidence.md): while the app holds an active CoreBluetooth connection this
+         mode keeps the *process* scheduled, so its Ktor accept loop keeps running and new inbound
+         WebSocket connections are still accepted — 38/38 across 91 s backgrounded. A control run
+         with no BLE link was suspended ~8 s after backgrounding. This comment previously claimed
+         the opposite; do not restore that claim without re-measuring.
+
+         Note the scan caveat: iOS ignores a `nil`-serviceUUIDs scan while backgrounded, and
+         Kable's Apple scanner passes nil today, so a backgrounded agent may serve an existing
+         link yet discover nothing. -->
     <key>UIBackgroundModes</key>
     <array>
         <string>bluetooth-central</string>
@@ -40,6 +49,12 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <!-- Compose Multiplatform's PlistSanityCheck throws (SIGABRT on launch) unless this key is
+         present and true — without it Compose is capped to 60 Hz on high-refresh-rate iPhones.
+         This is a hard launch-time failure, not a warning: see ComposeUIViewController's
+         enforceStrictPlistSanityCheck. -->
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UISupportedInterfaceOrientations</key>

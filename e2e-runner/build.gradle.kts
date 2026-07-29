@@ -112,6 +112,22 @@ tasks.register<JavaExec>("throughputRun") {
     mainClass.set("dev.warsha.remoteble.e2e.ThroughputMainKt")
 }
 
+// Write-with-response propagation probe (WriteErrorProbeMain.kt): issues a single measured
+// write-with-response and reports the outcome plus how long it took, then checks whether the link
+// survived. Written for the btleplug ATT-error investigation (Rig A), and the only probe here that
+// exercises a with-response write in isolation — which is what Rig B needs to tell "reads
+// specifically are broken" from "no GATT op completes" (docs/pr8-rig-b-evidence.md finding 5).
+// The source existed with no task to run it.
+//   ./gradlew :e2e-runner:writeErrorProbeRun --args "ws://localhost:8080/agent RBTestPeripheral 30"
+tasks.register<JavaExec>("writeErrorProbeRun") {
+    group = "application"
+    description = "Issue one measured write-with-response through a live agent and report its outcome."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.WriteErrorProbeMainKt")
+}
+
 // Rig A case 7 (HealthMain.kt, pr8-validation-plan.md): reads Battery Level (0x180F/0x2A19) and
 // Device Information (0x180A/0x2A29+0x2A24) through a live agent against the health-peripheral app
 // (../ble-peripheral), confirming a live (not frozen/cached) read by prompting a value change
@@ -153,6 +169,24 @@ tasks.register<JavaExec>("peripheralStateRun") {
     dependsOn(jvmJar)
     classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
     mainClass.set("dev.warsha.remoteble.e2e.PeripheralStateMainKt")
+}
+
+// Rig B cases 3-5 (AgentLifecycleMain.kt, pr8-validation-plan.md): holds a fully established
+// session — transport connected, peripheral connected — and narrates on one timeline what an
+// already-connected client observes while the operator changes the iOS agent app's lifecycle state
+// (background/lock, Stop, Stop mid-operation). One instrument for all three cases: they differ only
+// in the stimulus, which is the operator's. Watches transport state, the radio link (via periodic
+// GATT reads), wire events, and whether a *brand-new* inbound connection is still accepted — the
+// last of which an already-connected client cannot otherwise see, and which is case 3's actual
+// assertion.
+//   ./gradlew :e2e-runner:agentLifecycleRun --args "ws://192.168.178.85:8080/agent '' 180"
+tasks.register<JavaExec>("agentLifecycleRun") {
+    group = "application"
+    description = "Observe a live session across an agent lifecycle change (Rig B cases 3-5)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.AgentLifecycleMainKt")
 }
 
 // Two-client authorization on a real radio: client A holds the lease, client B may still scan but

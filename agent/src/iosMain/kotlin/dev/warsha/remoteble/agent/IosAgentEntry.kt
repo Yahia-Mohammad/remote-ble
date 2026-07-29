@@ -28,10 +28,24 @@ class IosAgentSession internal constructor() {
         }
     }
 
-    /** Builds the Compose UI hosting [AgentRunner]. There's no background server on iOS (see
-     * the class doc on [AgentApp]): while [AgentRunner.running] is true the idle timer stays
-     * disabled so the screen can't auto-lock and kill the in-process WebSocket server, and
-     * [AgentApp] shows a matching on-screen reminder. */
+    /**
+     * Builds the Compose UI hosting [AgentRunner]. While [AgentRunner.running] is true the idle
+     * timer stays disabled so the screen can't auto-lock, and [AgentApp] shows a matching on-screen
+     * reminder.
+     *
+     * **What backgrounding actually does** (measured, Rig B case 3 — `docs/pr8-rig-b-evidence.md`;
+     * this used to claim flatly that "the agent stops in the background", which the hardware
+     * disproved). `Info.plist` declares `UIBackgroundModes: bluetooth-central`, which keeps the
+     * process alive *while it holds an active CoreBluetooth connection* — and a live process keeps
+     * running its Ktor accept loop. So a backgrounded agent with a client mid-session stays fully
+     * reachable, new inbound connections included: 92/92 GATT reads and 38/38 fresh connections
+     * served across 91 s backgrounded. With **no** BLE link the app is suspended ~8 s after
+     * backgrounding and new connections hang until it is foregrounded again.
+     *
+     * The reminder therefore stays — an idle agent really does stop answering, and relying on a
+     * radio link to stay scheduled is not something to design around — but it no longer overstates
+     * the restriction.
+     */
     fun makeViewController(): UIViewController = ComposeUIViewController {
         AgentApp(
             runner = runner,
@@ -39,7 +53,8 @@ class IosAgentSession internal constructor() {
                 lanIPv4Address()?.let { "ws://$it:$port/agent" }
                     ?: "No Wi-Fi — connect to a network to reach this agent"
             },
-            keepScreenOnNotice = "Keep this screen open — the agent stops in the background.",
+            keepScreenOnNotice = "Keep this screen open — a backgrounded agent stops accepting " +
+                "new connections once its last Bluetooth link closes.",
         )
     }
 

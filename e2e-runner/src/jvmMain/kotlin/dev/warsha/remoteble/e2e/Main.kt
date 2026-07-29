@@ -96,7 +96,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     println("== RemoteBle live E2E ==")
     println("agent : $url")
     println("token : ${if (token != null) "set" else "none"}")
-    println("device: \"$ADVERTISED_NAME\"")
+    println("device: service $SERVICE (advertised as \"$ADVERTISED_NAME\")")
     println()
 
     val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -115,9 +115,18 @@ fun main(args: Array<String>): Unit = runBlocking {
             "CONNECTED"
         }
 
+        // Match on the TestProfile service UUID, not the advertised name. The name is not a
+        // reliable discriminator through every agent: on Apple hosts Kable never surfaces a local
+        // name carried in the scan response (which is where it must live — the 128-bit service
+        // UUID plus the name overflows a 31-byte legacy PDU), so this peripheral arrives nameless
+        // via the Kotlin agent while `agent-rs` reports it by name off the same radio. The service
+        // UUID is the actual TestProfile contract and is present in the primary PDU on every path.
+        // See docs/pr8-rig-b-evidence.md.
         val advertisement = report.capture("Scan finds the peripheral") {
             withTimeout(30.seconds) {
-                RemoteScanner(session).advertisements.first { it.name == ADVERTISED_NAME }
+                RemoteScanner(session).advertisements.first { adv ->
+                    adv.uuids.any { it.toString().equals(SERVICE, ignoreCase = true) }
+                }
             }
         }
 

@@ -662,10 +662,34 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
    the Android behaviour that motivated the gap and false here. Corrected in place; the event is
    still worth having, because that error only reaches a client that is mid-scan at the moment the
    radio dies.
-8. **iOS permission gating** — `IosAgentEntry` passes none of `startEnabled` / `permissionWarning` /
-   `onRequestPermissionSettings`, where `MainActivity` passes all three (case 6). Note Android's
-   gating keys on *runtime permissions*, not adapter state, so this is a narrower gap than item 7
-   and does not subsume it.
+8. **iOS permission gating** — **FIXED AND VERIFIED ON HARDWARE 2026-07-30.** `IosAgentEntry` passed
+   none of `startEnabled` / `permissionWarning` / `onRequestPermissionSettings`, where `MainActivity`
+   passes all three (case 6). Note Android's gating keys on *runtime permissions*, not adapter state,
+   so this was a narrower gap than item 7 and never subsumed it.
+
+   All three are now supplied on iOS, derived from the same process-wide `AgentRadio` source the rest
+   of the agent uses rather than a second notion of radio state, with `bluetoothPermissionDenied()`
+   gating on `UNAUTHORIZED` **only**. Five host tests in `AgentAppGatingTest` pin the four states that
+   must *not* gate — `OFF`, `UNKNOWN`, `null`, `UNSUPPORTED` — because each is a plausible-looking
+   overreach, and one test asserts the notice and the gate deliberately disagree (three states warrant
+   a notice, exactly one warrants the gate).
+
+   Verified on the iPhone 14 with the permission genuinely revoked (Settings → Privacy & Security →
+   Bluetooth → off for the app): **Start greyed out, warning shown, and a button offering to open
+   Settings.** The button is nested inside the `permissionWarning != null` branch in `AgentApp.kt`, so
+   its presence also establishes the warning rendered. There is no client-side way to observe any of
+   this — the gate is what prevents starting the agent — so the on-screen check was the only route.
+
+   **Parity note, and the platforms differ on purpose.** Android greys out Start *and* raises a real
+   runtime-permission prompt. iOS greys out Start and offers the **Settings deep link with no
+   dialog**, because revoking sets authorization to `denied` rather than `notDetermined` and iOS does
+   not re-prompt from `denied`. Case 6's "no such prompt exists" therefore still holds after a revoke.
+
+   **Method note.** The Android behaviour was confirmed first and was very nearly recorded *as* the
+   iOS result: the operator's "yes, it is greyed out and it asks for the permission" referred to the
+   Android app, and the two platforms produce similar-sounding descriptions for different mechanisms.
+   Confirm *which device* an operator confirmation refers to before it becomes evidence — a
+   parity-shaped answer from the wrong platform is indistinguishable from the result being sought.
 9. **Seven runner probes still discover by advertised name** (`healthRun`, `rssiRun`,
    `connParamsRun`, `throughputRun`, `wwrBurstRun`, `peripheralStateRun`, `twoClientRun`,
    `tlsProxyRun`). Given finding 4 they cannot resolve this peripheral through the Kotlin agent.

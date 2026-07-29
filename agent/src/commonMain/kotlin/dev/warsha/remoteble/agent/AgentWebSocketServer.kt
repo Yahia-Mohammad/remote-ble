@@ -31,15 +31,22 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Hosts an agent backend behind a Ktor WebSocket endpoint. Each connection becomes
@@ -73,6 +80,10 @@ class AgentWebSocketServer(
     private val pongTimeout: Duration = DEFAULT_PONG_TIMEOUT,
 ) {
     private var server: EmbeddedServer<*, *>? = null
+
+    // The scope owning the running engine's job, so [stop] retires it with the server rather than
+    // leaving a SupervisorJob (and its exception handler) alive for the process's lifetime.
+    private var engineJob: CoroutineScope? = null
     private val nextClientId = atomic(0L)
     private val liveSessions = LiveSessionRegistry()
     private val failedAuthLimiter = FailedAuthLimiter()
@@ -89,11 +100,36 @@ class AgentWebSocketServer(
         ) { "operator token must be distinct from every client credential" }
     }
 
-    fun start() {
+    /**
+     * Starts the server and **does not return until the listening socket is actually bound**,
+     * throwing [AgentBindException] if it is not.
+     *
+     * Suspending is the whole point. Ktor's `start(wait = false)` returns before CIO binds, so a
+     * bind error surfaced on a CIO worker *after* `start()` had already reported success — which
+     * made it unreportable by construction, and on Kotlin/Native fatal, since an exception on a
+     * `MultiWorkerDispatcher` worker with no handler aborts the process (Rig B case 4, finding 10).
+     * Awaiting `resolvedConnectors()` moves that failure back onto the caller's thread, where it
+     * can become an `AgentStartResult.Failed`.
+     *
+     * The same race also produced test flakes — a client could connect before the bind and, because
+     * an *initial* connect failure schedules no reconnect, silently never connect. That was worked
+     * around by polling the port; awaiting here removes the need.
+     */
+    suspend fun start() {
         // Local alias: inside the embeddedServer lambda the receiver is Ktor's Application,
         // whose own `monitor` (io.ktor.events.Events) would otherwise shadow this property.
         val statusMonitor = monitor
-        val instance = embeddedServer(CIO, host = host, port = port) {
+        // Where an engine-side failure goes. Without this the CIO accept job has no parent to
+        // report to, so a BindException reaches the *thread's* uncaught-exception handler and
+        // kills the process — measured on a Pixel 8, where the crash log names
+        // `FATAL EXCEPTION: DefaultDispatcher-worker-N` rather than anything on the caller's
+        // stack. Awaiting the bind is not sufficient on its own: the process is already gone by
+        // the time the await could report. Owning the engine's job is what makes it reportable.
+        val engineFailure = CompletableDeferred<Throwable>()
+        val engineScope = CoroutineScope(
+            SupervisorJob() + CoroutineExceptionHandler { _, failure -> engineFailure.complete(failure) },
+        )
+        val instance = engineScope.embeddedServer(CIO, host = host, port = port) {
             install(WebSockets) {
                 pingPeriodMillis = pingPeriod.inWholeMilliseconds
                 timeoutMillis = pongTimeout.inWholeMilliseconds
@@ -196,12 +232,102 @@ class AgentWebSocketServer(
             }
         }
         server = instance
-        instance.start(wait = false)
+        engineJob = engineScope
+        // Three different failure shapes, all measured rather than assumed:
+        //  - JVM/Ktor 3.5: `start(wait = false)` throws *synchronously*, as a
+        //    JobCancellationException whose root cause is the BindException;
+        //  - Android: the accept job fails on a `DefaultDispatcher` worker after `start()` has
+        //    returned — this is the one that killed the process, and only [engineScope]'s handler
+        //    catches it;
+        //  - Kotlin/Native: same asynchronous shape, which Rig B saw abort the process
+        //    (case 4, finding 10).
+        // Handling only the shape of whichever platform you happen to be standing on is how this
+        // stayed unreportable for a whole rig, so all three route through one conversion.
+        bindGuarded(instance, engineScope, engineFailure) { instance.start(wait = false) }
+        awaitBind(instance, engineScope, engineFailure)
+    }
+
+    /**
+     * Runs a bind step, converting every failure shape into [AgentBindException].
+     *
+     * A failed CIO bind does NOT arrive as an IOException: the engine cancels its own job, so what
+     * reaches us is a [CancellationException]. Rethrowing that blindly — the reflex, and correct
+     * almost everywhere else — would turn a reportable failure straight back into the silent one.
+     * The discriminator is *whose* job was cancelled: if the caller's coroutine is still active,
+     * the cancellation came from the engine, not from our caller. Genuine caller cancellation
+     * still propagates untouched.
+     *
+     * [engineFailure], when the engine's handler has recorded something, is the better cause: it
+     * is the actual `BindException`, where the cancellation only says "… is cancelling".
+     */
+    private suspend inline fun <T> bindGuarded(
+        instance: EmbeddedServer<*, *>,
+        engineScope: CoroutineScope,
+        engineFailure: CompletableDeferred<Throwable>,
+        block: () -> T,
+    ): T =
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            abandon(instance, engineScope)
+            if (!currentCoroutineContext().isActive) throw cancelled
+            throw bindFailure(engineFailure, cancelled)
+        } catch (failure: Throwable) {
+            abandon(instance, engineScope)
+            throw bindFailure(engineFailure, failure)
+        }
+
+    private fun bindFailure(engineFailure: CompletableDeferred<Throwable>, fallback: Throwable?): AgentBindException {
+        val cause = engineFailure.takeIf { it.isCompleted }?.getCompleted() ?: fallback
+        Logger.warn(LogTags.SERVER) { "bind failed [$host:$port]: ${cause?.rootCause()?.message}" }
+        return AgentBindException(host, port, cause)
+    }
+
+    /**
+     * Waits for CIO to report its bound connectors, or for the engine to report a failure.
+     *
+     * Bounded by [BIND_TIMEOUT] rather than waiting indefinitely: a bind that neither succeeds nor
+     * reports a failure would otherwise hang `start()` forever, which from the UI is
+     * indistinguishable from the frozen agent this change exists to prevent. A failed start also
+     * tears the half-built server down and clears [server], so a subsequent [stop] cannot be handed
+     * an instance that never bound — and, more importantly, so the *next* start is not the one that
+     * discovers the port is still held.
+     */
+    private suspend fun awaitBind(
+        instance: EmbeddedServer<*, *>,
+        engineScope: CoroutineScope,
+        engineFailure: CompletableDeferred<Throwable>,
+    ) {
+        val connectors = bindGuarded(instance, engineScope, engineFailure) {
+            withTimeoutOrNull(BIND_TIMEOUT) { instance.engine.resolvedConnectors() }
+        }
+        // The engine can report a failure while `resolvedConnectors()` still returns a connector
+        // list — the list describes what was *requested* on some paths, not what was bound. Treat
+        // a recorded engine failure as authoritative over a hopeful-looking list.
+        if (engineFailure.isCompleted) {
+            abandon(instance, engineScope)
+            throw bindFailure(engineFailure, null)
+        }
+        if (connectors.isNullOrEmpty()) {
+            abandon(instance, engineScope)
+            Logger.warn(LogTags.SERVER) { "bind did not complete within $BIND_TIMEOUT [$host:$port]" }
+            throw AgentBindException(host, port, null)
+        }
+        Logger.info(LogTags.SERVER) { "listening on $host:$port$path" }
+    }
+
+    private fun abandon(instance: EmbeddedServer<*, *>, engineScope: CoroutineScope) {
+        runCatchingNonCancellation { instance.stop(0, 0) }
+        engineScope.cancel()
+        server = null
+        engineJob = null
     }
 
     fun stop(gracePeriodMillis: Long = 100, timeoutMillis: Long = 500) {
         server?.stop(gracePeriodMillis, timeoutMillis)
+        engineJob?.cancel()
         server = null
+        engineJob = null
     }
 
     companion object {
@@ -210,8 +336,41 @@ class AgentWebSocketServer(
         const val DUPLICATE_SESSION_CLOSE_REASON: String = "REMOTE_BLE_DUPLICATE_SESSION"
         val DEFAULT_PING_PERIOD: Duration = 15.seconds
         val DEFAULT_PONG_TIMEOUT: Duration = 40.seconds
+
+        /** How long [start] waits for the listening socket before calling the bind failed. */
+        val BIND_TIMEOUT: Duration = 10.seconds
     }
 }
+
+/**
+ * The agent could not take its listening socket — most often because the port is already held,
+ * whether by a previous agent instance or by an unrelated app.
+ *
+ * [cause] is null when the bind simply never completed within [AgentWebSocketServer.BIND_TIMEOUT],
+ * which is a different fact from a bind that actively failed and is worth keeping distinguishable.
+ */
+class AgentBindException(
+    val host: String,
+    val port: Int,
+    cause: Throwable?,
+) : Exception(
+    // The engine's own cancellation message ("… is cancelling") says nothing useful; the operator
+    // needs the root cause, which is where "Address already in use" actually lives.
+    "could not bind $host:$port" + (cause?.rootCause()?.message?.let { ": $it" } ?: " (timed out)"),
+    cause,
+)
+
+/** The deepest [Throwable.cause] in the chain — the bind error under the engine's cancellation. */
+internal fun Throwable.rootCause(): Throwable {
+    var current = this
+    // Bounded rather than recursive: a malformed cause chain must not be able to loop forever.
+    repeat(MAX_CAUSE_DEPTH) {
+        current = current.cause ?: return current
+    }
+    return current
+}
+
+private const val MAX_CAUSE_DEPTH = 16
 
 /** Tracks the one live WebSocket generation permitted for each stable client identity. */
 internal class LiveSessionRegistry {

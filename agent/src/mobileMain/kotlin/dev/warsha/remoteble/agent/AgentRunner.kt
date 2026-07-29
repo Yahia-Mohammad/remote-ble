@@ -39,7 +39,14 @@ data class AgentStopResult(
 internal interface AgentRunnerGraph {
     val monitor: AgentMonitor
     val registry: PeripheralRegistry
-    fun start()
+
+    /**
+     * Suspends until the server is actually listening, throwing if it is not — so
+     * [AgentRunner.start] can report a bind failure as [AgentStartResult.Failed] instead of
+     * returning `Started` and letting the failure abort the process from a CIO worker.
+     */
+    suspend fun start()
+
     suspend fun disconnect(handle: DeviceHandle)
 
     /**
@@ -65,7 +72,7 @@ private class KoinAgentRunnerGraph(config: AgentConfig) : AgentRunnerGraph {
     private val watcher: ConnectionWatcher = koin.get()
     private val backend: BleBackend = koin.get()
 
-    override fun start() {
+    override suspend fun start() {
         server.start()
         watcher.start()
     }
@@ -141,8 +148,17 @@ class AgentRunner private constructor(
             }
             // Exception messages may include endpoint/configuration values. Publish a stable,
             // non-sensitive state instead; detailed diagnostics remain in the local log.
+            //
+            // A bind failure is called out by name because it is the one start failure a user can
+            // actually act on, and because it used to be unreportable entirely: the bind happened
+            // asynchronously after start() had returned Started, so on Kotlin/Native it aborted the
+            // process instead. The port is not a secret — the UI shows the address on every run.
             _state.value = AgentRunnerState.FAILED
-            AgentStartResult.Failed("Unable to start the agent; check the local log.")
+            if (t is AgentBindException) {
+                AgentStartResult.Failed("Port ${t.port} is already in use. Stop whatever is holding it, then try again.")
+            } else {
+                AgentStartResult.Failed("Unable to start the agent; check the local log.")
+            }
         }
     }
 

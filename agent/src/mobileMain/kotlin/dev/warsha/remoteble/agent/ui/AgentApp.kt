@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentRadio
 import dev.warsha.remoteble.agent.AgentRunner
+import dev.warsha.remoteble.agent.AgentStartResult
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.persistToken
@@ -78,6 +79,8 @@ fun AgentApp(
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
     var token by remember { mutableStateOf<String?>(null) }
     var tokenEdited by remember { mutableStateOf(false) }
+    // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
+    var startFailure by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         val persisted = loadPersistedToken()
@@ -107,12 +110,21 @@ fun AgentApp(
         token = effectiveToken
         // Persist on Start, not per keystroke: only records what the agent actually ran with.
         scope.launch { persistToken(effectiveToken) }
-        scope.launch { runner.start(config.copy(authToken = effectiveToken)) }
+        scope.launch {
+            // The result was previously discarded, which meant a failed Start was indistinguishable
+            // from a Start that did nothing: the button simply stayed on "Start". Now that a bind
+            // failure is reportable at all (it used to kill the process), it has to be reported.
+            startFailure = null
+            startFailure = (runner.start(config.copy(authToken = effectiveToken)) as? AgentStartResult.Failed)?.message
+        }
     }
     val onStart: () -> Unit = {
         if (!token.isNullOrBlank()) startWith(token)
     }
-    val onStop: () -> Unit = { scope.launch { runner.stop() } }
+    val onStop: () -> Unit = {
+        startFailure = null
+        scope.launch { runner.stop() }
+    }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -135,6 +147,7 @@ fun AgentApp(
                         permissionWarning = permissionWarning,
                         onRequestPermissionSettings = onRequestPermissionSettings,
                         radioNotice = radioNoticeFor(radioState),
+                        startFailure = startFailure,
                     )
                 }
 
@@ -180,6 +193,7 @@ private fun AgentHeader(
     permissionWarning: String?,
     onRequestPermissionSettings: (() -> Unit)?,
     radioNotice: String?,
+    startFailure: String?,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -230,6 +244,13 @@ private fun AgentHeader(
     // is as silent as the wire was.
     radioNotice?.let {
         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    }
+    // Shown only while stopped: once a later Start succeeds this is cleared, and a stale reason
+    // next to a running agent would be worse than no reason at all.
+    if (!running) {
+        startFailure?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
     }
 }
 

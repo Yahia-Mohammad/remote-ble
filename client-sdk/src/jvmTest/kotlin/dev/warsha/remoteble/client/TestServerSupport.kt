@@ -1,39 +1,28 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.agent.AgentWebSocketServer
-import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 /**
  * Starts [this] server and blocks until its TCP port is actually accepting connections.
  *
- * Ktor's `start(wait = false)` returns *before* CIO binds the listening socket. The transport's
- * initial `connect()` is fire-and-forget and — unlike a drop after CONNECTED — an initial failure
- * schedules no reconnect, so a client that races ahead of the bind silently never connects and the
- * test times out at `awaitConnected`. That race is the source of the occasional connection-timeout
- * flakes. Probing real readiness closes it deterministically (no fixed sleep).
+ * This used to poll the port with bare TCP connects, because Ktor's `start(wait = false)` returned
+ * *before* CIO bound the listening socket: the transport's initial `connect()` is fire-and-forget
+ * and — unlike a drop after CONNECTED — an initial failure schedules no reconnect, so a client that
+ * raced ahead of the bind silently never connected and the test timed out at `awaitConnected`.
  *
- * A bare TCP connect never sends the HTTP upgrade, so it never reaches the `/agent` WebSocket route
- * — it only confirms the socket is live and has no effect on the agent's client bookkeeping.
+ * `AgentWebSocketServer.start()` now suspends until the bind resolves and throws if it fails, so
+ * the polling is gone and this is just the blocking adapter for tests that are not themselves
+ * suspend. The [port] parameter is kept so the call sites read unchanged.
  */
+@Suppress("UNUSED_PARAMETER")
 internal fun AgentWebSocketServer.startAndAwaitReady(
     port: Int,
     timeout: Duration = 5.seconds,
 ): AgentWebSocketServer {
-    start()
-    val deadline = System.nanoTime() + timeout.inWholeNanoseconds
-    while (true) {
-        try {
-            Socket().use { it.connect(InetSocketAddress("localhost", port), 200) }
-            return this
-        } catch (_: IOException) {
-            check(System.nanoTime() < deadline) {
-                "agent server on port $port did not start accepting within $timeout"
-            }
-            Thread.sleep(10)
-        }
-    }
+    runBlocking { withTimeout(timeout) { start() } }
+    return this
 }

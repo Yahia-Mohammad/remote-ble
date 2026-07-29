@@ -11,6 +11,7 @@ import java.nio.file.Path
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.system.exitProcess
 import kotlinx.coroutines.runBlocking
 import org.koin.core.context.startKoin
 
@@ -61,7 +62,15 @@ fun main(args: Array<String>) {
     val server = app.koin.get<AgentWebSocketServer>()
     val registry = app.koin.get<PeripheralRegistry>()
     val backend = app.koin.get<BleBackend>()
-    server.start()
+    // `start()` suspends until the socket is genuinely bound (see AgentWebSocketServer.start), so
+    // the desktop agent now fails here with a usable message instead of logging "listening on …"
+    // and only then discovering, on a CIO worker, that it never bound.
+    try {
+        runBlocking { server.start() }
+    } catch (bind: AgentBindException) {
+        Logger.error(LogTags.AGENT) { "Cannot start: ${bind.message}. Is another agent already running?" }
+        exitProcess(1)
+    }
     app.koin.get<ConnectionWatcher>().start()
 
     val auth = if (config.authToken != null || config.namedCredentials.isNotEmpty()) "bearer-token required" else "no auth"

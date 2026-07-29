@@ -90,6 +90,24 @@ class AgentRunnerTest {
     }
 
     @Test
+    fun aBindFailureIsNamedSoTheUserCanActOnIt() = runBlocking {
+        // The generic message above is right for an unknown failure, but a held port is the one
+        // start failure a user can actually fix — and it used to kill the process rather than
+        // produce any result at all (Rig B follow-up 16).
+        val graph = TestGraph(onStart = { throw AgentBindException("0.0.0.0", 8080, null) })
+        val runner = AgentRunner({ graph }, Unit)
+
+        val failure = assertIs<AgentStartResult.Failed>(runner.start(AgentConfig()))
+        assertTrue(
+            failure.message.contains("8080") && failure.message.contains("already in use"),
+            "expected an actionable port message, got: ${failure.message}",
+        )
+        assertEquals(AgentRunnerState.FAILED, runner.state.value)
+        assertFalse(runner.running.value)
+        graph.dispose()
+    }
+
+    @Test
     fun concurrentStopsDisconnectOnceAndCloseOneGraph() = runBlocking {
         val graph = TestGraph()
         val runner = AgentRunner({ graph }, Unit)
@@ -196,7 +214,7 @@ class AgentRunnerTest {
         var stopServerCalls = 0
         val disconnects = mutableListOf<DeviceHandle>()
 
-        override fun start() {
+        override suspend fun start() {
             startCalls++
             onStart()
         }

@@ -678,13 +678,25 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
     Main dispatcher, and `serverStopped` reports that call's real outcome. Two mutation-checked
     regression tests. **Closed** — the Android re-verification ran 2026-07-29 evening; see
     [the Android confirmation](#android-confirmation-2026-07-29-evening) under case 4.
-16. **Surface asynchronous bind failures** (finding 10's residue). `AgentWebSocketServer.start()`
-    ends in `instance.start(wait = false)`, so a bind error lands on a CIO worker after `start()`
-    has already returned `Started` — unreportable by construction, and fatal on Kotlin/Native.
-    Fixing finding 8 removed the *self-inflicted* case; a port held by another app still aborts the
-    process. Wants `resolvedConnectors()` (or an equivalent await) so `AgentRunner.start()` can
-    return `AgentStartResult.Failed`. Deferred because it makes `start()` suspend, which touches
-    the desktop call site too.
+16. **Surface asynchronous bind failures** (finding 10's residue) — **FIXED 2026-07-29 evening;
+    verified on Android hardware.** `start()` is now `suspend`, awaits the real bind, and throws
+    `AgentBindException`; `AgentRunner` turns that into `AgentStartResult.Failed` and the UI shows
+    it. The desktop call site was touched as predicted, and now exits with a usable message instead
+    of logging "listening on …" before discovering it never bound.
+
+    **The prediction in this entry was half right, and the half it missed is the interesting one.**
+    Awaiting `resolvedConnectors()` is necessary but does not by itself fix Android: there, the
+    accept job fails on a `DefaultDispatcher` worker and reaches the *thread's* uncaught handler,
+    so the process is gone before any await could report anything. The JVM tests passed while the
+    phone still died — caught only because the run was repeated on hardware. The fix needed the
+    engine to be given a parent job we own, with an exception handler, so its failure has somewhere
+    to go that is not `Thread.UncaughtExceptionHandler`.
+
+    Two further details worth carrying: a failed CIO bind arrives as a **`CancellationException`**,
+    so "rethrow cancellation untouched" — correct nearly everywhere — silently restores the original
+    defect; the usable discriminator is whether the *caller's* job is still active. And on JVM/Ktor
+    3.5 the failure is **synchronous** out of `start(wait = false)`, a third shape again. Handling
+    only the shape in front of you is how this survived a whole rig.
 17. **The Apple scanner passes `nil` serviceUUIDs.** Kable logs CoreBluetooth's own warning on every
     scan: *"The recommended practice is to populate the serviceUUIDs parameter rather than leaving
     it nil."* Beyond the advisory, iOS **ignores** a nil-services scan entirely while the app is
@@ -805,3 +817,13 @@ Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md
     (refused) — a different code than over the LAN, but just as sharply distinguished from `400`,
     and still distinct from a hang. That control was run against a deliberately dead port
     *before* trusting any of the real measurements, per note 12.
+18. **A green test suite on one platform is not evidence about another — even for shared code.**
+    Follow-up 16's fix had four passing JVM tests, including one that deliberately squatted on a
+    port and asserted the failure was reported. On the Pixel the same build still died with
+    `FATAL EXCEPTION: DefaultDispatcher-worker-4`, because the failure arrives by a *different
+    route* on Android: an uncaught exception on an engine worker rather than a throw the caller can
+    catch. The tests were not wrong, they were answering a question the phone was not asking.
+    Note the shape this shares with note 16 and with the `android-agent` re-verification above —
+    **shared `commonMain` code plus one platform's green result keeps looking like proof and keeps
+    not being it.** Where a defect is about *how a failure propagates*, the propagation is a
+    property of the runtime, not of the code, so it has to be re-observed per runtime.

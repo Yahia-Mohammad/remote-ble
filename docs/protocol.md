@@ -239,11 +239,23 @@ is the body of an unsolicited `Event` frame:
 `RadioState` reports the **agent host's radio**, not any one link: `ON`, `OFF`, `UNAUTHORIZED`,
 `UNSUPPORTED`, or `UNKNOWN`. It is sent once at handshake with the state at that moment, then on
 every transition — a client that connects while the radio is already off must not have to wait for
-the user to toggle it before it can tell. It exists because a scan with the radio off is not an
-error on any platform: it succeeds and yields nothing, which is indistinguishable on the wire from
-an empty room. `UNKNOWN` is a genuine state (CoreBluetooth reports it until its central manager
-powers up), not a stand-in for "unimplemented" — an agent that cannot observe its radio does not
-advertise the capability at all, and so never sends this event.
+the user to toggle it before it can tell. `UNKNOWN` is a genuine state (CoreBluetooth reports it
+until its central manager powers up), not a stand-in for "unimplemented" — an agent that cannot
+observe its radio does not advertise the capability at all, and so never sends this event.
+
+It exists because, without it, the radio being off is hard to distinguish from an empty room. What
+exactly a client sees instead is **platform-dependent**, which is worth stating precisely rather
+than generalising:
+
+| Situation | Android | iOS |
+|---|---|---|
+| scan started while the radio is off | succeeds, yields nothing (Rig B finding 9) | not measured |
+| radio switched off during a live scan | not measured | the scan **ends with an error** — `"scan #1 ended on error: Bluetooth disabled"`, observed on an iPhone 14 |
+
+So the blunt claim "a radio-off scan is never an error" is true of the Android case that motivated
+this and **false on iOS**. The event still earns its place: the error only reaches a client that
+happens to be scanning at the moment the radio dies, tells it nothing about *why* a later scan
+finds nothing, and never fires at all for a client that is merely connected.
 
 `ConnectionState` reports the **physical BLE link** state and is explicitly distinct
 from the IP transport state (see [the two state machines](README.md#the-two-state-machines-do-not-conflate-them)).

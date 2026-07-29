@@ -644,7 +644,24 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
 
    Wire behaviour confirmed end-to-end against the Pixel 8 with a client negotiating the
    capability: `ON` → scans accepted → `OFF` → `RADIO_OFF` → `ON` → accepted, driven by real
-   adapter toggles rather than injection. The iOS half compiles and is unverified on device.
+   adapter toggles rather than injection. **Confirmed on the iPhone 14 as well**, second attempt —
+   `ON` → `OFF` → 7 × `RADIO_OFF` → `ON`, 23 accepted / 7 rejected / 3 events.
+
+   **The first iPhone attempt failed, and is the more useful half of this entry.**
+   `CBCentralManager` holds its delegate weakly and the returned `StateFlow` referenced nothing
+   else, so the delegate died when the factory returned — after delivering the initial state. A
+   client therefore saw `radio -> ON` and then silence through a real off/on cycle, with 30
+   consecutive scans accepted against a radio that was off. Nothing on JVM or Android could have
+   caught it: it is Objective-C reference semantics, not Kotlin logic, and the source is correct on
+   every other platform. See method note 19.
+
+   One expectation this run corrected: **iOS does error a live scan when the radio is switched
+   off** — the operator saw `"scan #1 ended on error: Bluetooth disabled"` in the agent's own
+   activity log during the first attempt, when the gate was not yet firing. The write-up (and
+   `protocol.md`) had claimed a radio-off scan is never an error on any platform, which is true of
+   the Android behaviour that motivated the gap and false here. Corrected in place; the event is
+   still worth having, because that error only reaches a client that is mid-scan at the moment the
+   radio dies.
 8. **iOS permission gating** — `IosAgentEntry` passes none of `startEnabled` / `permissionWarning` /
    `onRequestPermissionSettings`, where `MainActivity` passes all three (case 6). Note Android's
    gating keys on *runtime permissions*, not adapter state, so this is a narrower gap than item 7
@@ -827,3 +844,17 @@ Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md
     **shared `commonMain` code plus one platform's green result keeps looking like proof and keeps
     not being it.** Where a defect is about *how a failure propagates*, the propagation is a
     property of the runtime, not of the code, so it has to be re-observed per runtime.
+19. **"The first value arrived" is not evidence that a stream works.** The Apple radio-state
+    delegate was deallocated the moment its factory returned, because `CBCentralManager` retains
+    its delegate weakly. The initial state still arrived — the callback fires while the local
+    reference is alive — so every cheap check passed: the capability was advertised, the handshake
+    event appeared, the value was correct. Only a *transition* could expose it, and only on device.
+
+    Generalise past the specific API: **a subscription that delivers its current value on
+    attachment cannot be validated by reading that value.** Seeding and streaming are separate
+    mechanisms, and the seed is usually the one that works. Any test of an observable wants at
+    least one change of state, and for a platform callback that means real hardware.
+
+    The comment sitting on the faulty line claimed the retention was handled. Written in good
+    faith, wrong, and it made the code *look* audited — worse than no comment, because it answers
+    the question a reviewer would otherwise ask.

@@ -31,11 +31,25 @@ import platform.darwin.NSObject
 internal actual fun agentRadioStateSource(scope: CoroutineScope): StateFlow<BleRadioState>? {
     val state = MutableStateFlow(BleRadioState.UNKNOWN)
     val delegate = RadioStateDelegate(state)
-    // Retained by `delegate`, which the flow's closure retains: CBCentralManager holds its delegate
-    // weakly, so dropping either reference would silently stop the updates.
     delegate.manager = CBCentralManager(delegate = delegate, queue = null)
+    // MUST be retained here. CBCentralManager holds its delegate **weakly**, and the returned
+    // `asStateFlow()` captures only the MutableStateFlow — nothing in it references the delegate.
+    // Without this line the delegate is deallocated as soon as this function returns, which fails
+    // in the most misleading way available: the *initial* state still arrives (the callback fires
+    // while the local reference is alive), so everything looks wired up, and then no transition
+    // ever arrives again.
+    //
+    // Measured on an iPhone 14 before this was added: a client saw `radio -> ON` at handshake and
+    // then nothing at all across a real Bluetooth off/on cycle, while 30 consecutive scans were
+    // accepted against a radio that was actually off.
+    //
+    // Process-lifetime, matching [AgentRadio], which caches the flow for the process and is the
+    // only caller. Written under AgentRadio's lock.
+    retainedRadioDelegate = delegate
     return state.asStateFlow()
 }
+
+private var retainedRadioDelegate: RadioStateDelegate? = null
 
 private class RadioStateDelegate(
     private val state: MutableStateFlow<BleRadioState>,

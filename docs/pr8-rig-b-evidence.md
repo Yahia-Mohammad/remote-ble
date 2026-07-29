@@ -246,8 +246,9 @@ explicitly; only the mobile composition root relies on Koin to do it.
 "server stopped" from "graph closed", which is precisely the assumption that does not hold. The
 returned value is wrong, not merely incomplete.
 
-**This lives in `mobileMain`/`commonMain`, so `android-agent` is affected identically.** Untested
-there, but there is no iOS-specific code on the path. Rig B's fourth non-iOS finding.
+**This lives in `mobileMain`/`commonMain`, so `android-agent` is affected identically.** There is no
+iOS-specific code on the path. Rig B's fourth non-iOS finding. Confirmed on Android after the fix —
+see [the Android confirmation](#android-confirmation-2026-07-29-evening) below.
 
 **The UI actively asserts the opposite, which is what makes this a safety issue rather than an
 untidy teardown.** Operator-confirmed at the end of the run: the app was showing the **`Start`**
@@ -297,6 +298,27 @@ OOM'd at `-Xmx16g` with the host at ~33 % free, per follow-up 5; the debug frame
 The restart succeeding is independent confirmation of the port half: a fresh `AgentWebSocketServer`
 could only bind `:8080` if the previous one had genuinely released it.
 
+#### Android confirmation (2026-07-29 evening)
+
+Pixel 8, `android-agent` debug build, token `secret`, **three consecutive Stop → Start cycles**:
+
+| Check | Result |
+|---|---|
+| running, bearer / no credential | `400` / `401` — the pre-fix iOS signature, i.e. the same server behaviour |
+| after Stop | connection **refused within the first probe**, ≲1 s after the tap, all three cycles |
+| `ss -ltn` after Stop | no `*:8080` listener; it reappears after each Start |
+| app PID | **29506 throughout all six taps** — the process never died and never restarted |
+| logcat | no `EADDRINUSE`, no `AndroidRuntime` fatal, no abort |
+
+Gap 14 is closed on both platforms. Two limits worth stating rather than leaving implied:
+
+- **The lease-disconnect half of `stop()` is not covered on Android.** It needs a second radio — the
+  Pixel is also the rig's peripheral, and it cannot connect to itself. Only the server half ran.
+- **The JVM-vs-Native uncaught-handler question is now moot for this path.** Finding 10 predicted
+  the JVM would log rather than abort; with the fix there is no bind failure to survive, so the
+  prediction stayed untested. It still matters for follow-up 16, where the port is held by *another*
+  app.
+
 #### The Stop → Start crash is the same defect (finding 10, now root-caused)
 
 Carried since the night session as an unexplained operator report plus a bare `signal 6`.
@@ -329,8 +351,9 @@ claims a successful start immediately before the abort.
 Fixing finding 8 removes this crash, and that fix is applied above. Two things remain worth doing
 independently (follow-up 16): surface a bind failure as a real `AgentStartResult.Failed` — today it
 cannot be reported at all, whatever the cause, so a port genuinely occupied by *another app* still
-aborts the process — and confirm the same sequence on `android-agent`, where the leak was identical
-but the JVM's uncaught-exception handling should stop short of killing the process.
+aborts the process. The second half of this — confirming the sequence on `android-agent` — **ran on
+2026-07-29 evening** and is clean; note it did *not* test the JVM's uncaught-exception handling,
+because with finding 8 fixed there is no bind failure left to handle.
 
 ### Case 6 — Failure recovery — **PARTIAL PASS: no crash, clean recovery, no messaging**
 
@@ -389,8 +412,9 @@ Both platforms already expose the state they need: `CBCentralManager.state` on A
 
 ## Findings
 
-Seven, four fixed. **Three are not iOS-specific**, which is the most important thing this rig has
-produced so far.
+Ten, seven fixed. **Four are not iOS-specific** (3, 8, 9, 10), which is the most important thing
+this rig has produced. The count in this line was stale from the night session — it read "seven,
+four fixed" after three more findings had been appended below it.
 
 | # | Finding | State |
 |---|---|---|
@@ -399,11 +423,11 @@ produced so far.
 | 3 | Kotlin agent never forwarded `serviceUuids` (any platform) | fixed |
 | 4 | Kable never surfaces a scan-response local name on Apple hosts | **open by decision** — worked around in the runner |
 | 5 | **iOS reads never completed** — Kable matched completions by characteristic *reference*, which Apple does not preserve | **fixed** (`forceCharacteristicEqualityByUuid = true`); case 2 now 14/14 |
-| 6 | The documented background caveat is **wrong** while a BLE link is held — `bluetooth-central` keeps the agent fully reachable, new connections included | open; three doc/UI strings to correct (case 3) |
+| 6 | The documented background caveat is **wrong** while a BLE link is held — `bluetooth-central` keeps the agent fully reachable, new connections included | **fixed** — corrected in four places, not the three first counted (case 3, follow-up 13) |
 | 7 | A killed agent **leaves the BLE link up** — the peripheral still counts the central connected 90 s later, on two independent instruments | open; cause unconfirmed (case 5) |
 | 9 | **Neither agent notices Bluetooth being switched off** — scans return 0 devices with no error, indistinguishable from an empty room; no UI, console or wire signal. `CBCentralManager.state` / `BluetoothAdapter.isEnabled` exist and are unused. **Android affected identically** | open (case 6) |
-| 8 | **`Stop` never stops the WebSocket server** — Koin has no `onClose` for it, so the agent keeps listening and authenticating; `AgentStopResult.serverStopped` reports `true` regardless. **Android is affected identically** | **fixed + verified on hardware** — `AgentRunnerGraph.stopServer()`, called by `stop()` off the Main dispatcher; port now refuses ~2 s after the tap (case 4) |
-| 10 | **Stop → Start aborts the process** (`SIGABRT`) — `EADDRINUSE` from finding 8's orphaned listener, thrown on a CIO worker with no handler. **Root-caused; same defect as 8** | **fixed via 8, verified on hardware** — Stop → Start now starts cleanly; the unreportable async bind failure remains open as follow-up 16 (case 4) |
+| 8 | **`Stop` never stops the WebSocket server** — Koin has no `onClose` for it, so the agent keeps listening and authenticating; `AgentStopResult.serverStopped` reports `true` regardless. **Android is affected identically** | **fixed + verified on iOS and Android hardware** — `AgentRunnerGraph.stopServer()`, called by `stop()` off the Main dispatcher; port refuses ~2 s after the tap on the iPhone, ≲1 s on the Pixel (case 4) |
+| 10 | **Stop → Start aborts the process** (`SIGABRT`) — `EADDRINUSE` from finding 8's orphaned listener, thrown on a CIO worker with no handler. **Root-caused; same defect as 8** | **fixed via 8, verified on iOS and Android hardware** — Stop → Start starts cleanly, three consecutive cycles on the Pixel with an unchanged PID; the unreportable async bind failure remains open as follow-up 16 (case 4) |
 
 ### 1 — `ios-agent/project.yml`: the launcher shell never compiled
 
@@ -639,11 +663,11 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
     while a BLE link is held.
 14. **Measure how long iOS holds a dead app's BLE link** (case 5). Observed ≥90 s on two
     instruments; the ceiling is unmeasured and the mechanism unconfirmed.
-15. **`Stop` leaving the server up** (case 4, finding 8) — **fixed and verified on iOS hardware**:
+15. **`Stop` leaving the server up** (case 4, finding 8) — **fixed and verified on both platforms**:
     `AgentRunner.stop()` calls `AgentRunnerGraph.stopServer()` before closing the graph, off the
     Main dispatcher, and `serverStopped` reports that call's real outcome. Two mutation-checked
-    regression tests. **Still to do: re-verify on `android-agent`** — the defect was in shared
-    `mobileMain`, so the fix applies there too, but it has only been exercised on iOS.
+    regression tests. **Closed** — the Android re-verification ran 2026-07-29 evening; see
+    [the Android confirmation](#android-confirmation-2026-07-29-evening) under case 4.
 16. **Surface asynchronous bind failures** (finding 10's residue). `AgentWebSocketServer.start()`
     ends in `instance.start(wait = false)`, so a bind error lands on a CIO worker after `start()`
     has already returned `Started` — unreportable by construction, and fatal on Kotlin/Native.
@@ -755,3 +779,19 @@ Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md
     it tracks runtime permissions. **When a finding is "platform A does this, platform B doesn't",
     verify platform A actually does it** — the reference implementation is a hypothesis too, and one
     grep would have settled it.
+17. **When the transport under test is not the transport being measured, move the probe.** The
+    Android re-verification stalled immediately: probing `http://192.168.178.83:8080` from the Mac
+    timed out, even though the app showed `Running`. The reflex reading was "the fix does not work
+    on Android" — the LAN path was simply blocked (the SYN went unanswered; an earlier probe to the
+    same address had been *refused*, so delivery had worked minutes before). Two on-device controls
+    settled it in one step: `nc 127.0.0.1 8080` from `adb shell` returned `400`, and so did
+    `adb forward tcp:18080 tcp:8080`. **Nothing about case 4 needs the LAN** — it is a question
+    about whether a listening socket is released, so probing over the USB bridge tests exactly the
+    same thing with a channel the Wi-Fi cannot break.
+
+    One caveat that makes the forwarded probe usable rather than merely convenient: it still
+    classifies. With the port closed, `adb` accepts the local connection and then closes it when
+    the device refuses, so curl reports **exit 52 (empty reply)** in ~15 ms rather than exit 7
+    (refused) — a different code than over the LAN, but just as sharply distinguished from `400`,
+    and still distinct from a hang. That control was run against a deliberately dead port
+    *before* trusting any of the real measurements, per note 12.

@@ -30,7 +30,7 @@ Stop → Start starts cleanly.
 | iOS agent host | iPhone 14 (`iPhone14,7`), iOS 26.5.2, UDID `00008110-001C55882611401E`, developer mode enabled, LAN `192.168.178.85` |
 | Client | `:e2e-runner` on the Mac (`192.168.178.78`), no radio of its own |
 | Peripheral | Pixel 8, `com.warsha.ble.peripheral.sample`, `../ble-peripheral` at `5390307`, `TestProfile`, advertising `RBTestPeripheral` |
-| Repo commit | `0d9728c` plus this session's uncommitted fixes (below) |
+| Repo commit | Runs made on `0d9728c` plus the fixes below, now committed as `e8280b9`, `e685adb`, `a8a3fd3` |
 | Agent version | 0.10.0 |
 
 ## Rig prerequisites discovered

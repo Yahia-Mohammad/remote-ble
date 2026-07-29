@@ -337,6 +337,51 @@ clone the whole repo to run an agent" is solved by *shipping the agent as a rele
 clone-and-build step entirely without touching repo structure. That release workflow and its current
 gates are tracked in [`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md).
 
+## Kable builder options: set only what the platform reads back
+
+`PeripheralBuilder` is a common `expect class`, so every option compiles on every target — but each
+platform's factory reads back only the subset it implements and **silently drops the rest**. Setting
+an option is therefore not evidence that it applies. Verified against `kable-core:0.43.1` by
+disassembling the published artifacts (`javap` on the JVM jar and the Android AAR, `klib
+dump-metadata` on the iOS klib) rather than by reading documentation, because this is exactly the
+class of assumption that has cost this project real defects.
+
+| Option | Default | Apple | Android | JVM/btleplug |
+|---|---|---|---|---|
+| `logging` | quiet | ✅ | ✅ | ✅ |
+| `onServicesDiscovered` | no-op | ✅ | ✅ | ✅ |
+| `observationExceptionHandler` | rethrows | ✅ | ✅ | ❌ replaced by an internal log-only handler |
+| `disconnectTimeout` | 5s | ✅ | ✅ | ❌ dropped — no bound at any layer |
+| `forceCharacteristicEqualityByUuid` | `false` | ✅ | ❌ hardcoded `false` | ❌ hardcoded `false` |
+| `autoConnectIf` / `transport` / `phy` / `threadingStrategy` | direct connect / `Le` / `Le1M` / on-demand | n/a | ✅ | n/a |
+
+What follows from it:
+
+- **`forceCharacteristicEqualityByUuid = true` is set on Apple only**, in
+  `agent/…/PeripheralByIdentifier.ios.kt` and `client-sdk/…/KableWorkarounds.ios.kt`. CoreBluetooth
+  can hand back a different `CBCharacteristic` instance than the one an operation was issued
+  against, so Kable's default reference comparison never matches the completion and the operation
+  suspends forever — Rig B measured this as *every read on iOS timing out*. Android and the JVM
+  ignore the option, and correctly so: their stacks return the instances the operation was issued
+  against. Setting it in `commonMain` would read as configuration while doing nothing on two of
+  three targets, and would silently change behaviour on both if Kable ever wired it up.
+- **The agent bounds its own `disconnect()`** (`EngineBleBackend.boundedDisconnect`, at
+  `GATT_OP_TIMEOUT`) because the JVM drops `disconnectTimeout` entirely. The bound is deliberately
+  looser than Kable's own 5s so that where the platform *does* honour its timeout, its teardown
+  still wins.
+- **The default `observationExceptionHandler` is kept.** It rethrows, which surfaces at the
+  collector of `Peripheral.observe(…)` — and `BleAgent.startObserve` already `.catch`es there,
+  ending that one subscription with a logged error rather than the connection. The JVM's log-only
+  substitute is the weaker of the two behaviours (the flow stays alive but delivers nothing) and is
+  not reachable from the builder, so this is a divergence to know about, not one to configure away.
+- **Android's remaining defaults are all the right choice for a relay** and are left alone: direct
+  connect rather than auto-connect (a client-driven agent wants a typed failure, not an indefinite
+  pending connection), LE transport, 1M PHY, on-demand threading.
+
+`writeWithoutResponseTimeout` **does not exist** in `0.43.1` on any target — a plan item once named
+it as an unset default. Re-run the disassembly above on the next Kable bump rather than assuming
+this table still holds.
+
 ## Known boundaries & extension points
 
 These are deliberate v1 cuts, each a clean extension:

@@ -30,6 +30,19 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <!-- Required by Compose Multiplatform on iOS: without it the app aborts on launch with
+         "CADisableMinimumFrameDurationOnPhone is not set to true" on any device with a display
+         faster than 60 Hz. Same key, same reason, as ios-agent/Info.plist — the agent app hit this
+         first (Rig B finding 2) and this app was left with the identical defect. -->
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
+    <!-- Required of any app that instantiates a CBCentralManager: iOS terminates the process on
+         first CoreBluetooth use if this key is absent. REMOTE mode never touches the radio — the
+         agent owns it and this app only speaks WebSocket — which is why the app has shipped without
+         the key. `peripheralFor(BleMode.LOCAL, …)` does touch it, so the key is a precondition for
+         exercising the SDK's local path here at all. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>RemoteBLE uses Bluetooth to talk to nearby peripherals directly when running in local mode.</string>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UISupportedInterfaceOrientations</key>

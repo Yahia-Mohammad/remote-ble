@@ -1,0 +1,31 @@
+# THROWAWAY XcodeGen spec — identical to project.yml except that it links the **debug**
+# XCFramework. Not the source of truth; delete it when the rig session ends. Same reasoning as
+# ios-agent/project-debug.yml: the release link OOMs unpredictably (gap 11) and debug is a valid
+# vehicle for on-device verification.
+#
+#   ./gradlew :client-ui:assembleRemoteBleClientDebugXCFramework -PiosFramework
+#   cd ios-client && xcodegen generate --spec project-debug.yml
+name: RemoteBleClient
+options:
+  bundleIdPrefix: dev.warsha.remoteble.iosclient
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+targets:
+  RemoteBleClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosclient
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_MODULE_NAME: RemoteBleClientApp
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    dependencies:
+      - framework: ../client-ui/build/XCFrameworks/debug/RemoteBleClient.xcframework
+        embed: true

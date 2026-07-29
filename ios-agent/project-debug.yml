@@ -1,0 +1,35 @@
+# THROWAWAY XcodeGen spec — identical to project.yml except that it links the **debug**
+# XCFramework. Not the source of truth; delete it when the rig session ends.
+#
+# Why it exists: the release link performs whole-program devirtualization over the entire
+# transitive closure (Compose Multiplatform, Ktor, Kable, coroutines, serialization, Koin) and OOMs
+# unpredictably — 16g failed with the host at ~33 % free (gap 11). The debug framework links in
+# ~1 minute, runs fine on device, and is a valid vehicle for hardware verification. Using a spec
+# copy rather than editing project.yml keeps the tracked file honest about what ships.
+#
+#   ./gradlew :agent:assembleRemoteBleAgentDebugXCFramework -PiosFramework
+#   cd ios-agent && xcodegen generate --spec project-debug.yml
+name: RemoteBleAgent
+options:
+  bundleIdPrefix: dev.warsha.remoteble.iosagent
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+targets:
+  RemoteBleAgent:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.warsha.remoteble.iosagent
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_MODULE_NAME: RemoteBleAgentApp
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    dependencies:
+      - framework: ../agent/build/XCFrameworks/debug/RemoteBleAgent.xcframework
+        embed: true

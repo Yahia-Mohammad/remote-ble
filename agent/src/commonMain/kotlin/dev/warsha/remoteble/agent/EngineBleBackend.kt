@@ -235,8 +235,7 @@ class EngineBleBackend(
         advanceConnectionGeneration(device)
         val peripheral = synchronized(lock) { peripherals.remove(device) } ?: return
         try {
-            peripheral.disconnect()
-            Logger.debug(LogTags.ENGINE) { "Kable disconnect ok [dev=${device.value}]" }
+            boundedDisconnect(device) { peripheral.disconnect() }
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
@@ -534,6 +533,34 @@ class EngineBleBackend(
         return result.getOrElse { t ->
             if (t is CancellationException) throw t
             bleError(failure, message = t.message)
+        }
+    }
+
+    /**
+     * Runs a teardown [block] under [GATT_OP_TIMEOUT], logging rather than failing on expiry —
+     * [disconnect] is best-effort and always follows up with `close()` regardless.
+     *
+     * The bound exists because Kable's own `disconnectTimeout` builder option (5s by default) is
+     * honoured only by the Android and Apple backends. The JVM/btleplug factory reads just
+     * `logging` and `onServicesDiscovered` off the builder and drops the rest, so on the JVM agent
+     * `disconnect()` has no bound at any layer — the same "a native stack can fail to *complete* a
+     * transaction rather than complete it with an error" shape [gattOp] exists for, and one Rig A
+     * already measured on btleplug/macOS for writes. Bounding here is deliberately *looser* than
+     * Kable's 5s so that where the platform does honour its own timeout, its teardown still wins.
+     */
+    // internal (not private): EngineBleBackendJvmTest drives the bound directly — a disconnect that
+    // never completes reproduces only against a real stack.
+    internal suspend fun boundedDisconnect(device: DeviceHandle, block: suspend () -> Unit) {
+        val completed = withTimeoutOrNull(GATT_OP_TIMEOUT) {
+            block()
+            true
+        } ?: false
+        if (completed) {
+            Logger.debug(LogTags.ENGINE) { "Kable disconnect ok [dev=${device.value}]" }
+        } else {
+            Logger.warn(LogTags.ENGINE) {
+                "Kable disconnect did not complete within $GATT_OP_TIMEOUT; closing anyway [dev=${device.value}]"
+            }
         }
     }
 

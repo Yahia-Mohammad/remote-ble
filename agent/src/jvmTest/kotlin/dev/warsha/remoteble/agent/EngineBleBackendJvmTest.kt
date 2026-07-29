@@ -19,6 +19,7 @@ import kotlin.test.assertTrue
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 
 /**
@@ -132,6 +133,44 @@ class EngineBleBackendJvmTest {
         assertFailsWith<CancellationException> {
             EngineBleBackend().gattOp(ErrorKind.READ_FAILED, "read") {
                 throw CancellationException("scope cancelled")
+            }
+        }
+    }
+
+    // --- teardown bound -------------------------------------------------------------------------
+    // Kable's own `disconnectTimeout` is read off the builder only by the Android and Apple
+    // backends; the JVM/btleplug factory drops it, so without this bound a `disconnect()` that never
+    // returns leaves the op suspended forever and the client waiting on a reply that never comes.
+
+    @Test
+    fun aDisconnectThatNeverCompletesStillReturnsSoTheCloseCanRun() = runTest {
+        // The stimulus is the point: `awaitCancellation` genuinely never completes, so returning at
+        // all is only possible because the bound expired — and virtual time proves it waited the
+        // bound out rather than the block having quietly finished.
+        EngineBleBackend().boundedDisconnect(DeviceHandle("dev-1")) { awaitCancellation() }
+
+        assertTrue(
+            currentTime > 0,
+            "a disconnect that never completes must return once the bound expires, not suspend forever",
+        )
+    }
+
+    @Test
+    fun aDisconnectThatCompletesIsNotDelayedByTheBound() = runTest {
+        var ran = false
+        EngineBleBackend().boundedDisconnect(DeviceHandle("dev-1")) { ran = true }
+
+        assertTrue(ran, "the normal path must still run the teardown")
+        assertEquals(0L, currentTime, "a completing disconnect must not wait out the bound")
+    }
+
+    @Test
+    fun aFailingDisconnectStillReachesTheCallersBestEffortHandling() = runTest {
+        // The bound must not convert a real teardown failure into a silent success: `disconnect()`
+        // logs it and falls through to `close()`, which it can only do if the throw still arrives.
+        assertFailsWith<IllegalStateException> {
+            EngineBleBackend().boundedDisconnect(DeviceHandle("dev-1")) {
+                throw IllegalStateException("stack refused")
             }
         }
     }

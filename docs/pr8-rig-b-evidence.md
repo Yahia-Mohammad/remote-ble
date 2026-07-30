@@ -63,16 +63,34 @@ Probed from the Mac against `192.168.178.85:8080`:
 That is the bearer gate working over a real network, not loopback.
 
 **Scope correction — the dashboard half of this case is unreachable on any mobile agent.**
-The plan asks to confirm "its dashboard/`/api/state` is reachable". Both return **404**, and this
-is structural, not a misconfiguration: `dashboardRoutes` is registered only when *both*
-`statusMonitor` **and** `operatorCredentials` are non-null
+The plan asks to confirm "its dashboard/`/api/state` is reachable". Both return **404**, because
+`dashboardRoutes` is registered only when *both* `statusMonitor` **and** `operatorCredentials` are
+non-null
 ([AgentWebSocketServer.kt](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentWebSocketServer.kt)),
-and `operatorToken` is settable only from `jvmMain`'s CLI/env — neither `mobileMain` nor
-`android-agent` ever sets it. The mobile status surface is the in-app native `AgentApp`, whose own
-KDoc calls it "a native mirror of the desktop agent's HTML status dashboard" precisely because
-there is no HTTP one. The desktop agent logs the same
-`status dashboard disabled: configure a separate operator credential` warning when run without one,
-so this is a configuration property that mobile simply cannot satisfy today.
+and no mobile entry point supplies an operator token. The desktop agent logs the same
+`status dashboard disabled: configure a separate operator credential` warning when run without one.
+
+**Correction (2026-07-30).** This was first written up as **structural** — "`operatorToken` is
+settable only from `jvmMain`'s CLI/env" — and that is **wrong**. `AgentConfig.operatorToken` is a
+plain `commonMain` field (`di/AgentModule.kt`), `AgentWebSocketServer` is `commonMain` and takes it
+directly, and `AgentModule` already forwards `config.operatorToken` on every platform. Nothing about
+`mobileMain` prevents it. What actually happens is that `AgentApp` constructs
+`AgentConfig(bindHost = MOBILE_LAN_BIND_HOST)` and thereafter only ever `copy(authToken = …)`, so
+`operatorToken` stays `null` — and `MainActivity` does the same. **This is a wiring gap, the same
+class as follow-up 8, not an impossibility**, and a mobile agent would serve the dashboard the moment
+its entry point passed one.
+
+The one genuine cost, and the likely reason nobody wired it: `AgentWebSocketServer`'s `init`
+**requires the operator token to be distinct from every client credential**, so it cannot reuse the
+token the user already typed — the UI would have to collect a *second* secret on a phone keyboard.
+Whether that is worth it is a product decision, recorded as open item 20; the native `AgentApp` already
+shows the same data in-process (its KDoc calls it "a native mirror of the desktop agent's HTML status
+dashboard"), so what a mobile dashboard would add is **remote** viewing from another device, plus the
+strict-mode live toggle, which exists only on the HTTP surface.
+
+What remains true for anyone running this case: **a `404` on `/` is the healthy answer from a mobile
+agent as shipped**, and the reachability check should target the WebSocket endpoint (or a `401`)
+instead.
 
 **Operator note:** the agent requires a non-blank token *before* Start — the button is disabled
 while the masked field is empty (`startEnabled && !token.isNullOrBlank()`), and the token is

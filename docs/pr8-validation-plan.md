@@ -143,10 +143,13 @@ peripheral in range (reuse Rig A's).
 
 ### Test cases
 
-1. ⚠️ **PASS, scope corrected** (2026-07-29) — the agent listens and is reachable. The
-   dashboard/`/api/state` half is **structurally impossible on mobile**, not a defect: `operatorToken`
-   is settable only from `jvmMain`, so a mobile-hosted agent cannot serve `/` or `/api/state` at all.
-   A `404` on `/` is therefore the healthy answer from a running mobile agent; probe the WebSocket
+1. ⚠️ **PASS, with the dashboard half unmet** (2026-07-29) — the agent listens and is reachable.
+   `/` and `/api/state` return **404**, because `dashboardRoutes` registers only when an **operator
+   credential** is configured and no mobile entry point supplies one. **Corrected 2026-07-30:** this
+   was first recorded as *structurally impossible on mobile*, which is wrong — `AgentConfig.operatorToken`
+   is a `commonMain` field that `AgentModule` already forwards on every platform; `AgentApp` and
+   `MainActivity` simply never set it. It is a **wiring gap** (open item 20), not an impossibility.
+   As shipped, a `404` on `/` is the healthy answer from a mobile agent, so probe the WebSocket
    endpoint or a `401` instead.
 
    **Start** — launch the app, tap Start, confirm the agent listens and is reachable from a client on

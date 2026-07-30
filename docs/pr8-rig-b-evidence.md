@@ -83,7 +83,8 @@ its entry point passed one.
 The one genuine cost, and the likely reason nobody wired it: `AgentWebSocketServer`'s `init`
 **requires the operator token to be distinct from every client credential**, so it cannot reuse the
 token the user already typed — the UI would have to collect a *second* secret on a phone keyboard.
-Whether that is worth it is a product decision, recorded as open item 20; the native `AgentApp` already
+**Resolved 2026-07-30: the field was added** (item 20) — optional, blank by default, so the 404 above
+remains the untouched default and filling it serves the read-only dashboard. The native `AgentApp` already
 shows the same data in-process (its KDoc calls it "a native mirror of the desktop agent's HTML status
 dashboard"), so what a mobile dashboard would add is **remote** viewing from another device and
 nothing else — the dashboard is read-only, four `GET` routes with no mutation endpoint by design.

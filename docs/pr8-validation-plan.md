@@ -34,7 +34,16 @@ runs produced.
 2. **Gap 13's mechanism** (Rig B case 5's follow-up) — one discriminating run against an *unbonded*
    peripheral. The link outliving a killed agent is measured at ≥26 min, but it may belong to this
    rig's bonded phone pair rather than to iOS. Not a blocker.
-3. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
+3. **Two-client scan isolation** (gap 21) — never run. If client A is scanning and client B stops its
+   own scan, does A's scan survive? Our layer isolates them (`BleAgent` is per-connection, and
+   `EngineBleBackend.scan` builds a new Kable `Scanner` per call), but Apple's `Scanner` holds a
+   process-wide `CentralManager.Default` whose `stopScan()` takes no arguments, because a
+   `CBCentralManager` has one scan — so interference is expected there and the *start* direction may be
+   worse than the stop (a second scan with different `serviceUUIDs` replaces the parameters). Rig A
+   case 3 had only client B scanning, so this has never been exercised. Two staggered
+   `:e2e-runner:scanRun` clients against one agent settle it. Not a blocker, but "single agent,
+   multiple clients" is a headline property.
+4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
 
 **Three things the runs changed about this plan itself**, all marked inline below: two stimuli were
@@ -143,14 +152,16 @@ peripheral in range (reuse Rig A's).
 
 ### Test cases
 
-1. ⚠️ **PASS, with the dashboard half unmet** (2026-07-29) — the agent listens and is reachable.
-   `/` and `/api/state` return **404**, because `dashboardRoutes` registers only when an **operator
-   credential** is configured and no mobile entry point supplies one. **Corrected 2026-07-30:** this
-   was first recorded as *structurally impossible on mobile*, which is wrong — `AgentConfig.operatorToken`
-   is a `commonMain` field that `AgentModule` already forwards on every platform; `AgentApp` and
-   `MainActivity` simply never set it. It is a **wiring gap** (open item 20), not an impossibility.
-   As shipped, a `404` on `/` is the healthy answer from a mobile agent, so probe the WebSocket
-   endpoint or a `401` instead.
+1. ✅ **PASS, and the dashboard half is now reachable** (run 2026-07-29; gap closed 2026-07-30) — the
+   agent listens and is reachable. `/` and `/api/state` originally returned **404**, because
+   `dashboardRoutes` registers only when an **operator credential** is configured and no mobile entry
+   point supplied one. That was first recorded as *structurally impossible on mobile*, which was
+   **wrong**: `AgentConfig.operatorToken` is a `commonMain` field that `AgentModule` already forwards
+   on every platform, and `AgentApp` simply never set it — a wiring gap, not an impossibility.
+   **The mobile UI now has an optional operator-token field** (item 20), so this case is fully runnable:
+   leave it blank and `/` still 404s (unchanged default); fill it and the read-only dashboard is served.
+   When re-running, test **both** — a 404 with no operator token is the *correct* answer, not a
+   failure, and conflating the two is what let the original misdiagnosis stand.
 
    **Start** — launch the app, tap Start, confirm the agent listens and is reachable from a client on
    the same network.

@@ -85,8 +85,8 @@ The one genuine cost, and the likely reason nobody wired it: `AgentWebSocketServ
 token the user already typed — the UI would have to collect a *second* secret on a phone keyboard.
 Whether that is worth it is a product decision, recorded as open item 20; the native `AgentApp` already
 shows the same data in-process (its KDoc calls it "a native mirror of the desktop agent's HTML status
-dashboard"), so what a mobile dashboard would add is **remote** viewing from another device, plus the
-strict-mode live toggle, which exists only on the HTTP surface.
+dashboard"), so what a mobile dashboard would add is **remote** viewing from another device and
+nothing else — the dashboard is read-only, four `GET` routes with no mutation endpoint by design.
 
 What remains true for anyone running this case: **a `404` on `/` is the healthy answer from a mobile
 agent as shipped**, and the reachability check should target the WebSocket endpoint (or a `401`)

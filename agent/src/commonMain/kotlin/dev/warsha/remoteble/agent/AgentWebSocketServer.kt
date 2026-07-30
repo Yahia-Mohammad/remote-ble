@@ -70,7 +70,10 @@ class AgentWebSocketServer(
     private val operatorToken: String? = null,
     private val monitor: AgentMonitor? = null,
     private val registry: PeripheralRegistry? = null,
-    // Shared identifier strict-mode switch, exposed on the dashboard for live toggling.
+    // Shared identifier strict-mode switch. The dashboard *reports* it (`GET /api/strict`) but
+    // cannot change it: `Dashboard.kt` is read-only by design and has no mutation endpoint. This
+    // comment previously said "for live toggling", which described an intention rather than the code
+    // and was read back as fact when weighing what a mobile dashboard would add (item 20).
     private val strictMode: StrictModeState? = null,
     // Liveness: Ktor pings idle clients every [pingPeriod] and closes the session if no
     // pong arrives within [pongTimeout]. This promptly frees a client that vanished without

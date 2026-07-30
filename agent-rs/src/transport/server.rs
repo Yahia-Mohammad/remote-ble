@@ -1,4 +1,3 @@
-use clap::ValueEnum;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -29,6 +28,9 @@ use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
 };
+use crate::transport::scan_coordinator::{ScanAdmission, ScanArbiter, ScanCoordinator};
+
+pub use crate::transport::scan_coordinator::ScanConcurrencyMode;
 
 /// Outbound frame buffer per connection. Bounds memory for a slow/stalled client.
 const FRAME_CHANNEL_CAP: usize = 512;
@@ -69,97 +71,6 @@ fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_FRAME_BYTES))
 }
 static NEXT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-/// Process-lifetime scan coordination policy. Kept here because it controls command admission and
-/// handshake capabilities rather than btleplug's radio primitives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ScanConcurrencyMode {
-    Multiplexed,
-    Single,
-    Uncontrolled,
-}
-
-impl Default for ScanConcurrencyMode {
-    fn default() -> Self {
-        Self::Multiplexed
-    }
-}
-
-impl ScanConcurrencyMode {
-    fn capability(self) -> &'static str {
-        match self {
-            Self::Multiplexed => crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED,
-            Self::Single => crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE,
-            Self::Uncontrolled => {
-                crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED
-            }
-        }
-    }
-}
-
-/// The single-mode slot is keyed by stable client identity and local scan ID, so reconnect replay
-/// is an atomic same-key replacement rather than contention. The transport grace mirrors leases.
-#[derive(Clone)]
-struct ScanGate {
-    mode: ScanConcurrencyMode,
-    transport_grace: Duration,
-    single_owner: Arc<parking_lot::Mutex<Option<(String, i64)>>>,
-}
-
-impl ScanGate {
-    fn new(mode: ScanConcurrencyMode, transport_grace: Duration) -> Self {
-        Self {
-            mode,
-            transport_grace,
-            single_owner: Arc::new(parking_lot::Mutex::new(None)),
-        }
-    }
-
-    fn reserve(&self, client_id: &str, scan_id: i64) -> Result<(), ()> {
-        if self.mode != ScanConcurrencyMode::Single {
-            return Ok(());
-        }
-        let key = (client_id.to_string(), scan_id);
-        let mut owner = self.single_owner.lock();
-        match owner.as_ref() {
-            None => {
-                *owner = Some(key);
-                Ok(())
-            }
-            Some(existing) if *existing == key => Ok(()),
-            Some(_) => Err(()),
-        }
-    }
-
-    fn release(&self, client_id: &str, scan_id: i64) {
-        if self.mode != ScanConcurrencyMode::Single {
-            return;
-        }
-        let key = (client_id.to_string(), scan_id);
-        let mut owner = self.single_owner.lock();
-        if owner.as_ref().is_some_and(|current| *current == key) {
-            *owner = None;
-        }
-    }
-
-    fn detach(&self, client_id: String) {
-        if self.mode != ScanConcurrencyMode::Single {
-            return;
-        }
-        let owner = self.single_owner.clone();
-        let grace = self.transport_grace;
-        tokio::spawn(async move {
-            tokio::time::sleep(grace).await;
-            let mut held = owner.lock();
-            if held
-                .as_ref()
-                .is_some_and(|(owner_id, _)| owner_id == &client_id)
-            {
-                *held = None;
-            }
-        });
-    }
-}
 
 /// A write retains the completion sender for its position in one device's receive-order chain.
 /// Dropping it (including on cancellation) wakes the successor, so a failed task cannot wedge
@@ -224,7 +135,10 @@ struct ExecuteContext<'a> {
     connection_live: &'a AtomicBool,
     stream_connection: u64,
     streams: &'a StreamReservations,
-    scan_gate: &'a ScanGate,
+    scan_coordinator: &'a ScanCoordinator,
+    scan_mode: ScanConcurrencyMode,
+    scan_arbiter: &'a ScanArbiter,
+    scan_bindings: &'a ScanBindings,
     negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
 }
 
@@ -235,6 +149,32 @@ struct ExecuteContext<'a> {
 struct StreamReservations {
     scans: parking_lot::Mutex<HashSet<StreamKey>>,
     observations: parking_lot::Mutex<HashSet<StreamKey>>,
+}
+
+struct ScanBinding {
+    registration: crate::transport::scan_coordinator::ScanRegistration,
+    handle: crate::transport::scan_coordinator::ScanArbiterHandle,
+}
+
+#[derive(Default)]
+struct ScanBindings {
+    scans: tokio::sync::Mutex<HashMap<i64, ScanBinding>>,
+}
+
+impl ScanBindings {
+    async fn replace(&self, scan_id: i64, binding: ScanBinding) {
+        if let Some(previous) = self.scans.lock().await.insert(scan_id, binding) {
+            previous.handle.close().await;
+        }
+    }
+    async fn remove(&self, scan_id: i64) -> Option<ScanBinding> {
+        self.scans.lock().await.remove(&scan_id)
+    }
+    async fn clear(&self) -> Vec<ScanBinding> {
+        std::mem::take(&mut *self.scans.lock().await)
+            .into_values()
+            .collect()
+    }
 }
 
 impl StreamReservations {
@@ -456,7 +396,7 @@ pub struct AgentServer {
     live_sessions: Arc<LiveSessionRegistry>,
     failed_auth_limiter: Arc<AuthFailureLimiter>,
     revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
-    scan_gate: ScanGate,
+    scan_coordinator: ScanCoordinator,
 }
 
 impl AgentServer {
@@ -465,7 +405,12 @@ impl AgentServer {
         backend: Arc<dyn BleBackend>,
         registry: PeripheralRegistry,
     ) -> Self {
-        let scan_gate = ScanGate::new(config.scan_concurrency, config.transport_grace);
+        let scan_coordinator = ScanCoordinator::new(
+            backend.clone(),
+            config.scan_concurrency,
+            config.transport_grace,
+            MAX_ACTIVE_SCANS,
+        );
         Self {
             config,
             backend,
@@ -473,7 +418,7 @@ impl AgentServer {
             live_sessions: Arc::new(LiveSessionRegistry::default()),
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
             revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
-            scan_gate,
+            scan_coordinator,
         }
     }
 
@@ -539,7 +484,7 @@ impl AgentServer {
             let live_sessions = self.live_sessions.clone();
             let failed_auth_limiter = self.failed_auth_limiter.clone();
             let revoked_principals = self.revoked_principals.clone();
-            let scan_gate = self.scan_gate.clone();
+            let scan_coordinator = self.scan_coordinator.clone();
             let scan_mode = self.config.scan_concurrency;
 
             tokio::spawn(Self::accept_connection_with_scan(
@@ -552,7 +497,7 @@ impl AgentServer {
                 live_sessions,
                 failed_auth_limiter,
                 revoked_principals,
-                scan_gate,
+                scan_coordinator,
                 scan_mode,
             ));
         }
@@ -566,6 +511,7 @@ impl AgentServer {
     // (tungstenite's API), which clippy flags as a large Err variant. The type is
     // fixed by the upstream signature, so the lint doesn't apply here.
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    #[allow(dead_code)]
     async fn accept_connection<S>(
         stream: S,
         peer_addr: SocketAddr,
@@ -582,14 +528,19 @@ impl AgentServer {
         Self::accept_connection_with_scan(
             stream,
             peer_addr,
-            backend,
+            backend.clone(),
             registry,
             credentials,
             strict,
             live_sessions,
             failed_auth_limiter,
             revoked_principals,
-            ScanGate::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(10)),
+            ScanCoordinator::new(
+                backend.clone(),
+                ScanConcurrencyMode::Multiplexed,
+                Duration::from_secs(10),
+                MAX_ACTIVE_SCANS,
+            ),
             ScanConcurrencyMode::Multiplexed,
         )
         .await
@@ -606,7 +557,7 @@ impl AgentServer {
         live_sessions: Arc<LiveSessionRegistry>,
         failed_auth_limiter: Arc<AuthFailureLimiter>,
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
-        scan_gate: ScanGate,
+        scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -699,7 +650,7 @@ impl AgentServer {
                     strict,
                     live_sessions,
                     session_generation.expect("accepted session must have a generation"),
-                    scan_gate,
+                    scan_coordinator,
                     scan_mode,
                 )
                 .instrument(span)
@@ -714,6 +665,7 @@ impl AgentServer {
         }
     }
 
+    #[allow(dead_code)]
     async fn handle_connection<S>(
         ws_stream: tokio_tungstenite::WebSocketStream<S>,
         client_id: String,
@@ -728,17 +680,23 @@ impl AgentServer {
         Self::handle_connection_with_scan(
             ws_stream,
             client_id,
-            backend,
+            backend.clone(),
             registry,
             strict,
             live_sessions,
             session_generation,
-            ScanGate::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(10)),
+            ScanCoordinator::new(
+                backend.clone(),
+                ScanConcurrencyMode::Multiplexed,
+                Duration::from_secs(10),
+                MAX_ACTIVE_SCANS,
+            ),
             ScanConcurrencyMode::Multiplexed,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_connection_with_scan<S>(
         ws_stream: tokio_tungstenite::WebSocketStream<S>,
         client_id: String,
@@ -747,7 +705,7 @@ impl AgentServer {
         strict: Arc<AtomicBool>,
         live_sessions: Arc<LiveSessionRegistry>,
         session_generation: u64,
-        scan_gate: ScanGate,
+        scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -768,6 +726,7 @@ impl AgentServer {
         let mut command_tasks = JoinSet::new();
         let stream_connection = NEXT_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed);
         let streams = Arc::new(StreamReservations::default());
+        let scan_bindings = Arc::new(ScanBindings::default());
         // Reserved in the sequential receive loop, rather than inside tasks, to preserve command
         // receive order for writes to the same physical device while other work stays concurrent.
         let write_tails = Arc::new(parking_lot::Mutex::new(HashMap::new()));
@@ -836,6 +795,7 @@ impl AgentServer {
         });
 
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAP);
+        let scan_arbiter = ScanArbiter::new(event_tx.clone());
         let frame_tx_event = frame_tx.clone();
         let translator_event = translator.clone();
         let event_task = tokio::spawn(async move {
@@ -979,7 +939,9 @@ impl AgentServer {
                                 let connection_live = connection_live.clone();
                                 let write_tails = write_tails.clone();
                                 let streams = streams.clone();
-                                let scan_gate = scan_gate.clone();
+                                let scan_coordinator = scan_coordinator.clone();
+                                let scan_arbiter = scan_arbiter.clone();
+                                let scan_bindings = scan_bindings.clone();
                                 let negotiated_capabilities = negotiated_capabilities.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
@@ -1009,7 +971,10 @@ impl AgentServer {
                                                 connection_live: &connection_live,
                                                 stream_connection,
                                                 streams: &streams,
-                                                scan_gate: &scan_gate,
+                                                scan_coordinator: &scan_coordinator,
+                                                scan_mode,
+                                                scan_arbiter: &scan_arbiter,
+                                                scan_bindings: &scan_bindings,
                                                 negotiated_capabilities: &negotiated_capabilities,
                                             },
                                         )
@@ -1055,6 +1020,10 @@ impl AgentServer {
             }
         }
 
+        scan_coordinator.detach_generation(stream_connection).await;
+        for binding in scan_bindings.clear().await {
+            binding.handle.close().await;
+        }
         if let Err(e) = backend.stop_connection_streams(stream_connection).await {
             tracing::warn!("failed to stop connection-owned BLE streams: {}", e);
         }
@@ -1073,7 +1042,6 @@ impl AgentServer {
         // Transport gone: keep this client's links warm and let the registry release them on
         // grace-expiry (a reconnect within the window resumes).
         registry.on_transport_drop(&client_id);
-        scan_gate.detach(client_id.clone());
         // Release only the generation that acquired this client identity. Keeping the identity
         // claimed through lease cleanup ensures a reconnect cannot race an older socket's drop.
         live_sessions.release(&client_id, session_generation);
@@ -1090,7 +1058,10 @@ impl AgentServer {
             connection_live,
             stream_connection,
             streams,
-            scan_gate,
+            scan_coordinator,
+            scan_mode,
+            scan_arbiter,
+            scan_bindings,
             negotiated_capabilities,
         } = context;
         match op {
@@ -1124,21 +1095,66 @@ impl AgentServer {
                     )),
                 ))
             }
-            Op::ScanStart { scan_id, filters } => {
-                if scan_gate.reserve(client_id, scan_id).is_err() {
-                    let kind = if negotiated_capabilities
-                        .lock()
-                        .contains(crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE)
-                    {
-                        ErrorKind::ScanUnavailable
-                    } else {
-                        ErrorKind::AgentBusy
-                    };
-                    return OpResult::err(AgentError::new(
-                        kind,
-                        Some("the agent-wide scan slot is held".into()),
-                    ));
+            Op::ScanStart { scan_id, filters }
+                if scan_mode != ScanConcurrencyMode::Uncontrolled =>
+            {
+                let (delivery, handle) = scan_arbiter.register(scan_id);
+                let admission = match scan_coordinator
+                    .start_or_replace(
+                        client_id.to_string(),
+                        scan_id,
+                        stream_connection,
+                        filters,
+                        delivery,
+                    )
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        handle.close().await;
+                        return OpResult::err(error);
+                    }
+                };
+                match admission {
+                    ScanAdmission::Accepted(registration) => {
+                        scan_bindings
+                            .replace(
+                                scan_id,
+                                ScanBinding {
+                                    registration,
+                                    handle,
+                                },
+                            )
+                            .await;
+                        OpResult::ok(None)
+                    }
+                    ScanAdmission::LimitExceeded => {
+                        handle.close().await;
+                        OpResult::err(AgentError::new(
+                            ErrorKind::InvalidRequest,
+                            Some(format!(
+                                "at most {MAX_ACTIVE_SCANS} active scans are allowed"
+                            )),
+                        ))
+                    }
+                    ScanAdmission::SingleOccupied => {
+                        handle.close().await;
+                        let kind = if negotiated_capabilities
+                            .lock()
+                            .contains(crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE)
+                        {
+                            ErrorKind::ScanUnavailable
+                        } else {
+                            ErrorKind::AgentBusy
+                        };
+                        OpResult::err(AgentError::new(
+                            kind,
+                            Some("the agent-wide scan slot is held".into()),
+                        ))
+                    }
                 }
+            }
+            Op::ScanStart { scan_id, filters } => {
                 let stream = StreamKey {
                     connection: stream_connection,
                     local_id: scan_id,
@@ -1153,6 +1169,13 @@ impl AgentServer {
                 }
                 OpResult::from_unit(result)
             }
+            Op::ScanStop { scan_id } if scan_mode != ScanConcurrencyMode::Uncontrolled => {
+                if let Some(binding) = scan_bindings.remove(scan_id).await {
+                    scan_coordinator.stop(&binding.registration).await;
+                    binding.handle.close().await;
+                }
+                OpResult::ok(None)
+            }
             Op::ScanStop { scan_id } => {
                 let stream = StreamKey {
                     connection: stream_connection,
@@ -1161,7 +1184,6 @@ impl AgentServer {
                 let result = backend.stop_scan(stream).await;
                 if result.is_ok() {
                     streams.release_scan(stream);
-                    scan_gate.release(client_id, scan_id);
                 }
                 OpResult::from_unit(result)
             }
@@ -1933,16 +1955,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn single_scan_gate_refuses_a_different_key_and_allows_same_key_rebind() {
-        let gate = ScanGate::new(ScanConcurrencyMode::Single, Duration::from_secs(10));
-        assert!(gate.reserve("client-a", 7).is_ok());
-        assert!(gate.reserve("client-a", 7).is_ok());
-        assert!(gate.reserve("client-b", 7).is_err());
-        gate.release("client-a", 7);
-        assert!(gate.reserve("client-b", 7).is_ok());
-    }
-
     fn context_with_liveness<'a>(
         client_id: &'a str,
         backend: &'a Arc<dyn BleBackend>,
@@ -1957,10 +1969,14 @@ mod tests {
         ))));
         let (event_tx, _) = mpsc::channel(EVENT_CHANNEL_CAP);
         let streams = Box::leak(Box::new(StreamReservations::default()));
-        let scan_gate = Box::leak(Box::new(ScanGate::new(
+        let scan_coordinator = Box::leak(Box::new(ScanCoordinator::new(
+            backend.clone(),
             ScanConcurrencyMode::Multiplexed,
             Duration::from_secs(10),
+            MAX_ACTIVE_SCANS,
         )));
+        let scan_arbiter = Box::leak(Box::new(ScanArbiter::new(event_tx.clone())));
+        let scan_bindings = Box::leak(Box::new(ScanBindings::default()));
         let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
             std::collections::BTreeSet::new(),
         )));
@@ -1973,7 +1989,10 @@ mod tests {
             connection_live: live,
             stream_connection: generation,
             streams,
-            scan_gate,
+            scan_coordinator,
+            scan_mode: ScanConcurrencyMode::Multiplexed,
+            scan_arbiter,
+            scan_bindings,
             negotiated_capabilities,
         }
     }
@@ -2122,7 +2141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_local_scan_id_is_isolated_by_connection_generation() {
+    async fn guaranteed_scans_use_the_coordinator_physical_stream() {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
@@ -2141,12 +2160,12 @@ mod tests {
             *fake.scans.lock(),
             vec![
                 StreamKey {
-                    connection: 1,
-                    local_id: 1
+                    connection: 0,
+                    local_id: i64::MIN
                 },
                 StreamKey {
-                    connection: 2,
-                    local_id: 1
+                    connection: 0,
+                    local_id: i64::MIN
                 }
             ]
         );

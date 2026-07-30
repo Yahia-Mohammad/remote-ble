@@ -46,6 +46,10 @@ runs produced.
    client holding two `RemoteScanner`s, and "single agent, multiple clients" is a headline property.
    The design and plan are [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); this run
    is its Phase 0.
+   After automated `SCAN-CONC-01`…`11` evidence is green, repeat the broad-plus-service-filtered
+   pair against the default multiplexed JVM, iOS, and Rust agents available on Rig B. Run the
+   iOS-background-peripheral overflow-area case separately and record the exact agent, mode,
+   filters, timing, and result before changing Apple completeness wording or closing the blocker.
 4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
 

@@ -2,8 +2,8 @@
 
 [← back to index](../README.md)
 
-- **Status:** Accepted 2026-07-30; **finalized after three review passes, 2026-07-30** — not
-  implemented, **release blocker for 0.10.0**
+- **Status:** Automated implementation evidence passed on `codex/scan-concurrency-modes`; Rig B
+  evidence pending — **release blocker for 0.10.0 until hardware validation completes**
 - **Type:** Agent configuration + capability-gated protocol extension
 - **Fixes:** gap 21 in [0.10.0-progress-status.md](0.10.0-progress-status.md) — concurrent scans
   through one agent interfere on Apple hosts

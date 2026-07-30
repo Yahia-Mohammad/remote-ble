@@ -73,6 +73,9 @@ object Capabilities {
     const val RSSI             = "rssi"          // Op.ReadRssi connected read (backend-level, Android/Apple)
     const val CONN_PARAMS      = "conn.params"   // Op.SetConnParams (backend-level, Android-only); ⊃ conn.priority
     const val SCAN_BATCH       = "scan.batch"    // AgentEvent.ScanResultBatch coalescing (agent-level)
+    const val SCAN_CONCURRENCY_MULTIPLEXED = "scan.concurrency.multiplexed"
+    const val SCAN_CONCURRENCY_SINGLE = "scan.concurrency.single"
+    const val SCAN_CONCURRENCY_UNCONTROLLED = "scan.concurrency.uncontrolled"
     const val RADIO_STATE      = "radio.state"   // AgentEvent.RadioState + ErrorKind.RADIO_OFF (backend-level, Android/Apple)
 }
 ```
@@ -80,6 +83,10 @@ object Capabilities {
 Capabilities are either **backend-level** (depend on the radio engine — the backend declares
 them via `BleBackend.capabilities`) or **agent-level** (radio-independent, implemented by the
 agent itself — `BleAgent.AGENT_CAPABILITIES`). The advertised set is the union of the two.
+
+An agent contributes exactly one `scan.concurrency.*` capability. Its absence is legacy/unknown,
+never implicit `uncontrolled`; `SCAN_UNAVAILABLE` is emitted only after negotiating the `single`
+capability, so old clients continue to receive `AGENT_BUSY`.
 
 Three deliberate properties:
 

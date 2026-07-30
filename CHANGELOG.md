@@ -26,6 +26,11 @@ protocol version: **1**.
 
 ### Added
 
+- **Configured scan concurrency modes.** Agents advertise exactly one of `multiplexed` (default),
+  `single`, or `uncontrolled`; guaranteed modes use stable-client ownership, replay-safe rebind,
+  bounded replay, and fair logical-scan mailboxes. `SCAN_UNAVAILABLE` is capability-gated so legacy
+  clients retain `AGENT_BUSY`. Final Apple hardware evidence remains release-gated.
+
 - **Clean-consumer gates for the Android and Apple publication variants.** `consumer-tests/android`
   and `consumer-tests/kmp` join the existing JVM fixture, each a standalone Gradle build resolving
   Maven coordinates only. They exist because `jvm`, `android` (`.aar`) and Apple (klib) artifacts are

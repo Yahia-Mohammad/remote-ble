@@ -171,6 +171,10 @@ self-heals once the agent appears, rather than the first attempt being one-shot.
 - **Streams.** Both sides express scans/subscriptions as cold `Flow`s opened on
   collect and torn down on cancel (`channelFlow` + `awaitClose`), so lifecycle is tied
   to collection — no manual bookkeeping leaks.
+- **Scan ownership.** Guaranteed scan modes are agent-lifetime resources keyed by stable client
+  identity plus `scanId`; the connection generation fences delayed stop and grace cleanup. A single
+  physical collector fans out only matching merged advertisements, while independent logical
+  mailboxes and round-robin connection arbitration prevent one scan from monopolising another.
 - **Event flow never backpressures the decode loop.** The session's `events()` shared
   flow is `MutableSharedFlow(extraBufferCapacity = 256, onBufferOverflow = DROP_OLDEST)`.
   Events are emitted from the *same* coroutine that decodes replies, so a suspending

@@ -92,6 +92,16 @@ suite has grown substantially — this is the first real-radio run against that 
    **gated rather than accommodated**: capability checked before authorization, and a handle stops
    resolving after disconnect (open as gap 4, P4 — needs a btleplug capability that does not exist).
 
+   ⚠️ **Coverage gap in this case, found 2026-07-30 (gap 21): only client B ever scanned.** Two
+   clients scanning *simultaneously*, with one stopping while the other is mid-scan, was never
+   exercised — and Apple's Kable `Scanner` holds a process-wide `CentralManager.Default` whose
+   `stopScan()` takes no arguments, because a `CBCentralManager` has exactly one scan. So B's stop
+   plausibly kills A's scan on an Apple-hosted agent, and B *starting* a differently-filtered scan may
+   silently narrow what A sees rather than erroring. Our own layer isolates them (`BleAgent` is
+   per-connection; `EngineBleBackend.scan` builds a new `Scanner` per call), so this is a backend
+   question. **When re-running this case, add it:** two staggered `:e2e-runner:scanRun` clients against
+   one agent, iOS host first.
+
    **Two-client authorization on real radio** — client B scans and can see client A's leased
    device but read/write/observe/configure/disconnect all fail; run against both agents.
 4. ✅ **PASS** (2026-07-28 afternoon).
@@ -135,10 +145,13 @@ suite has grown substantially — this is the first real-radio run against that 
    **CONN-1** — start the client first, start the agent later; confirm the client self-heals
    without a restart once the agent comes up.
 
-**Exit: MET (2026-07-28).** All 8 pass on both agents where applicable; results archived per the
-evidence rule above. The rig also found three real defects in our own code and two blocking defects
+**Exit: MET (2026-07-28), with two coverage caveats found later.** All 8 pass on both agents where
+applicable; results archived per the evidence rule above. Case 1's *reason* is under review (gap 9 —
+its previously recorded explanation was impossible, see the entry), and case 3 never had two clients
+scanning at once (gap 21). Neither overturns a pass; both mean the case proved slightly less than its
+wording implies. The rig also found three real defects in our own code and two blocking defects
 plus one stale build in the `../ble-peripheral` test peripheral — all of which only real hardware
-surfaced. Case 1's *reason* remains under review (gap 9).
+surfaced.
 
 ---
 

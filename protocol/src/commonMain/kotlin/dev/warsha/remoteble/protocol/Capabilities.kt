@@ -77,4 +77,13 @@ object Capabilities {
      * scan with the radio off completes normally and yields nothing.
      */
     const val RADIO_STATE: String = "radio.state"
+
+    /** The agent multiplexes all logical scans through one physical scan. */
+    const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"
+
+    /** The agent admits one logical scan globally and refuses competing scan keys. */
+    const val SCAN_CONCURRENCY_SINGLE: String = "scan.concurrency.single"
+
+    /** The agent leaves every scan on the backend's independent path. */
+    const val SCAN_CONCURRENCY_UNCONTROLLED: String = "scan.concurrency.uncontrolled"
 }

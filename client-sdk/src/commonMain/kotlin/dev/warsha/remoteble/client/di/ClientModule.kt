@@ -80,6 +80,9 @@ public fun remoteBleClientModule(config: RemoteBleClientConfig): Module = module
                 Capabilities.CONN_PARAMS,
                 Capabilities.SCAN_BATCH,
                 Capabilities.RSSI,
+                Capabilities.SCAN_CONCURRENCY_MULTIPLEXED,
+                Capabilities.SCAN_CONCURRENCY_SINGLE,
+                Capabilities.SCAN_CONCURRENCY_UNCONTROLLED,
             ),
             retryPolicyFor = config.retryPolicyFor,
         )

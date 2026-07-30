@@ -95,6 +95,9 @@ class BleAgent(
     // connections and flipped live from the dashboard; read on each forward handle translation.
     private val strictMode: StrictModeState = StrictModeState(),
     private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
+    // Shared by every socket only in the guaranteed modes. Null preserves the standalone/test
+    // agent's historical connection-local scan behaviour.
+    private val scanCoordinator: ScanCoordinator? = null,
 ) {
     init {
         require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
@@ -106,7 +109,8 @@ class BleAgent(
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
     private val connected = mutableSetOf<String>()
-    private val scanJobs = mutableMapOf<Long, Job>()
+    private data class ManagedScan(val job: Job, val registration: ScanRegistration?)
+    private val scanJobs = mutableMapOf<Long, ManagedScan>()
     private val observeJobs = mutableMapOf<Long, Job>()
 
     // Per-device write ordering (0.8.3 / feature C). Every command runs on its own coroutine, so a
@@ -252,6 +256,9 @@ class BleAgent(
             // Retire this connection before the registry schedules grace, so a connect completing
             // in the teardown window sees a dead connection and leaves its lease to the grace path.
             connectionLive = false
+            // The coordinator owns an agent-lifetime scope, so this detached scan cleanup survives
+            // the retiring connection scope. Registration fencing makes a stale completion harmless.
+            scanCoordinator?.detachConnectionAsync(clientId)
             registry.onTransportDropped(clientKey)
             registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
         }
@@ -491,6 +498,40 @@ class BleAgent(
     }
 
     private suspend fun startScan(scanId: Long, op: Op.ScanStart) {
+        val coordinator = scanCoordinator
+        if (coordinator != null && coordinator.mode != ScanConcurrencyMode.UNCONTROLLED) {
+            when (val admission = try {
+                coordinator.startOrReplace(LogicalScanKey(clientKey, scanId), clientId, op.filters)
+            } catch (limit: ScanLimitExceeded) {
+                throw AgentException(AgentError(ErrorKind.INVALID_REQUEST, message = limit.message))
+            }) {
+                ScanAdmission.SingleOccupied -> {
+                    val kind = if (Capabilities.SCAN_CONCURRENCY_SINGLE in negotiated) {
+                        ErrorKind.SCAN_UNAVAILABLE
+                    } else {
+                        ErrorKind.AGENT_BUSY
+                    }
+                    throw AgentException(AgentError(kind, message = "the agent-wide scan slot is held"))
+                }
+                is ScanAdmission.Accepted -> {
+                    val batched = Capabilities.SCAN_BATCH in negotiated
+                    val job = scope.launch(start = CoroutineStart.LAZY) {
+                        if (batched) {
+                            runCoordinatorBatchedScan(scanId, admission.advertisements)
+                        } else {
+                            runCoordinatorPerResultScan(scanId, admission.advertisements)
+                        }
+                    }
+                    val previous = state.withLock {
+                        scanJobs.put(scanId, ManagedScan(job, admission.registration))
+                    }
+                    previous?.job?.cancel()
+                    job.start()
+                    observer.onClientLog(clientId, "scan started (#$scanId, ${coordinator.mode.name.lowercase()})")
+                    return
+                }
+            }
+        }
         val batched = Capabilities.SCAN_BATCH in negotiated
         val coalesce = advertisementCoalescer()
         val job = scope.launch(start = CoroutineStart.LAZY) {
@@ -502,9 +543,9 @@ class BleAgent(
                     AgentError(ErrorKind.INVALID_REQUEST, message = "at most $maxActiveScans active scans are allowed"),
                 )
             }
-            scanJobs.put(scanId, job)
+            scanJobs.put(scanId, ManagedScan(job, registration = null))
         }
-        previous?.cancel()
+        previous?.job?.cancel()
         job.start()
         observer.onClientLog(clientId, "scan started (#$scanId${if (batched) ", batched" else ""})")
         Logger.debug(LogTags.ENGINE) { "scan started [c=$clientId scanId=$scanId batched=$batched]" }
@@ -597,9 +638,45 @@ class BleAgent(
     }
 
     private suspend fun stopScan(scanId: Long) {
-        state.withLock { scanJobs.remove(scanId) }?.cancel()
+        val managed = state.withLock { scanJobs.remove(scanId) }
+        managed?.job?.cancel()
+        managed?.registration?.let { scanCoordinator?.stop(it) }
         observer.onClientLog(clientId, "scan stopped (#$scanId)")
         Logger.debug(LogTags.ENGINE) { "scan stopped [c=$clientId scanId=$scanId]" }
+    }
+
+    private suspend fun runCoordinatorPerResultScan(scanId: Long, source: Flow<AdvertisementDto>) {
+        source.collect { ad ->
+            observer.onDeviceSeen(ad.device.value, ad.name)
+            emit(AgentEvent.ScanResult(scanId, ad))
+        }
+    }
+
+    private suspend fun runCoordinatorBatchedScan(scanId: Long, source: Flow<AdvertisementDto>): Unit = coroutineScope {
+        val buffer = mutableListOf<AdvertisementDto>()
+        val bufLock = Mutex()
+        suspend fun flush() {
+            val batch = bufLock.withLock {
+                if (buffer.isEmpty()) null else buffer.toList().also { buffer.clear() }
+            }
+            if (batch != null) emit(AgentEvent.ScanResultBatch(scanId, batch))
+        }
+        val flusher = launch {
+            while (isActive) {
+                delay(scanBatchWindow)
+                flush()
+            }
+        }
+        try {
+            source.collect { ad ->
+                observer.onDeviceSeen(ad.device.value, ad.name)
+                val full = bufLock.withLock { buffer.add(ad); buffer.size >= scanBatchMaxSize }
+                if (full) flush()
+            }
+        } finally {
+            flusher.cancel()
+            flush()
+        }
     }
 
     private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart) {

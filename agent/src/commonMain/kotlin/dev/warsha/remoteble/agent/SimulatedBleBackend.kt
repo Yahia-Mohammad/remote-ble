@@ -54,6 +54,7 @@ class SimulatedBleBackend(
                             device = DeviceHandle(peripheral.id),
                             name = peripheral.advertisement.name,
                             rssi = peripheral.advertisement.rssi + jitter,
+                            serviceUuids = peripheral.advertisement.serviceUuids,
                         ),
                     )
                 }
@@ -175,7 +176,7 @@ private fun CharRef.normalized(): CharRef = copy(
     characteristic = characteristic.canonicalUuid("characteristic"),
 )
 
-private fun SimulationPeripheral.matches(filters: List<ScanFilter>): Boolean = filters.all { filter ->
+private fun SimulationPeripheral.matches(filters: List<ScanFilter>): Boolean = filters.isEmpty() || filters.any { filter ->
     val requestedName = filter.name
     val requestedService = filter.service
     (requestedName == null || requestedName == advertisement.name) &&

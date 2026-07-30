@@ -47,6 +47,10 @@ fun main(args: Array<String>) {
             ?: AgentConfig().transportGrace,
         livenessProbeInterval = System.getenv("REMOTE_BLE_LIVENESS_PROBE_MS")?.toLongOrNull()?.milliseconds
             ?: AgentConfig().livenessProbeInterval,
+        scanConcurrency = System.getenv("REMOTE_BLE_SCAN_CONCURRENCY")
+            ?.takeIf { it.isNotBlank() }
+            ?.let(ScanConcurrencyMode::parse)
+            ?: AgentConfig().scanConcurrency,
         // Strict parse: a typo'd value fails startup rather than silently taking the default,
         // because this switch changes an operator-visible failure mode.
         failFastOnDegradedWrites = System.getenv("REMOTE_BLE_WRITE_FAIL_FAST")
@@ -78,6 +82,9 @@ fun main(args: Array<String>) {
     val radio = if (simulationProfile == null) "Kable engine on $host" else "simulation profile (${simulationProfile.peripherals.size} peripherals)"
     Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, $radio)" }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
+    Logger.info(LogTags.AGENT) {
+        "Scan concurrency: ${config.scanConcurrency.name.lowercase()} (REMOTE_BLE_SCAN_CONCURRENCY)"
+    }
     Logger.info(LogTags.AGENT) { "Liveness probe: every ${config.livenessProbeInterval}" }
     // Stated at startup because it is a workaround for a backend defect, not a neutral default:
     // an operator should be able to see from the log which behaviour this process has.

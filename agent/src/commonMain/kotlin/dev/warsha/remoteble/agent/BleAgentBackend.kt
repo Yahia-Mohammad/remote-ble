@@ -21,10 +21,12 @@ class BleAgentBackend(
         PeripheralRegistry(lifecycleScope, onRelease = { backend.disconnect(DeviceHandle(it)) }),
     private val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     private val observer: AgentObserver = AgentObserver.None,
+    private val scanCoordinator: ScanCoordinator? = null,
     // Optional features advertised in the handshake: the backend's own (radio-dependent,
     // e.g. descriptors/pairing) unioned with the agent-level ones (radio-independent, e.g.
     // connection-slot events). Derived so the advertised set can't drift from what's wired.
-    private val capabilities: Set<String> = backend.capabilities + BleAgent.AGENT_CAPABILITIES,
+    private val capabilities: Set<String> = backend.capabilities + BleAgent.AGENT_CAPABILITIES +
+        scanCoordinator?.mode?.capability.orEmpty(),
     private val agentInfo: String? = null,
     // Shared identifier strict-mode switch (capability `identifier.translate`), flipped from the
     // dashboard. One instance across all connections so a toggle applies agent-wide.
@@ -41,5 +43,6 @@ class BleAgentBackend(
             capabilities = capabilities,
             agentInfo = agentInfo,
             strictMode = strictMode,
+            scanCoordinator = scanCoordinator,
         ).start()
 }

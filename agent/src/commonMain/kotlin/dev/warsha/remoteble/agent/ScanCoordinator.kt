@@ -59,6 +59,9 @@ class ScanCoordinator(
     private val scans = linkedMapOf<LogicalScanKey, LogicalScan>()
     private val cache = linkedMapOf<String, CachedAdvertisement>()
     private var physicalScan: Job? = null
+    private var physicalPlan: List<ScanFilter>? = null
+    private var physicalPlanIsUnfiltered = false
+    private var physicalGeneration: Long = 0
 
     suspend fun startOrReplace(
         key: LogicalScanKey,
@@ -87,7 +90,10 @@ class ScanCoordinator(
         }
         scans[key] = logical
 
-        ensurePhysicalScanLocked()
+        val candidatePlan = widenedPhysicalPlanLocked()
+        if (physicalPlan != candidatePlan || physicalScan?.isActive != true) {
+            replacePhysicalScanLocked(candidatePlan)
+        }
         evictExpiredLocked()
         cache.values.map { it.advertisement }
             .filter { scanMatches(filters, it) }
@@ -131,6 +137,8 @@ class ScanCoordinator(
         if (scans.isEmpty()) {
             physicalScan?.cancel()
             physicalScan = null
+            physicalPlan = null
+            physicalPlanIsUnfiltered = false
             cache.clear()
         }
     }
@@ -138,16 +146,49 @@ class ScanCoordinator(
     private fun newMailbox(): Channel<AdvertisementDto> =
         Channel(mailboxCapacity, onBufferOverflow = BufferOverflow.DROP_LATEST)
 
-    private fun ensurePhysicalScanLocked() {
-        if (physicalScan?.isActive == true) return
+    /**
+     * Native service filtering is only a prefilter.  The logical matcher remains authoritative,
+     * and a broad predicate makes an unfiltered physical scan mandatory.  Once widened, a plan is
+     * deliberately never narrowed before the last logical scan stops.
+     */
+    private fun widenedPhysicalPlanLocked(): List<ScanFilter> {
+        if (physicalPlan != null && physicalPlanIsUnfiltered) return emptyList()
+        val allServiceCoverable = scans.values.all { logical ->
+            logical.filters.isNotEmpty() && logical.filters.all { it.service != null }
+        }
+        if (!allServiceCoverable) {
+            physicalPlanIsUnfiltered = true
+            return emptyList()
+        }
+        val requestedServices = scans.values.flatMap { logical -> logical.filters.mapNotNull { it.service } }
+            .map(::canonicalServiceUuid).distinct()
+        val previous = physicalPlan
+        if (previous == null) return requestedServices.map { ScanFilter(service = it) }
+        return (previous.mapNotNull { it.service } + requestedServices)
+            .map(::canonicalServiceUuid)
+            .distinct()
+            .map { ScanFilter(service = it) }
+    }
+
+    private fun replacePhysicalScanLocked(plan: List<ScanFilter>) {
+        physicalScan?.cancel()
+        physicalPlan = plan
+        val generation = ++physicalGeneration
         physicalScan = scope.launch {
-            backend.scan(emptyList())
-                .catch { error -> Logger.warn(LogTags.ENGINE) { "multiplexed physical scan ended: ${error.message}" } }
-                .collect { advertisement -> fanOut(advertisement) }
+            try {
+                backend.scan(plan)
+                    .catch { error -> Logger.warn(LogTags.ENGINE) { "multiplexed physical scan ended: ${error.message}" } }
+                    .collect { advertisement -> fanOut(generation, advertisement) }
+            } finally {
+                lock.withLock {
+                    if (physicalGeneration == generation) physicalScan = null
+                }
+            }
         }
     }
 
-    private suspend fun fanOut(raw: AdvertisementDto) = lock.withLock {
+    private suspend fun fanOut(generation: Long, raw: AdvertisementDto) = lock.withLock {
+        if (generation != physicalGeneration) return@withLock
         val merged = mergeIdentityLocked(raw)
         cache.remove(merged.device.value)
         cache[merged.device.value] = CachedAdvertisement(merged, TimeSource.Monotonic.markNow())

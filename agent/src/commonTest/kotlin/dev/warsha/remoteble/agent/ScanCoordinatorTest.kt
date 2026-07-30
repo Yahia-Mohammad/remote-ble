@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import kotlin.time.Duration.Companion.seconds
@@ -61,5 +62,20 @@ class ScanCoordinatorTest {
         assertIs<ScanAdmission.Accepted>(
             coordinator.startOrReplace(LogicalScanKey("client", 1), 2, emptyList()),
         )
+    }
+
+    @Test
+    fun physicalPlanWidensForServiceScansAndNeverNarrowsUntilIdle() = runTest {
+        val backend = backend()
+        val coordinator = ScanCoordinator(backend, backgroundScope, ScanConcurrencyMode.MULTIPLEXED, 10.seconds)
+        coordinator.startOrReplace(LogicalScanKey("a", 1), 1, listOf(ScanFilter(service = "180d")))
+        testScheduler.runCurrent()
+        assertEquals(listOf("0000180d-0000-1000-8000-00805f9b34fb"), backend.scanFilters.last().mapNotNull { it.service })
+        coordinator.startOrReplace(LogicalScanKey("b", 2), 2, listOf(ScanFilter(service = "180f")))
+        testScheduler.runCurrent()
+        assertEquals(2, backend.scanFilters.last().size)
+        coordinator.startOrReplace(LogicalScanKey("c", 3), 3, emptyList())
+        testScheduler.runCurrent()
+        assertTrue(backend.scanFilters.last().isEmpty())
     }
 }

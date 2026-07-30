@@ -54,6 +54,7 @@ class FakeBleBackend(
 
     val connectCalls = mutableListOf<DeviceHandle>()
     val disconnectCalls = mutableListOf<DeviceHandle>()
+    val scanFilters = mutableListOf<List<ScanFilter>>()
     val pairCalls = mutableListOf<DeviceHandle>()
     val unpairCalls = mutableListOf<DeviceHandle>()
     var lastWrite: Triple<CharRef, ByteArray, Boolean>? = null
@@ -64,6 +65,7 @@ class FakeBleBackend(
     override fun connectionDrops(): Flow<ConnectionDrop> = connectionDropSignals
 
     override fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto> = flow {
+        scanFilters += filters
         var i = 0
         while (true) {
             emit(advertisements[i % advertisements.size])

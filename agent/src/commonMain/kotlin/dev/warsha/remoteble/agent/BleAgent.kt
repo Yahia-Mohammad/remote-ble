@@ -35,6 +35,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -47,6 +48,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 
 /**
  * The real agent op handler. Decodes `Command`s, drives a [BleBackend], and emits
@@ -111,6 +113,7 @@ class BleAgent(
     private val connected = mutableSetOf<String>()
     private data class ManagedScan(val job: Job, val registration: ScanRegistration?)
     private val scanJobs = mutableMapOf<Long, ManagedScan>()
+    private val scanArbiter = ScanOutboundArbiter(scope, ::emit)
     private val observeJobs = mutableMapOf<Long, Job>()
 
     // Per-device write ordering (0.8.3 / feature C). Every command runs on its own coroutine, so a
@@ -214,7 +217,8 @@ class BleAgent(
 
     fun start(): Job = scope.launch {
         registry.registerClient(clientKey, onUnsolicitedDisconnect)
-        incoming.collect { bytes ->
+        try {
+            incoming.collect { bytes ->
             // A single malformed/truncated frame must not fail the collect and tear down
             // this client's whole session. Decode defensively: log the bad frame and skip
             // it, staying ready for the next valid one.
@@ -247,20 +251,19 @@ class BleAgent(
                 is ClientHello -> respondHello(frame)
                 else -> Unit // agent never receives Reply/Event/ServerHello
             }
-        }
-    }.also { main ->
-        // When the main job ends, the transport (WebSocket) is gone. Don't tear the radio down
-        // yet: hand off to the registry, which keeps this client's links warm for the transport
-        // grace so a brief blip can resume, then releases (and disconnects) them on expiry.
-        main.invokeOnCompletion {
+            }
+        } finally {
             // Retire this connection before the registry schedules grace, so a connect completing
             // in the teardown window sees a dead connection and leaves its lease to the grace path.
             connectionLive = false
-            // The coordinator owns an agent-lifetime scope, so this detached scan cleanup survives
-            // the retiring connection scope. Registration fencing makes a stale completion harmless.
-            scanCoordinator?.detachConnectionAsync(clientId)
-            registry.onTransportDropped(clientKey)
-            registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
+            withContext(NonCancellable) {
+                // The coordinator owns an agent-lifetime scope, so this cleanup survives the
+                // retiring connection. Registration fencing makes stale actions harmless.
+                scanCoordinator?.detachConnection(clientId)
+                registry.onTransportDropped(clientKey)
+                registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
+            }
+            scanArbiter.close()
         }
     }
 
@@ -515,11 +518,16 @@ class BleAgent(
                 }
                 is ScanAdmission.Accepted -> {
                     val batched = Capabilities.SCAN_BATCH in negotiated
+                    val sink = scanArbiter.register(scanId)
                     val job = scope.launch(start = CoroutineStart.LAZY) {
-                        if (batched) {
-                            runCoordinatorBatchedScan(scanId, admission.advertisements)
-                        } else {
-                            runCoordinatorPerResultScan(scanId, admission.advertisements)
+                        try {
+                            if (batched) {
+                                runCoordinatorBatchedScan(scanId, admission.advertisements, sink)
+                            } else {
+                                runCoordinatorPerResultScan(scanId, admission.advertisements, sink)
+                            }
+                        } finally {
+                            scanArbiter.unregister(sink)
                         }
                     }
                     val previous = state.withLock {
@@ -645,21 +653,33 @@ class BleAgent(
         Logger.debug(LogTags.ENGINE) { "scan stopped [c=$clientId scanId=$scanId]" }
     }
 
-    private suspend fun runCoordinatorPerResultScan(scanId: Long, source: Flow<AdvertisementDto>) {
+    private suspend fun runCoordinatorPerResultScan(
+        scanId: Long,
+        source: Flow<AdvertisementDto>,
+        sink: ScanOutboundArbiter.Sink,
+    ) {
         source.collect { ad ->
             observer.onDeviceSeen(ad.device.value, ad.name)
-            emit(AgentEvent.ScanResult(scanId, ad))
+            sink.events.send(AgentEvent.ScanResult(scanId, ad))
+            scanArbiter.signal()
         }
     }
 
-    private suspend fun runCoordinatorBatchedScan(scanId: Long, source: Flow<AdvertisementDto>): Unit = coroutineScope {
+    private suspend fun runCoordinatorBatchedScan(
+        scanId: Long,
+        source: Flow<AdvertisementDto>,
+        sink: ScanOutboundArbiter.Sink,
+    ): Unit = coroutineScope {
         val buffer = mutableListOf<AdvertisementDto>()
         val bufLock = Mutex()
         suspend fun flush() {
             val batch = bufLock.withLock {
                 if (buffer.isEmpty()) null else buffer.toList().also { buffer.clear() }
             }
-            if (batch != null) emit(AgentEvent.ScanResultBatch(scanId, batch))
+            if (batch != null) {
+                sink.events.send(AgentEvent.ScanResultBatch(scanId, batch))
+                scanArbiter.signal()
+            }
         }
         val flusher = launch {
             while (isActive) {

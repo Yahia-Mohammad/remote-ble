@@ -30,27 +30,69 @@ internal fun Routing.dashboardRoutes(
     authLimiter: FailedAuthLimiter,
     registry: PeripheralRegistry? = null,
     strictMode: StrictModeState? = null,
+    allowRemoteDashboard: Boolean = false,
 ) {
     get("/") {
+        if (!call.allowedOrigin(allowRemoteDashboard)) return@get
         if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         call.respondText(DASHBOARD_HTML, ContentType.Text.Html)
     }
     get("/api/state") {
+        if (!call.allowedOrigin(allowRemoteDashboard)) return@get
         if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         val leases = registry?.snapshot().orEmpty()
         call.respondText(monitor.snapshotJson(leases, registry?.settings()), ContentType.Application.Json)
     }
     // Identifier strict-mode status. There is intentionally no mutation endpoint in 0.9.0.
     get("/api/strict") {
+        if (!call.allowedOrigin(allowRemoteDashboard)) return@get
         if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         if (strictMode == null) call.respond(HttpStatusCode.NotFound)
         else call.respondText(strictMode.enabled.toString())
     }
     get("/api/log-level") {
+        if (!call.allowedOrigin(allowRemoteDashboard)) return@get
         if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         call.respondText(Logger.level?.name?.lowercase() ?: "off")
     }
 }
+
+/**
+ * Whether this request may see the dashboard at all, **before** any credential is considered.
+ *
+ * The dashboard is the agent's high-privilege plane: it exposes every client's address, every
+ * peripheral lease and the activity log. It is also served over the same **unencrypted** HTTP the
+ * agent already uses for `ws://`, so a LAN-reachable dashboard puts the operator token — and the
+ * responses — in the clear for anyone on the network. The desktop agent already refuses this shape by
+ * default (`Main.kt` requires a credential for a non-loopback bind and gates the insecure case behind
+ * `REMOTE_BLE_ALLOW_INSECURE_LAN`); this is the same policy applied to the dashboard plane, which
+ * matters most on mobile, where the agent deliberately binds all interfaces and no TLS-terminating
+ * proxy can sit in front of it — Ktor's CIO server has no TLS support on Kotlin/Native at all.
+ *
+ * Default: loopback only. The dashboard is still reachable from the device's own browser, or through
+ * a USB tunnel (`adb forward tcp:8080 tcp:8080` on Android, `iproxy` on iOS) which costs nothing and
+ * keeps the secret off the network. [allowRemoteDashboard] is the deliberate, documented opt-out.
+ *
+ * **404, not 403** — consistent with an unconfigured operator credential, and it does not advertise
+ * that a dashboard exists here.
+ *
+ * The check is sound because `origin.remoteHost` is the real TCP peer: a source address cannot be
+ * forged through a completed handshake. That holds only while Ktor's `ForwardedHeaders` plugin is
+ * **not** installed — it isn't, and installing it would make this attacker-controlled.
+ */
+private suspend fun ApplicationCall.allowedOrigin(allowRemoteDashboard: Boolean): Boolean {
+    if (allowRemoteDashboard || request.origin.remoteHost.isLoopback()) return true
+    Logger.warn(LogTags.SERVER) {
+        "dashboard request from a non-loopback address refused; tunnel to it, or opt in explicitly"
+    }
+    respond(HttpStatusCode.NotFound)
+    return false
+}
+
+/** IPv4/IPv6 loopback, including the IPv4-mapped form a dual-stack listener reports. */
+internal fun String.isLoopback(): Boolean =
+    this == "localhost" || this == "::1" || this == "0:0:0:0:0:0:0:1" ||
+        startsWith("127.") || removePrefix("::ffff:").startsWith("127.")
 
 @OptIn(ExperimentalEncodingApi::class)
 private suspend fun ApplicationCall.requireOperator(

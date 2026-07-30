@@ -31,6 +31,12 @@ data class AgentConfig(
     val authToken: String? = null,
     val namedCredentials: Map<String, String> = emptyMap(),
     val operatorToken: String? = null,
+    /**
+     * Whether the status dashboard answers requests from off-device. Off by default — the dashboard
+     * exposes cross-client information over unencrypted HTTP, so it is loopback-only (reach it from the
+     * device itself, or tunnel: `adb forward` / `iproxy`) unless deliberately opened up.
+     */
+    val allowRemoteDashboard: Boolean = false,
     val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     val exclusiveByDefault: Boolean = true,
     val leaseGrace: Duration = 10.seconds,
@@ -123,6 +129,7 @@ fun agentModule(config: AgentConfig): Module = module {
             backend = get(),
             credentials = get(),
             operatorToken = config.operatorToken,
+            allowRemoteDashboard = config.allowRemoteDashboard,
             monitor = get<AgentMonitor>(),
             registry = get(),
             strictMode = get(),

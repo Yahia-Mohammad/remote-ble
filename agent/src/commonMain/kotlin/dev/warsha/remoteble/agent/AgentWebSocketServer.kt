@@ -68,6 +68,12 @@ class AgentWebSocketServer(
     private val credentials: ClientCredentials = ClientCredentials.legacy(authToken),
     /** Separate bearer credential for the optional HTTP dashboard and management reads. */
     private val operatorToken: String? = null,
+    /**
+     * Whether the dashboard answers non-loopback requests. Off by default: it is the high-privilege
+     * plane and travels unencrypted, so it is loopback-only unless an operator deliberately opts in.
+     * See `Dashboard.allowedOrigin`.
+     */
+    private val allowRemoteDashboard: Boolean = false,
     private val monitor: AgentMonitor? = null,
     private val registry: PeripheralRegistry? = null,
     // Shared identifier strict-mode switch. The dashboard *reports* it (`GET /api/strict`) but
@@ -161,7 +167,14 @@ class AgentWebSocketServer(
             }
             routing {
                 if (statusMonitor != null && operatorCredentials != null) {
-                    dashboardRoutes(statusMonitor, operatorCredentials, operatorAuthLimiter, registry, strictMode)
+                    dashboardRoutes(
+                        statusMonitor,
+                        operatorCredentials,
+                        operatorAuthLimiter,
+                        registry,
+                        strictMode,
+                        allowRemoteDashboard,
+                    )
                 } else if (statusMonitor != null) {
                     Logger.warn(LogTags.SERVER) {
                         "status dashboard disabled: configure a separate operator credential to enable management reads"

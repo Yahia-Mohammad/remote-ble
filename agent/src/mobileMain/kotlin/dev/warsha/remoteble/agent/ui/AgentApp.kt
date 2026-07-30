@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -82,6 +83,9 @@ fun AgentApp(
     var tokenEdited by remember { mutableStateOf(false) }
     var operatorToken by remember { mutableStateOf<String?>(null) }
     var operatorTokenEdited by remember { mutableStateOf(false) }
+    // Off by default, and deliberately not persisted: opening a cleartext high-privilege plane to the
+    // network should be a decision made per run, not one inherited silently from a previous session.
+    var allowRemoteDashboard by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }
 
@@ -124,7 +128,11 @@ fun AgentApp(
             startFailure = null
             startFailure = (
                 runner.start(
-                    config.copy(authToken = effectiveToken, operatorToken = effectiveOperator),
+                    config.copy(
+                        authToken = effectiveToken,
+                        operatorToken = effectiveOperator,
+                        allowRemoteDashboard = effectiveOperator != null && allowRemoteDashboard,
+                    ),
                 ) as? AgentStartResult.Failed
                 )?.message
         }
@@ -165,6 +173,8 @@ fun AgentApp(
                         onTokenChange = { tokenEdited = true; token = it },
                         operatorToken = operatorToken,
                         onOperatorTokenChange = { operatorTokenEdited = true; operatorToken = it },
+                        allowRemoteDashboard = allowRemoteDashboard,
+                        onAllowRemoteDashboardChange = { allowRemoteDashboard = it },
                         onStart = onStart,
                         onStop = onStop,
                         permissionWarning = permissionWarning,
@@ -215,6 +225,8 @@ private fun AgentHeader(
     onTokenChange: (String) -> Unit,
     operatorToken: String?,
     onOperatorTokenChange: (String) -> Unit,
+    allowRemoteDashboard: Boolean,
+    onAllowRemoteDashboardChange: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     permissionWarning: String?,
@@ -266,12 +278,35 @@ private fun AgentHeader(
         enabled = !running,
         modifier = Modifier.fillMaxWidth(),
     )
-    if (running && !operatorToken.isNullOrBlank()) {
+    // Shown only once an operator token is present, because the choice is meaningless without one.
+    // Default off: the dashboard is the high-privilege plane and travels unencrypted, so it answers
+    // only this device unless the operator explicitly opens it up — the same posture `Main.kt` takes
+    // for a non-loopback bind. Reach it from the phone's own browser, or tunnel over USB.
+    if (!operatorToken.isNullOrBlank()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                "Allow dashboard from other devices",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Switch(
+                checked = allowRemoteDashboard,
+                onCheckedChange = onAllowRemoteDashboardChange,
+                enabled = !running,
+            )
+        }
         Text(
-            "Status dashboard on / and /api/state, read-only. Sent over unencrypted http:// — " +
-                "anyone on this network can capture the operator token.",
+            if (allowRemoteDashboard) {
+                "Dashboard reachable from the network over unencrypted http:// — anyone on it can " +
+                    "capture the operator token and read every client, lease and log line."
+            } else {
+                "Dashboard is limited to this device. Reach it from this phone's browser, or tunnel: " +
+                    "adb forward tcp:8080 tcp:8080 (Android) / iproxy (iOS)."
+            },
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
+            color = if (allowRemoteDashboard) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
         )
     }
     if (!startEnabled && permissionWarning != null) {

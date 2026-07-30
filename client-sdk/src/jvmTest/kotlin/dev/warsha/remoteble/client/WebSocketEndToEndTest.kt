@@ -110,6 +110,9 @@ class WebSocketEndToEndTest {
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
+    private fun String.isLoopbackLiteral(): Boolean =
+        this == "localhost" || this == "::1" || startsWith("127.")
+
     private fun incompatibleProtocolServer(port: Int): EmbeddedServer<*, *> =
         embeddedServer(CIO, port = port) {
             install(WebSockets)
@@ -454,6 +457,65 @@ class WebSocketEndToEndTest {
             )
         } finally {
             server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun theDashboardIsLoopbackOnlyUnlessRemoteAccessIsOptedInto() = runBlocking {
+        // The dashboard is the high-privilege plane — every client address, every lease, the activity
+        // log — and it travels over unencrypted HTTP, so by default it answers only this machine.
+        // Binding a non-loopback host is what makes the test meaningful: connecting to 127.0.0.1 would
+        // be a loopback request whatever the policy, so it could never fail.
+        val lanHost = java.net.InetAddress.getLocalHost().hostAddress
+        assertTrue(!lanHost.isLoopbackLiteral(), "test needs a non-loopback local address, got $lanHost")
+
+        val port = freePort()
+        val server = AgentWebSocketServer(
+            port = port,
+            host = "0.0.0.0",
+            authToken = TOKEN,
+            operatorToken = "operator-secret",
+            monitor = AgentMonitor(),
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            val authorized: suspend (String) -> HttpStatusCode = { hostPart ->
+                httpClient.get("http://$hostPart:$port/api/state") {
+                    header(HttpHeaders.Authorization, "Bearer operator-secret")
+                }.status
+            }
+            // Correct credential, wrong origin: 404, so it does not even advertise that it exists.
+            assertEquals(
+                HttpStatusCode.NotFound,
+                authorized(lanHost),
+                "a non-loopback request must not reach the dashboard by default",
+            )
+            assertEquals(HttpStatusCode.OK, authorized("127.0.0.1"), "loopback must still work")
+        } finally {
+            server.stop()
+        }
+
+        // Opted in, the same non-loopback request is served — which is what proves the refusal above
+        // was the policy and not the address being unreachable in this environment.
+        val openPort = freePort()
+        val openServer = AgentWebSocketServer(
+            port = openPort,
+            host = "0.0.0.0",
+            authToken = TOKEN,
+            operatorToken = "operator-secret",
+            allowRemoteDashboard = true,
+            monitor = AgentMonitor(),
+        ).also { it.startAndAwaitReady(openPort) }
+        try {
+            assertEquals(
+                HttpStatusCode.OK,
+                httpClient.get("http://$lanHost:$openPort/api/state") {
+                    header(HttpHeaders.Authorization, "Bearer operator-secret")
+                }.status,
+                "with the opt-in set, the same off-device request must be served",
+            )
+        } finally {
+            openServer.stop()
         }
         Unit
     }

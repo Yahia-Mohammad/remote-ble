@@ -1,3 +1,4 @@
+use clap::ValueEnum;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -69,6 +70,97 @@ fn websocket_config() -> WebSocketConfig {
 }
 static NEXT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// Process-lifetime scan coordination policy. Kept here because it controls command admission and
+/// handshake capabilities rather than btleplug's radio primitives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScanConcurrencyMode {
+    Multiplexed,
+    Single,
+    Uncontrolled,
+}
+
+impl Default for ScanConcurrencyMode {
+    fn default() -> Self {
+        Self::Multiplexed
+    }
+}
+
+impl ScanConcurrencyMode {
+    fn capability(self) -> &'static str {
+        match self {
+            Self::Multiplexed => crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED,
+            Self::Single => crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE,
+            Self::Uncontrolled => {
+                crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED
+            }
+        }
+    }
+}
+
+/// The single-mode slot is keyed by stable client identity and local scan ID, so reconnect replay
+/// is an atomic same-key replacement rather than contention. The transport grace mirrors leases.
+#[derive(Clone)]
+struct ScanGate {
+    mode: ScanConcurrencyMode,
+    transport_grace: Duration,
+    single_owner: Arc<parking_lot::Mutex<Option<(String, i64)>>>,
+}
+
+impl ScanGate {
+    fn new(mode: ScanConcurrencyMode, transport_grace: Duration) -> Self {
+        Self {
+            mode,
+            transport_grace,
+            single_owner: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    fn reserve(&self, client_id: &str, scan_id: i64) -> Result<(), ()> {
+        if self.mode != ScanConcurrencyMode::Single {
+            return Ok(());
+        }
+        let key = (client_id.to_string(), scan_id);
+        let mut owner = self.single_owner.lock();
+        match owner.as_ref() {
+            None => {
+                *owner = Some(key);
+                Ok(())
+            }
+            Some(existing) if *existing == key => Ok(()),
+            Some(_) => Err(()),
+        }
+    }
+
+    fn release(&self, client_id: &str, scan_id: i64) {
+        if self.mode != ScanConcurrencyMode::Single {
+            return;
+        }
+        let key = (client_id.to_string(), scan_id);
+        let mut owner = self.single_owner.lock();
+        if owner.as_ref().is_some_and(|current| *current == key) {
+            *owner = None;
+        }
+    }
+
+    fn detach(&self, client_id: String) {
+        if self.mode != ScanConcurrencyMode::Single {
+            return;
+        }
+        let owner = self.single_owner.clone();
+        let grace = self.transport_grace;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            let mut held = owner.lock();
+            if held
+                .as_ref()
+                .is_some_and(|(owner_id, _)| owner_id == &client_id)
+            {
+                *held = None;
+            }
+        });
+    }
+}
+
 /// A write retains the completion sender for its position in one device's receive-order chain.
 /// Dropping it (including on cancellation) wakes the successor, so a failed task cannot wedge
 /// later writes indefinitely.
@@ -132,6 +224,8 @@ struct ExecuteContext<'a> {
     connection_live: &'a AtomicBool,
     stream_connection: u64,
     streams: &'a StreamReservations,
+    scan_gate: &'a ScanGate,
+    negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// Per-connection reservations for streaming BLE work. Backend stream keys are scoped to the
@@ -198,6 +292,8 @@ pub struct ServerConfig {
     /// Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
     /// connections; when set, handles pass through untranslated.
     pub strict_identifiers: Arc<AtomicBool>,
+    pub scan_concurrency: ScanConcurrencyMode,
+    pub transport_grace: Duration,
 }
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
@@ -360,6 +456,7 @@ pub struct AgentServer {
     live_sessions: Arc<LiveSessionRegistry>,
     failed_auth_limiter: Arc<AuthFailureLimiter>,
     revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+    scan_gate: ScanGate,
 }
 
 impl AgentServer {
@@ -368,6 +465,7 @@ impl AgentServer {
         backend: Arc<dyn BleBackend>,
         registry: PeripheralRegistry,
     ) -> Self {
+        let scan_gate = ScanGate::new(config.scan_concurrency, config.transport_grace);
         Self {
             config,
             backend,
@@ -375,6 +473,7 @@ impl AgentServer {
             live_sessions: Arc::new(LiveSessionRegistry::default()),
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
             revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            scan_gate,
         }
     }
 
@@ -440,8 +539,10 @@ impl AgentServer {
             let live_sessions = self.live_sessions.clone();
             let failed_auth_limiter = self.failed_auth_limiter.clone();
             let revoked_principals = self.revoked_principals.clone();
+            let scan_gate = self.scan_gate.clone();
+            let scan_mode = self.config.scan_concurrency;
 
-            tokio::spawn(Self::accept_connection(
+            tokio::spawn(Self::accept_connection_with_scan(
                 stream,
                 peer_addr,
                 backend,
@@ -451,6 +552,8 @@ impl AgentServer {
                 live_sessions,
                 failed_auth_limiter,
                 revoked_principals,
+                scan_gate,
+                scan_mode,
             ));
         }
     }
@@ -473,6 +576,38 @@ impl AgentServer {
         live_sessions: Arc<LiveSessionRegistry>,
         failed_auth_limiter: Arc<AuthFailureLimiter>,
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::accept_connection_with_scan(
+            stream,
+            peer_addr,
+            backend,
+            registry,
+            credentials,
+            strict,
+            live_sessions,
+            failed_auth_limiter,
+            revoked_principals,
+            ScanGate::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(10)),
+            ScanConcurrencyMode::Multiplexed,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    async fn accept_connection_with_scan<S>(
+        stream: S,
+        peer_addr: SocketAddr,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        credentials: Arc<HashMap<String, String>>,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        failed_auth_limiter: Arc<AuthFailureLimiter>,
+        revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+        scan_gate: ScanGate,
+        scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -556,7 +691,7 @@ impl AgentServer {
                 let connection = NEXT_LOG_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
                 let span = tracing::info_span!("conn", connection, peer = %peer_addr);
                 tracing::info!(parent: &span, "Client connected");
-                Self::handle_connection(
+                Self::handle_connection_with_scan(
                     ws_stream,
                     client_id,
                     backend,
@@ -564,6 +699,8 @@ impl AgentServer {
                     strict,
                     live_sessions,
                     session_generation.expect("accepted session must have a generation"),
+                    scan_gate,
+                    scan_mode,
                 )
                 .instrument(span)
                 .await;
@@ -585,6 +722,33 @@ impl AgentServer {
         strict: Arc<AtomicBool>,
         live_sessions: Arc<LiveSessionRegistry>,
         session_generation: u64,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::handle_connection_with_scan(
+            ws_stream,
+            client_id,
+            backend,
+            registry,
+            strict,
+            live_sessions,
+            session_generation,
+            ScanGate::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(10)),
+            ScanConcurrencyMode::Multiplexed,
+        )
+        .await
+    }
+
+    async fn handle_connection_with_scan<S>(
+        ws_stream: tokio_tungstenite::WebSocketStream<S>,
+        client_id: String,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        session_generation: u64,
+        scan_gate: ScanGate,
+        scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -691,6 +855,8 @@ impl AgentServer {
 
         // Per-connection handshake state — first hello wins; see [Negotiation].
         let mut negotiation = Negotiation::new();
+        let negotiated_capabilities =
+            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
         let mut closing_for_protocol = false;
 
         loop {
@@ -772,17 +938,22 @@ impl AgentServer {
                                         identifier_format,
                                     },
                                     &translator,
-                                    || backend.capabilities(),
+                                    || {
+                                        let mut supported = backend.capabilities();
+                                        supported.push(scan_mode.capability().to_string());
+                                        supported
+                                    },
                                     || registry.held_by(&client_id),
                                 );
                                 let reply_frame = Frame::ServerHello {
                                     version,
-                                    capabilities: caps,
+                                    capabilities: caps.clone(),
                                     agent_info: Some(
                                         concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"))
                                             .into(),
                                     ),
                                 };
+                                *negotiated_capabilities.lock() = caps.clone();
                                 let _ = frame_tx.send(Outbound::Frame(reply_frame)).await;
                             }
                             Frame::Command { cid, op } => {
@@ -808,6 +979,8 @@ impl AgentServer {
                                 let connection_live = connection_live.clone();
                                 let write_tails = write_tails.clone();
                                 let streams = streams.clone();
+                                let scan_gate = scan_gate.clone();
+                                let negotiated_capabilities = negotiated_capabilities.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
                                     Op::Write { device, .. } => {
@@ -836,6 +1009,8 @@ impl AgentServer {
                                                 connection_live: &connection_live,
                                                 stream_connection,
                                                 streams: &streams,
+                                                scan_gate: &scan_gate,
+                                                negotiated_capabilities: &negotiated_capabilities,
                                             },
                                         )
                                         .await;
@@ -898,6 +1073,7 @@ impl AgentServer {
         // Transport gone: keep this client's links warm and let the registry release them on
         // grace-expiry (a reconnect within the window resumes).
         registry.on_transport_drop(&client_id);
+        scan_gate.detach(client_id.clone());
         // Release only the generation that acquired this client identity. Keeping the identity
         // claimed through lease cleanup ensures a reconnect cannot race an older socket's drop.
         live_sessions.release(&client_id, session_generation);
@@ -914,6 +1090,8 @@ impl AgentServer {
             connection_live,
             stream_connection,
             streams,
+            scan_gate,
+            negotiated_capabilities,
         } = context;
         match op {
             Op::ScanStart { filters, .. } if filters.len() > MAX_SCAN_FILTERS => {
@@ -947,6 +1125,20 @@ impl AgentServer {
                 ))
             }
             Op::ScanStart { scan_id, filters } => {
+                if scan_gate.reserve(client_id, scan_id).is_err() {
+                    let kind = if negotiated_capabilities
+                        .lock()
+                        .contains(crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE)
+                    {
+                        ErrorKind::ScanUnavailable
+                    } else {
+                        ErrorKind::AgentBusy
+                    };
+                    return OpResult::err(AgentError::new(
+                        kind,
+                        Some("the agent-wide scan slot is held".into()),
+                    ));
+                }
                 let stream = StreamKey {
                     connection: stream_connection,
                     local_id: scan_id,
@@ -969,6 +1161,7 @@ impl AgentServer {
                 let result = backend.stop_scan(stream).await;
                 if result.is_ok() {
                     streams.release_scan(stream);
+                    scan_gate.release(client_id, scan_id);
                 }
                 OpResult::from_unit(result)
             }
@@ -1498,6 +1691,8 @@ mod tests {
                 addr: "127.0.0.1:0".parse().unwrap(),
                 credentials,
                 strict_identifiers: Arc::new(AtomicBool::new(false)),
+                scan_concurrency: ScanConcurrencyMode::Multiplexed,
+                transport_grace: Duration::from_secs(10),
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -1738,6 +1933,16 @@ mod tests {
         )
     }
 
+    #[test]
+    fn single_scan_gate_refuses_a_different_key_and_allows_same_key_rebind() {
+        let gate = ScanGate::new(ScanConcurrencyMode::Single, Duration::from_secs(10));
+        assert!(gate.reserve("client-a", 7).is_ok());
+        assert!(gate.reserve("client-a", 7).is_ok());
+        assert!(gate.reserve("client-b", 7).is_err());
+        gate.release("client-a", 7);
+        assert!(gate.reserve("client-b", 7).is_ok());
+    }
+
     fn context_with_liveness<'a>(
         client_id: &'a str,
         backend: &'a Arc<dyn BleBackend>,
@@ -1752,6 +1957,13 @@ mod tests {
         ))));
         let (event_tx, _) = mpsc::channel(EVENT_CHANNEL_CAP);
         let streams = Box::leak(Box::new(StreamReservations::default()));
+        let scan_gate = Box::leak(Box::new(ScanGate::new(
+            ScanConcurrencyMode::Multiplexed,
+            Duration::from_secs(10),
+        )));
+        let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
+            std::collections::BTreeSet::new(),
+        )));
         ExecuteContext {
             client_id,
             backend,
@@ -1761,6 +1973,8 @@ mod tests {
             connection_live: live,
             stream_connection: generation,
             streams,
+            scan_gate,
+            negotiated_capabilities,
         }
     }
 

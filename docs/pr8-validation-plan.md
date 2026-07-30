@@ -38,11 +38,14 @@ runs produced.
    own scan, does A's scan survive? Our layer isolates them (`BleAgent` is per-connection, and
    `EngineBleBackend.scan` builds a new Kable `Scanner` per call), but Apple's `Scanner` holds a
    process-wide `CentralManager.Default` whose `stopScan()` takes no arguments, because a
-   `CBCentralManager` has one scan — so interference is expected there and the *start* direction may be
-   worse than the stop (a second scan with different `serviceUUIDs` replaces the parameters). Rig A
-   case 3 had only client B scanning, so this has never been exercised. Two staggered
-   `:e2e-runner:scanRun` clients against one agent settle it. Not a blocker, but "single agent,
-   multiple clients" is a headline property.
+   `CBCentralManager` has one scan — so interference is expected there, and the *start* direction is
+   worse than the stop: Apple **documents** that a second scan's parameters replace the running scan's,
+   so B silently narrows what A sees. Rig A case 3 had only client B scanning, so this has never been
+   exercised. Two staggered `:e2e-runner:scanRun` clients against one agent settle it.
+   **Release blocker (raised 2026-07-30, was "not a blocker" here)** — it is reachable by one ordinary
+   client holding two `RemoteScanner`s, and "single agent, multiple clients" is a headline property.
+   The design and plan are [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); this run
+   is its Phase 0.
 4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
 

@@ -62,7 +62,12 @@ Do not design around this. It is a side effect of a background mode declared for
 disappears the moment the last link closes. Foregrounded and unlocked remains the only supported way
 to run it.
 
-### Discovery while backgrounded needs a service filter
+### Discovery while backgrounded (observed behaviour, not a supported mode)
+
+**Decided 2026-07-30: the foreground is the only supported mode for this agent.** What follows is
+recorded because it explains what an incidentally-backgrounded agent does — a client switching away
+mid-session — not as a configuration to build on. Nothing below is contract, and no part of the
+agent's design accommodates it.
 
 iOS ignores a `nil`-serviceUUIDs scan entirely while an app is backgrounded, and `nil` is what Kable's
 Apple scanner passes when a client sends no filter. This used to be recorded here as a prediction;
@@ -79,9 +84,13 @@ backgrounded agent served continuous GATT reads on its existing link and accepte
 WebSocket connection. So a backgrounded agent can serve a session and simultaneously be unable to
 see anything new — unless the client scans **by service UUID**, which works normally.
 
-That is the remedy, and it is client-side: `RemoteScanner(session, listOf(ScanFilter(service = …)))`.
-The agent cannot fix it for the client, because it cannot invent the service the client is looking
-for. Verify with `:e2e-runner:scanRun`, whose third argument sends a service filter:
+A client that scans by service UUID is unaffected — but **do not read that as the remedy**. It was
+written here as one before the foreground-only decision, and offering it invites apps to depend on a
+mode this project does not support; it also makes discovery host-dependent, which is exactly what
+[the scan-concurrency work](../docs/proposals/scan-concurrency-modes.md) exists to remove. The
+supported answer to "my scans stopped" is that the agent must be foregrounded.
+
+Verify with `:e2e-runner:scanRun`, whose third argument sends a service filter:
 
 ```sh
 ./gradlew :e2e-runner:scanRun --args "ws://<iphone-ip>:8080/agent 20"                                        # unfiltered

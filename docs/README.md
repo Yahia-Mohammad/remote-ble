@@ -33,6 +33,7 @@ maintainer-internal and are not part of the published docs.
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
 | [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | **Not started** — making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host |
+| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | **Release blocker for 0.10.0** — concurrent scans are not isolated on Apple hosts (and the Kotlin/Rust agents diverge); the three agent modes (`multiplexed`/`single`/`uncontrolled`), their wire surface, and the implementation plan |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
@@ -57,6 +58,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | Validated CI/deployment release without changing the client programming model | **Accepted for 0.10.0** |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
+| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Accepted 2026-07-30; not implemented — blocks the 0.10.0 tag** |
 
 ---
 

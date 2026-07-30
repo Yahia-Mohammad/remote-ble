@@ -170,9 +170,21 @@ the client-facing behavior.
 |---|---|---|
 | Per-advertisement `ScanResult` | ✅ | ✅ |
 | Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ❌ |
-| Per-scan name/UUID coalescing | ✅ (`advertisementCoalescer`) | ✅ (`coalesce_identity`) |
+| Name/UUID coalescing | ✅ (`advertisementCoalescer`, **per scan, after the backend**) | ✅ (`coalesce_identity`, **per adapter session, before fan-out**) |
+| Concurrent-scan handling | ❌ one Kable `Scanner` per `scan.start` | ✅ one adapter scan, agent-wide subscriber registry |
 
 **Pre-existing:** Yes. Rust never implemented scan batching.
+
+**Divergence found 2026-07-30 — concurrent scans (gap 21).** The last two rows were previously
+recorded as matching. They do not. `agent-rs` runs **one** unfiltered adapter scan reference-counted
+across an agent-wide `active_scans: HashMap<StreamKey, ScanSubscription>`, coalesces identity before
+fanning out, and filters per subscriber ([`btleplug_impl.rs:662`](../agent-rs/src/ble/btleplug_impl.rs:662));
+the Kotlin agent builds a fresh Kable `Scanner` per `scan.start` and coalesces per scan afterwards. So
+the Rust agent already isolates concurrent scans and the Kotlin agent does not — on Apple hosts the
+Kotlin path is actively defective, because one `CBCentralManager` has one scan. The coalescing row
+looked like parity because both agents do coalesce; they do it at different layers, which is what hid
+the difference. Convergence is specified in
+[proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md).
 
 ---
 

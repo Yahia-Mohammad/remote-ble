@@ -32,6 +32,7 @@ import dev.warsha.remoteble.agent.AgentRadio
 import dev.warsha.remoteble.agent.AgentRunner
 import dev.warsha.remoteble.agent.AgentStartResult
 import dev.warsha.remoteble.agent.di.AgentConfig
+import dev.warsha.remoteble.agent.AgentSecret
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.persistToken
 import dev.warsha.remoteble.protocol.BleRadioState
@@ -79,14 +80,18 @@ fun AgentApp(
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
     var token by remember { mutableStateOf<String?>(null) }
     var tokenEdited by remember { mutableStateOf(false) }
+    var operatorToken by remember { mutableStateOf<String?>(null) }
+    var operatorTokenEdited by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         val persisted = loadPersistedToken()
+        val persistedOperator = loadPersistedToken(AgentSecret.OPERATOR_TOKEN)
         // Don't clobber a value the user may have started typing while this async load was still
         // in flight — only seed the field from persistence if it's still untouched and empty.
         if (!tokenEdited && token.isNullOrBlank()) token = persisted
+        if (!operatorTokenEdited && operatorToken.isNullOrBlank()) operatorToken = persistedOperator
     }
 
     LaunchedEffect(running) {
@@ -107,19 +112,35 @@ fun AgentApp(
     // Start the LAN-exposed agent with its required credential.
     val startWith: (String?) -> Unit = { chosen ->
         val effectiveToken = chosen?.takeIf { it.isNotBlank() }
+        val effectiveOperator = operatorToken?.takeIf { it.isNotBlank() }
         token = effectiveToken
         // Persist on Start, not per keystroke: only records what the agent actually ran with.
         scope.launch { persistToken(effectiveToken) }
+        scope.launch { persistToken(effectiveOperator, AgentSecret.OPERATOR_TOKEN) }
         scope.launch {
             // The result was previously discarded, which meant a failed Start was indistinguishable
             // from a Start that did nothing: the button simply stayed on "Start". Now that a bind
             // failure is reportable at all (it used to kill the process), it has to be reported.
             startFailure = null
-            startFailure = (runner.start(config.copy(authToken = effectiveToken)) as? AgentStartResult.Failed)?.message
+            startFailure = (
+                runner.start(
+                    config.copy(authToken = effectiveToken, operatorToken = effectiveOperator),
+                ) as? AgentStartResult.Failed
+                )?.message
         }
     }
     val onStart: () -> Unit = {
-        if (!token.isNullOrBlank()) startWith(token)
+        // Checked here rather than left to `AgentWebSocketServer.init`'s `require`. That require does
+        // fire — `AgentRunner.start` catches Throwable from graph construction, so it cannot crash the
+        // app — but it is reported through the deliberately non-specific failure path, which would tell
+        // the user only that starting failed. This says which field to change.
+        val clash = !operatorToken.isNullOrBlank() && operatorToken == token
+        if (clash) {
+            startFailure = "The operator token must differ from the auth token — they are separate " +
+                "credentials with different privileges."
+        } else if (!token.isNullOrBlank()) {
+            startWith(token)
+        }
     }
     val onStop: () -> Unit = {
         startFailure = null
@@ -142,6 +163,8 @@ fun AgentApp(
                         keepScreenOnNotice = keepScreenOnNotice,
                         token = token,
                         onTokenChange = { tokenEdited = true; token = it },
+                        operatorToken = operatorToken,
+                        onOperatorTokenChange = { operatorTokenEdited = true; operatorToken = it },
                         onStart = onStart,
                         onStop = onStop,
                         permissionWarning = permissionWarning,
@@ -190,6 +213,8 @@ private fun AgentHeader(
     keepScreenOnNotice: String?,
     token: String?,
     onTokenChange: (String) -> Unit,
+    operatorToken: String?,
+    onOperatorTokenChange: (String) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     permissionWarning: String?,
@@ -225,6 +250,28 @@ private fun AgentHeader(
         Text(
             "LAN exposure over unencrypted ws://. Clients need the configured bearer credential.",
             style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    // Optional second secret, and deliberately a separate field rather than a reuse of the one above.
+    // The dashboard exposes every client's address, every lease and the activity log — the
+    // cross-client information the op plane refuses to give a client — so sharing one token would
+    // make every client an observer of all the others. `AgentWebSocketServer.init` requires them to
+    // differ. Left blank (the default) nothing changes: no operator credential, no dashboard routes,
+    // and `/` keeps answering 404, which is the pre-0.10.0 behaviour.
+    OutlinedTextField(
+        value = operatorToken.orEmpty(),
+        onValueChange = onOperatorTokenChange,
+        label = { Text("Operator token (optional — enables the status dashboard)") },
+        visualTransformation = PasswordVisualTransformation(),
+        enabled = !running,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    if (running && !operatorToken.isNullOrBlank()) {
+        Text(
+            "Status dashboard on / and /api/state, read-only. Sent over unencrypted http:// — " +
+                "anyone on this network can capture the operator token.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
         )
     }
     if (!startEnabled && permissionWarning != null) {

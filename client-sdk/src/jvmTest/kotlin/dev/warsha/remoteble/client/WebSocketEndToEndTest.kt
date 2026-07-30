@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -418,6 +419,54 @@ class WebSocketEndToEndTest {
             )
         } finally {
             server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun withNoOperatorTokenTheDashboardIsAbsentRatherThanUnauthorized() = runBlocking {
+        // The distinction matters and is easy to lose: 404 means the routes were never registered,
+        // 401 means they exist and are guarded. This is the mobile agent's shipped default — no
+        // operator credential, so no dashboard at all — and it is why a `404` on `/` is the healthy
+        // answer from a phone-hosted agent rather than a symptom (Rig B case 1). If a future change
+        // registered the routes unconditionally and relied on the credential check alone, an agent
+        // with no operator token would start answering 401 here, and a misconfigured deployment
+        // would look like a locked door instead of no door.
+        val port = freePort()
+        val server = AgentWebSocketServer(
+            port = port,
+            authToken = TOKEN,
+            monitor = AgentMonitor(),
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            for (path in listOf("/", "/api/state", "/api/strict", "/api/log-level")) {
+                assertEquals(
+                    HttpStatusCode.NotFound,
+                    httpClient.get("http://localhost:$port$path").status,
+                    "$path must not exist without an operator credential",
+                )
+            }
+            // The client plane is unaffected — the agent is still serving its actual purpose.
+            assertEquals(
+                HttpStatusCode.Unauthorized,
+                httpClient.get("http://localhost:$port/agent").status,
+                "the WebSocket endpoint should still be there, just not upgradable by a plain GET",
+            )
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun anOperatorTokenEqualToAClientCredentialIsRejectedAtConstruction() = runBlocking {
+        // The guard that keeps the two planes from silently collapsing into one. Without it, passing
+        // the same string twice would hand every client an observer of all other clients' addresses,
+        // leases and activity — exactly what the op plane refuses them (proved on real radio by Rig A
+        // case 3). The mobile UI checks this before starting so the user gets an actionable message,
+        // but the invariant belongs here, where it cannot be bypassed.
+        assertFailsWith<IllegalArgumentException> {
+            AgentWebSocketServer(port = freePort(), authToken = TOKEN, operatorToken = TOKEN)
         }
         Unit
     }

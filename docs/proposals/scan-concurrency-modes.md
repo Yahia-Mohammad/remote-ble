@@ -575,8 +575,8 @@ parity-bearing and doubling the adapter cost buys nothing):
 
 ## Implementation checkpoint and handoff (2026-07-30)
 
-Work is on `codex/scan-concurrency-modes`, based on `main` at `b1ffe6a`. The implementation
-landed in the branch history through `aa887d5` (`docs: record scan concurrency implementation`).
+Work is on `codex/scan-concurrency-modes`, based on `main` at `ce0b72f`. The implementation
+landed in the branch history through `62fb2f4` (`docs: record scan concurrency implementation`).
 There is also an **uncommitted review-hardening worktree** at this checkpoint; do not discard it
 when resuming.
 

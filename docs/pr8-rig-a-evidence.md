@@ -13,7 +13,7 @@ evidence rule (host/device details, agent version, exact command, redacted resul
 |---|---|
 | Host | macOS 26.5.2, arm64, Bluetooth on |
 | JDK | OpenJDK 17.0.14 |
-| Repo commit | `c7c6680` for the 2026-07-27 session; `910a350` plus this session's uncommitted fixes for the 2026-07-28 continuation (below) |
+| Repo commit | `7e044af` for the 2026-07-27 session; `910a350` plus this session's uncommitted fixes for the 2026-07-28 continuation (below) |
 | Kotlin agent | 0.10.0, `agent/run-agent.sh 8080`, Kable engine on Mac OS X |
 | Rust agent | `agent-rs 0.10.0`, `agent-rs/run-agent-rs.sh 8080` |
 | Peripheral | Pixel 8 / Android 17 / `CP2A.260705.006`, `../ble-peripheral` `sample-peripheral`, `TestProfile`, advertising `RBTestPeripheral` |

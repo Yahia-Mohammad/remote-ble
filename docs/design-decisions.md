@@ -305,6 +305,19 @@ peripheral ownership keeping them from colliding on the same hardware (above). T
 multi-agent aggregation, if a concrete deployment needs it, belongs behind one ordinary endpoint in
 the future [AgentProxy](proposals/agent-proxy.md); it remains a non-goal for 0.10.0.
 
+**The claim has a defined scope for scanning, and it did not always.** Peripheral ownership isolates
+*connections*; it says nothing about the radio's single scan, and until 0.10.0 the Kotlin agent gave
+each `scan.start` its own platform scanner — which on Apple, where one `CBCentralManager` has exactly
+one scan, meant two scans silently interfering with no error on either. Concurrent scanning is now a
+configured, handshake-advertised agent property rather than whatever the host happens to do, and what
+it guarantees is stated rather than implied: agent-side filter correctness and lifecycle isolation,
+**not** discovery completeness equal to an isolated Apple scan. See [scanning.md](scanning.md) for the
+consumer-facing contract and
+[proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) for the record. The
+general lesson generalizes past scanning: "multiple clients share one agent" is only true for the
+resources the agent actually arbitrates, so a shared resource without an arbiter is a defect waiting
+to be found on the platform with the tightest constraint.
+
 ## Monorepo: SDK and agent share one repository
 
 The client SDK and the agent(s) live in one repository, even though only `:protocol` and

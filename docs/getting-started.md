@@ -168,6 +168,8 @@ import kotlinx.coroutines.flow.first
 
 // 1. Scan — RemoteScanner is a Kable Scanner.
 val advertisement = RemoteScanner(session).advertisements.first { it.name == "My Sensor" }
+// Filtering agent-side is cheaper than filtering here; see scanning.md for the exact
+// match semantics, and read it before holding two scanners at once.
 
 // 2. Turn it into a Peripheral. THIS is the local-vs-remote decision point.
 val peripheral: Peripheral = peripheralFor(BleMode.REMOTE, advertisement, session)
@@ -191,6 +193,11 @@ peripheral.disconnect()
 `RemoteScanner.advertisements` emits `RemoteAdvertisement`s; each carries the
 agent-minted `handle` that `peripheralFor` needs. You never construct or parse a
 device handle yourself.
+
+**[scanning.md](scanning.md) is the full story on discovery** — filter semantics (OR across the
+list, AND within one entry), what happens when one app holds two scanners, the agent's
+scan-concurrency modes and how to read the one your agent is running, what a late-joining scan
+replays, and what survives a reconnect. Worth reading before your second scanner, not after.
 
 **RemoteBLE extensions beyond Kable.** A few ops (pairing, RSSI, connection parameters) aren't
 on Kable's portable `Peripheral` surface, so they live as extension methods on the concrete

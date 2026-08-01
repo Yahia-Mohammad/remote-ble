@@ -441,8 +441,9 @@ private suspend inline fun <T> bleOp(failure: ErrorKind, block: () -> T): T =
 `AgentConfig.scanConcurrency` selects `multiplexed` (default), `single`, or `uncontrolled` for the
 process lifetime; the JVM launcher accepts `REMOTE_BLE_SCAN_CONCURRENCY`. Guaranteed modes use an
 agent-lifetime coordinator keyed by stable client key plus `scanId`, retain ownership through
-transport grace, merge identity before filter matching, and fan out through 64-item drop-newest
-logical mailboxes. A per-connection round-robin arbiter feeds the existing best-effort outbound path.
+transport grace, merge identity before filter matching, and fan out through 320-item drop-newest
+logical mailboxes (256 retained replay entries plus 64 steady-state entries). A per-connection
+round-robin arbiter feeds the existing best-effort outbound path.
 `multiplexed` guarantees filter and lifecycle isolation, not Apple discovery completeness; operator
 choice of `uncontrolled` retains the direct backend path and makes no isolation claim.
 - **`connect`** — `peripheral.connect()`; Kable suspends until connected (discovering

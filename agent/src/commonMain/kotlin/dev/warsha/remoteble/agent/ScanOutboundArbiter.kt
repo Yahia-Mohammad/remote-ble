@@ -16,8 +16,12 @@ import kotlinx.coroutines.sync.withLock
 internal class ScanOutboundArbiter(
     scope: CoroutineScope,
     private val emit: suspend (AgentEvent) -> Unit,
-    private val mailboxCapacity: Int = 64,
+    private val mailboxCapacity: Int = DEFAULT_MAILBOX_CAPACITY,
 ) {
+    companion object {
+        /** Steady-state headroom; guaranteed-mode replay reserves additional capacity. */
+        const val DEFAULT_MAILBOX_CAPACITY: Int = 64
+    }
     internal class Sink internal constructor(
         internal val scanId: Long,
         internal val events: Channel<AgentEvent>,

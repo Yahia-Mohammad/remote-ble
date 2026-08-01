@@ -170,7 +170,7 @@ the client-facing behavior.
 |---|---|---|
 | Per-advertisement `ScanResult` | ✅ | ✅ |
 | Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ❌ |
-| Name/UUID coalescing | ✅ coordinator-owned, before matching | ✅ coordinator-owned, before matching |
+| Name/UUID coalescing | ✅ coordinator-owned, before matching | ✅ coordinator-owned in guaranteed modes; bounded legacy backend coalescer in `uncontrolled` |
 | Concurrent-scan handling | ✅ configured coordinator, explicit uncontrolled escape hatch | ✅ configured coordinator, explicit uncontrolled escape hatch |
 
 **Pre-existing:** Yes. Rust never implemented scan batching.

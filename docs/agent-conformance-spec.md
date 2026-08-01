@@ -213,8 +213,16 @@ a successful op replies `OpResult.Ok` with no payload; failures reply `OpResult.
 
 | `type` | Fields | Agent MUST | Reply payload |
 |---|---|---|---|
-| `scan.start` | `scanId: i64`, `filters: [ScanFilter]` | Begin scanning; emit a `scan.result` event (§8) per matching advertisement, tagged with `scanId`. Starting a `scanId` already active MUST replace (cancel + restart) it — **replay-safe**. | `Ok` |
-| `scan.stop` | `scanId: i64` | Stop the scan for `scanId` (no-op if unknown). | `Ok` |
+| `scan.start` | `scanId: i64`, `filters: [ScanFilter]` | Begin scanning; emit a `scan.result` event (§8) per matching advertisement, tagged with `scanId`. Starting a `scanId` already active MUST replace (cancel + restart) it — **replay-safe**. The agent MUST apply `scan.start`/`scan.stop` for the **same** `scanId` in the order it received their `cmd`s, even when handling commands concurrently, so a client may pipeline a replacement without awaiting the first reply. Different `scanId`s need not be ordered. | `Ok` |
+| `scan.stop` | `scanId: i64` | Stop the scan for `scanId` (no-op if unknown). Same-`scanId` receive ordering applies as for `scan.start`. | `Ok` |
+| `connect` | `device: DeviceHandle` | Acquire ownership (§10) then establish the GATT connection. On success emit `conn.state = CONNECTED`. Connecting an already-connected device **owned by the same client** MUST be an **idempotent** `Ok` (no re-emit). | `Ok` |
+| `disconnect` | `device: DeviceHandle` | Tear down the GATT link; emit `conn.state = DISCONNECTED`; start the lease release grace (§10.3). | `Ok` |
+| `discover` | `device: DeviceHandle` | Discover services + characteristics. | `Ok{ services }` (`Services`) |
+| `read` | `device`, `char: CharRef` | Read the characteristic value. | `Ok{ bytes }` (`Bytes`) |
+| `write` | `device`, `char`, `value: bytes`, `withResponse: bool` | Write. `withResponse=false` is write-without-response (best-effort; no completion guarantee). The agent MUST apply writes to the **same** `device` in the order it received their `cmd`s, even when handling commands concurrently — a client may pipeline write-without-response writes without awaiting each reply, and relies on submission order reaching the radio. Writes to different devices need not be ordered. | `Ok` |
+| `mtu` | `device`, `mtu: i32` | Request an MTU change; reply the negotiated value. | `Ok{ mtu }` (`Mtu`) |
+| `observe.start` | `subId: i64`, `device`, `char` | Subscribe (CCCD); emit a `notification` event per value, tagged with `subId`. Re-issuing an active `subId` MUST replace it — **replay-safe**. | `Ok` |
+| `observe.stop` | `subId: i64` | Unsubscribe `subId` (no-op if unknown). | `Ok` |
 
 ### Scan concurrency modes
 
@@ -227,14 +235,6 @@ best-effort delivery, not discovery completeness equal to an independent Apple s
 refuses a different key without disturbing its incumbent. `SCAN_UNAVAILABLE` is sent only when
 `scan.concurrency.single` was negotiated; otherwise the legacy `AGENT_BUSY` error is used.
 `uncontrolled` makes no cross-scan isolation guarantee.
-| `connect` | `device: DeviceHandle` | Acquire ownership (§10) then establish the GATT connection. On success emit `conn.state = CONNECTED`. Connecting an already-connected device **owned by the same client** MUST be an **idempotent** `Ok` (no re-emit). | `Ok` |
-| `disconnect` | `device: DeviceHandle` | Tear down the GATT link; emit `conn.state = DISCONNECTED`; start the lease release grace (§10.3). | `Ok` |
-| `discover` | `device: DeviceHandle` | Discover services + characteristics. | `Ok{ services }` (`Services`) |
-| `read` | `device`, `char: CharRef` | Read the characteristic value. | `Ok{ bytes }` (`Bytes`) |
-| `write` | `device`, `char`, `value: bytes`, `withResponse: bool` | Write. `withResponse=false` is write-without-response (best-effort; no completion guarantee). The agent MUST apply writes to the **same** `device` in the order it received their `cmd`s, even when handling commands concurrently — a client may pipeline write-without-response writes without awaiting each reply, and relies on submission order reaching the radio. Writes to different devices need not be ordered. | `Ok` |
-| `mtu` | `device`, `mtu: i32` | Request an MTU change; reply the negotiated value. | `Ok{ mtu }` (`Mtu`) |
-| `observe.start` | `subId: i64`, `device`, `char` | Subscribe (CCCD); emit a `notification` event per value, tagged with `subId`. Re-issuing an active `subId` MUST replace it — **replay-safe**. | `Ok` |
-| `observe.stop` | `subId: i64` | Unsubscribe `subId` (no-op if unknown). | `Ok` |
 
 `CharRef` = `{ service: uuid-string, characteristic: uuid-string, instance: i32=0 }`; `instance`
 disambiguates duplicate-UUID characteristics. `ScanFilter` = `{ service?: uuid-string, name?: string }`.

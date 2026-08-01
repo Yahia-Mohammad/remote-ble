@@ -55,6 +55,10 @@ class FakeBleBackend(
     val connectCalls = mutableListOf<DeviceHandle>()
     val disconnectCalls = mutableListOf<DeviceHandle>()
     val scanFilters = mutableListOf<List<ScanFilter>>()
+    var activeScans: Int = 0
+        private set
+    var maxConcurrentScans: Int = 0
+        private set
     val pairCalls = mutableListOf<DeviceHandle>()
     val unpairCalls = mutableListOf<DeviceHandle>()
     var lastWrite: Triple<CharRef, ByteArray, Boolean>? = null
@@ -66,11 +70,17 @@ class FakeBleBackend(
 
     override fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto> = flow {
         scanFilters += filters
-        var i = 0
-        while (true) {
-            emit(advertisements[i % advertisements.size])
-            i++
-            kotlinx.coroutines.delay(emitInterval)
+        activeScans++
+        maxConcurrentScans = maxOf(maxConcurrentScans, activeScans)
+        try {
+            var i = 0
+            while (true) {
+                emit(advertisements[i % advertisements.size])
+                i++
+                kotlinx.coroutines.delay(emitInterval)
+            }
+        } finally {
+            activeScans--
         }
     }
 

@@ -86,9 +86,11 @@ class BleAgentTest {
         // to a healthy state first and then simulate the transport going slow.
         var stallOutgoing: Boolean = false
 
+        val agent: BleAgent
+
         init {
             scope.launch { fromAgent.receiveAsFlow().collect { frames.emit(codec.decode(it)) } }
-            BleAgent(
+            agent = BleAgent(
                 incoming = toAgent.receiveAsFlow(),
                 outgoing = { if (stallOutgoing) kotlinx.coroutines.awaitCancellation() else fromAgent.send(it) },
                 scope = scope,
@@ -105,7 +107,8 @@ class BleAgentTest {
                 strictMode = strictMode,
                 agentFormat = agentFormat,
                 observer = observer,
-            ).start()
+            )
+            agent.start()
         }
 
         fun send(cid: Long, op: Op) {
@@ -570,6 +573,29 @@ class BleAgentTest {
 
         h.send(2, Op.ScanStop(7))
         assertIs<OpResult.Ok>(h.frames.reply(2))
+    }
+
+    @Test
+    fun scanLifecycleOrderingStateDoesNotGrowWithDistinctScanIds() = runTest {
+        // Each scan.start/scan.stop frame reserves a same-id ordering turn keyed by the
+        // client-chosen scanId, so the bookkeeping must retire finished turns rather than
+        // retaining one entry per id the connection has ever seen.
+        val h = Harness(backgroundScope, FakeBleBackend())
+
+        repeat(200) { index ->
+            val scanId = index.toLong()
+            h.send(cid = scanId * 2, op = Op.ScanStart(scanId = scanId))
+            h.send(cid = scanId * 2 + 1, op = Op.ScanStop(scanId))
+            h.frames.reply(scanId * 2 + 1)
+        }
+        runCurrent()
+
+        assertEquals(
+            0,
+            h.agent.pendingScanTurns(),
+            "scan ordering state must drain once its commands finish, not retain an entry " +
+                "per distinct scan id the connection has ever seen",
+        )
     }
 
     @Test

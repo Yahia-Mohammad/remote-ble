@@ -5,10 +5,11 @@ import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.ScanFilter
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -19,12 +20,31 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** Stable identity of a logical scan. Connection generation is deliberately not part of this key. */
 data class LogicalScanKey(val clientKey: String, val scanId: Long)
 
-/** Fencing token for delayed stop and grace-expiry actions. */
-data class ScanRegistration(val key: LogicalScanKey, val connectionGeneration: Long)
+/** Published reference limits for retained scan replay. */
+internal const val SCAN_REPLAY_CACHE_CAP: Int = 256
+internal val SCAN_REPLAY_WINDOW: Duration = 30.seconds
+
+private fun monotonicScanClock(): () -> Duration {
+    val origin = TimeSource.Monotonic.markNow()
+    return { origin.elapsedNow() }
+}
+
+/**
+ * Fencing token for delayed stop, grace-expiry, and same-connection replacement actions.
+ *
+ * [connectionGeneration] distinguishes a reconnect; [revision] distinguishes two starts of the
+ * same logical key that race on one live connection.
+ */
+data class ScanRegistration(
+    val key: LogicalScanKey,
+    val connectionGeneration: Long,
+    val revision: Long,
+)
 
 sealed interface ScanAdmission {
     data class Accepted(val registration: ScanRegistration, val advertisements: Flow<AdvertisementDto>) : ScanAdmission
@@ -32,9 +52,8 @@ sealed interface ScanAdmission {
 }
 
 /**
- * Agent-lifetime coordinator for the two guaranteed scan modes. It intentionally always runs an
- * unfiltered physical scan in multiplexed mode: service-union narrowing is an optimisation, not a
- * correctness requirement, and an unfiltered plan safely covers every logical predicate.
+ * Agent-lifetime coordinator for the two guaranteed scan modes. It uses the widest safe physical
+ * plan (a service union where possible, otherwise unfiltered); logical matching is authoritative.
  */
 class ScanCoordinator(
     private val backend: BleBackend,
@@ -42,11 +61,12 @@ class ScanCoordinator(
     val mode: ScanConcurrencyMode,
     private val transportGrace: Duration,
     private val maxActiveScans: Int = BleAgent.MAX_ACTIVE_SCANS,
-    private val replayWindow: Duration = 30.seconds,
-    private val replayCap: Int = 256,
-    private val mailboxCapacity: Int = 64,
+    private val replayWindow: Duration = SCAN_REPLAY_WINDOW,
+    private val replayCap: Int = SCAN_REPLAY_CACHE_CAP,
+    private val mailboxCapacity: Int = ScanOutboundArbiter.DEFAULT_MAILBOX_CAPACITY,
+    private val clock: () -> Duration = monotonicScanClock(),
 ) {
-    private data class CachedAdvertisement(val advertisement: AdvertisementDto, val observed: TimeMark)
+    private data class CachedAdvertisement(val advertisement: AdvertisementDto, val observed: Duration)
 
     private data class LogicalScan(
         var registration: ScanRegistration,
@@ -62,6 +82,10 @@ class ScanCoordinator(
     private var physicalPlan: List<ScanFilter>? = null
     private var physicalPlanIsUnfiltered = false
     private var physicalGeneration: Long = 0
+    private var registrationRevision: Long = 0
+
+    /** Capacity needed at every pre-arbitration hop: full replay plus steady-state headroom. */
+    internal val deliveryMailboxCapacity: Int get() = mailboxCapacity + replayCap
 
     suspend fun startOrReplace(
         key: LogicalScanKey,
@@ -77,7 +101,7 @@ class ScanCoordinator(
             }
         }
 
-        val registration = ScanRegistration(key, generation)
+        val registration = ScanRegistration(key, generation, ++registrationRevision)
         val mailbox = newMailbox()
         val logical = current ?: LogicalScan(registration, filters, mailbox)
         if (current != null) {
@@ -108,10 +132,6 @@ class ScanCoordinator(
     }
 
     /** Detaches one retired socket while retaining its logical scans through transport grace. */
-    fun detachConnectionAsync(generation: Long) {
-        scope.launch { detachConnection(generation) }
-    }
-
     suspend fun detachConnection(generation: Long) = lock.withLock {
         scans.values.filter { it.registration.connectionGeneration == generation }.forEach { logical ->
             logical.mailbox?.close()
@@ -130,12 +150,12 @@ class ScanCoordinator(
         if (logical.registration == registration) removeLocked(registration.key, logical)
     }
 
-    private fun removeLocked(key: LogicalScanKey, logical: LogicalScan) {
+    private suspend fun removeLocked(key: LogicalScanKey, logical: LogicalScan) {
         logical.grace?.cancel()
         logical.mailbox?.close()
         scans.remove(key)
         if (scans.isEmpty()) {
-            physicalScan?.cancel()
+            physicalScan?.cancelAndJoin()
             physicalScan = null
             physicalPlan = null
             physicalPlanIsUnfiltered = false
@@ -143,8 +163,12 @@ class ScanCoordinator(
         }
     }
 
+    // Sized for a full replay burst (up to replayCap entries, delivered synchronously at
+    // admission before the consumer has necessarily started collecting) plus steady-state
+    // headroom. Bounded either way; this only widens the constant so the spec's "every retained
+    // matching entry" MUST isn't silently truncated by DROP_LATEST at admission time.
     private fun newMailbox(): Channel<AdvertisementDto> =
-        Channel(mailboxCapacity, onBufferOverflow = BufferOverflow.DROP_LATEST)
+        Channel(deliveryMailboxCapacity, onBufferOverflow = BufferOverflow.DROP_LATEST)
 
     /**
      * Native service filtering is only a prefilter.  The logical matcher remains authoritative,
@@ -170,19 +194,18 @@ class ScanCoordinator(
             .map { ScanFilter(service = it) }
     }
 
-    private fun replacePhysicalScanLocked(plan: List<ScanFilter>) {
-        physicalScan?.cancel()
-        physicalPlan = plan
-        val generation = ++physicalGeneration
-        physicalScan = scope.launch {
-            try {
+    private suspend fun replacePhysicalScanLocked(plan: List<ScanFilter>) {
+        // Kable's Scanner owns a process-wide CoreBluetooth scan on Apple. Cancellation must have
+        // completed before the replacement starts: merely requesting cancellation lets an older
+        // scanner call stopScan after the newer scanner has started.
+        withContext(NonCancellable) {
+            physicalScan?.cancelAndJoin()
+            physicalPlan = plan
+            val generation = ++physicalGeneration
+            physicalScan = scope.launch {
                 backend.scan(plan)
                     .catch { error -> Logger.warn(LogTags.ENGINE) { "multiplexed physical scan ended: ${error.message}" } }
                     .collect { advertisement -> fanOut(generation, advertisement) }
-            } finally {
-                lock.withLock {
-                    if (physicalGeneration == generation) physicalScan = null
-                }
             }
         }
     }
@@ -191,7 +214,7 @@ class ScanCoordinator(
         if (generation != physicalGeneration) return@withLock
         val merged = mergeIdentityLocked(raw)
         cache.remove(merged.device.value)
-        cache[merged.device.value] = CachedAdvertisement(merged, TimeSource.Monotonic.markNow())
+        cache[merged.device.value] = CachedAdvertisement(merged, clock())
         evictExpiredLocked()
         while (cache.size > replayCap) cache.remove(cache.keys.first())
         scans.values.forEach { logical ->
@@ -211,7 +234,8 @@ class ScanCoordinator(
     }
 
     private fun evictExpiredLocked() {
-        val expired = cache.filterValues { it.observed.elapsedNow() > replayWindow }.keys
+        val now = clock()
+        val expired = cache.filterValues { now - it.observed > replayWindow }.keys
         expired.forEach(cache::remove)
     }
 

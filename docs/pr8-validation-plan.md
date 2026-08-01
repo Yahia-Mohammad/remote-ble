@@ -44,12 +44,16 @@ runs produced.
    exercised. Two staggered `:e2e-runner:scanRun` clients against one agent settle it.
    **Release blocker (raised 2026-07-30, was "not a blocker" here)** — it is reachable by one ordinary
    client holding two `RemoteScanner`s, and "single agent, multiple clients" is a headline property.
-   The design and plan are [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); this run
-   is its Phase 0.
-   After automated `SCAN-CONC-01`…`11` evidence is green, repeat the broad-plus-service-filtered
-   pair against the default multiplexed JVM, iOS, and Rust agents available on Rig B. Run the
-   iOS-background-peripheral overflow-area case separately and record the exact agent, mode,
-   filters, timing, and result before changing Apple completeness wording or closing the blocker.
+   The design is [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); this run was its
+   Phase 0.
+   **Superseded 2026-08-01 by [scan-concurrency-validation.md](scan-concurrency-validation.md)**,
+   which is now the checklist of record for this item. The fix is implemented and its automated
+   `SCAN-CONC-01`…`12` evidence is green on both agents, so the remaining work is the hardware run
+   only: baselines, staggered broad-plus-filtered pairs in both the two-client and one-client-two-
+   scanners topologies against the iOS, JVM and Rust agents, the iOS-background overflow-area case
+   that gates the Apple wording, and two lifecycle checks. A purpose-built probe
+   (`:e2e-runner:scanConcurrencyRun`) grades the stop and start directions separately and reports
+   `INCONCLUSIVE` rather than `PASS` when the rig cannot discriminate between them.
 4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
 

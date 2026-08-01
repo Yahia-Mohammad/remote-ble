@@ -32,7 +32,13 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    evidence (never store credentials or bearer tokens there).
 3. Complete clean Android and KMP/iOS consumer resolution against the staging/released coordinates.
 4. Complete PR8’s real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.
-5. Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.
+5. Complete the scan-concurrency hardware run —
+   [scan-concurrency-validation.md](scan-concurrency-validation.md). This is a **separate blocker**
+   from item 4 even though it shares Rig B: the feature it validates landed after PR8's plan was
+   written, it introduces published capability strings and a new `ErrorKind` that Central cannot
+   unpublish, and one of its cases decides a sentence in [scanning.md](scanning.md) about Apple
+   discovery completeness. An `INCONCLUSIVE` verdict there is not a pass.
+6. Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.
 
 The tag and publication are PR9 actions. This document is an inventory and approval checklist, not
 evidence that publication or hardware validation has happened. Release assets must include a

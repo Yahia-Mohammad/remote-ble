@@ -708,27 +708,32 @@ impl BleBackend for BtleplugBackend {
         // physical scan already serves every subscriber, new or reconfigured. Re-issuing
         // `adapter.start_scan()` for a key that is merely rebinding would be a redundant call
         // against an already-discovering adapter, whose per-platform behaviour is not uniform.
+        //
+        // Emptiness is decided and the registration published under ONE lock acquisition. Reading
+        // it, dropping the lock and registering after the await would let two concurrent starts
+        // both see an empty map and both drive the adapter, and would drop advertisements arriving
+        // in between. Note `is_first` is taken *before* the insert: a reconfigure of the sole
+        // active scan leaves the map non-empty, so it is not first and must not touch the radio.
         let is_first = {
-            let scans = self.active_scans.lock();
-            scans.is_empty()
+            let mut scans = self.active_scans.lock();
+            let is_first = scans.is_empty();
+            scans.insert(stream, ScanSubscription { filters, event_tx });
+            is_first
         };
 
         if is_first {
             tracing::info!("Initiating btleplug adapter.start_scan()...");
             if let Err(e) = self.adapter.start_scan(BtleScanFilter::default()).await {
-                // Commit nothing on failure, so a radio that never started scanning leaves no
-                // registration behind for a later stop_scan to trip over. Registering only after
-                // success also means a reconfigure (map non-empty, no adapter call) can never
-                // clobber the incumbent subscription that surviving logical scans depend on.
+                // Reachable only when this call created the first registration, so rolling it back
+                // cannot clobber an incumbent subscription that surviving logical scans depend on.
+                // Without the rollback a later stop_scan would never bring the map back to empty.
+                self.active_scans.lock().remove(&stream);
                 return Err(AgentError::new(
                     ErrorKind::GattError,
                     Some(format!("Failed to start scan: {}", e)),
                 ));
             }
         }
-        self.active_scans
-            .lock()
-            .insert(stream, ScanSubscription { filters, event_tx });
         Ok(())
     }
 

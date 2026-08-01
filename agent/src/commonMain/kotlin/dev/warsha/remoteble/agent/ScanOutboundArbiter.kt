@@ -36,11 +36,19 @@ internal class ScanOutboundArbiter(
         for (ignored in wake) drainRound()
     }
 
+    /**
+     * Steady-state depth, and deliberately **suspending** rather than drop-newest.
+     *
+     * Drop-newest is applied once, upstream, where the coordinator's physical fan-out writes into
+     * a logical scan's single bounded reservation — that is the hop that must never block, because
+     * blocking it would let one slow connection slow the radio for every client. This hop is
+     * behind that reservation, so making it suspend costs nothing and buys the property that a
+     * full replay burst is carried through rather than needing a second copy of the reservation
+     * here. A closed sink surfaces to the producer as `ClosedSendChannelException`, which
+     * `BleAgent.deliverScanEvent` treats as "this scan's delivery ended".
+     */
     suspend fun register(scanId: Long): Sink = lock.withLock {
-        val sink = Sink(
-            scanId,
-            Channel(mailboxCapacity, onBufferOverflow = BufferOverflow.DROP_LATEST),
-        )
+        val sink = Sink(scanId, Channel(mailboxCapacity))
         sinks.put(scanId, sink)?.events?.close()
         sink
     }

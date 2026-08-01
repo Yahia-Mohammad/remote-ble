@@ -39,6 +39,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -121,11 +122,10 @@ class BleAgent(
         val sink: ScanOutboundArbiter.Sink? = null,
     )
     private val scanJobs = mutableMapOf<Long, ManagedScan>()
-    private val scanArbiter = ScanOutboundArbiter(
-        scope,
-        ::emit,
-        scanCoordinator?.deliveryMailboxCapacity ?: ScanOutboundArbiter.DEFAULT_MAILBOX_CAPACITY,
-    )
+    // Steady-state depth only. The replay reservation lives once, in the coordinator's own
+    // mailbox; the collector below hands events on with a suspending send, so a slow arbiter
+    // backpressures into that single bounded reservation instead of needing a second copy of it.
+    private val scanArbiter = ScanOutboundArbiter(scope, ::emit)
     private val observeJobs = mutableMapOf<Long, Job>()
 
     // Per-device write ordering (0.8.3 / feature C). Every command runs on its own coroutine, so a
@@ -305,6 +305,15 @@ class BleAgent(
                             // Complete first so a waiting successor proceeds, then drop the tail
                             // if no successor took it. NonCancellable because teardown cancels
                             // these coroutines and the release still has to reclaim the entry.
+                            //
+                            // The write turn is completed here as well as at the backend hand-off
+                            // in `handle`: any path that leaves `handle` without reaching the
+                            // Write branch (a retired connection, an authorization failure, an
+                            // early error reply) must still release the successor rather than
+                            // leave the device's chain waiting on a turn that will never signal.
+                            // `complete` is idempotent, so the early in-branch release still wins
+                            // when it happens.
+                            writeTurn?.mine?.complete(Unit)
                             scanTurn?.mine?.complete(Unit)
                             scanTurn?.let { withContext(NonCancellable) { releaseScanTurn(it) } }
                             commandLimiter.release()
@@ -341,6 +350,8 @@ class BleAgent(
 
     private suspend fun handle(cmd: Command, writeTurn: WriteTurn? = null) {
         try {
+            // The transport is already gone, so there is nobody to reply to. Ordering turns are
+            // released by the caller's `finally`, which runs on this path too.
             if (!connectionLive) return
             // Reverse-translate the op's client-facing handle back to the real radio handle up front,
             // so connection tracking, the registry, and the backend all deal only in real handles.
@@ -615,7 +626,14 @@ class BleAgent(
                     }
                 }
             }
-            observer.onClientLog(clientId, "scan started (#$scanId, ${coordinator.mode.name.lowercase()})")
+            val batchedLog = Capabilities.SCAN_BATCH in negotiated
+            observer.onClientLog(
+                clientId,
+                "scan started (#$scanId, ${coordinator.mode.name.lowercase()}${if (batchedLog) ", batched" else ""})",
+            )
+            Logger.debug(LogTags.ENGINE) {
+                "scan started [c=$clientId scanId=$scanId batched=$batchedLog mode=${coordinator.mode.name.lowercase()}]"
+            }
             return
         }
         val batched = Capabilities.SCAN_BATCH in negotiated
@@ -739,13 +757,30 @@ class BleAgent(
     ) {
         source.collect { ad ->
             observer.onDeviceSeen(ad.device.value, ad.name)
-            // trySend, not send: stopScan closes this sink out from under a collector that may
-            // still be mid-flight, and a suspending send would throw ClosedSendChannelException
-            // and tear down the whole connection instead of just ending this scan's delivery.
-            if (sink.events.trySend(AgentEvent.ScanResult(scanId, ad)).isSuccess) {
-                scanArbiter.signal()
-            }
+            deliverScanEvent(sink, AgentEvent.ScanResult(scanId, ad))
         }
+    }
+
+    /**
+     * Hands one scan event to the arbiter, suspending when its steady-state mailbox is full so
+     * backpressure lands on the coordinator's single bounded reservation (which drops newest)
+     * rather than on a second copy of it here.
+     *
+     * [stopScan] closes this sink out from under a collector that may still be mid-flight, and an
+     * unguarded suspending send would throw [ClosedSendChannelException] and tear down the whole
+     * connection instead of just ending this scan's delivery — so closure is caught and reported
+     * as "not delivered". The caller keeps collecting; the coordinator closes its mailbox on stop,
+     * which is what actually ends the collect.
+     */
+    private suspend fun deliverScanEvent(sink: ScanOutboundArbiter.Sink, event: AgentEvent) {
+        try {
+            sink.events.send(event)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: ClosedSendChannelException) {
+            return
+        }
+        scanArbiter.signal()
     }
 
     private suspend fun runCoordinatorBatchedScan(
@@ -760,11 +795,7 @@ class BleAgent(
                 if (buffer.isEmpty()) null else buffer.toList().also { buffer.clear() }
             }
             if (batch != null) {
-                // See runCoordinatorPerResultScan: trySend, because stopScan can close this sink
-                // while a flush is in flight, and a suspending send would kill the connection.
-                if (sink.events.trySend(AgentEvent.ScanResultBatch(scanId, batch)).isSuccess) {
-                    scanArbiter.signal()
-                }
+                deliverScanEvent(sink, AgentEvent.ScanResultBatch(scanId, batch))
             }
         }
         val flusher = launch {

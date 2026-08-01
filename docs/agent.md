@@ -444,6 +444,14 @@ agent-lifetime coordinator keyed by stable client key plus `scanId`, retain owne
 transport grace, merge identity before filter matching, and fan out through 320-item drop-newest
 logical mailboxes (256 retained replay entries plus 64 steady-state entries). A per-connection
 round-robin arbiter feeds the existing best-effort outbound path.
+
+Each logical scan has exactly **one** bounded reservation of that size on both agents, and drop-newest
+is applied once, where the physical fan-out writes. `agent-rs` reaches that by handing the arbiter's
+mailbox to the coordinator as the delivery sink. The Kotlin agent keeps a collector between the two
+(it is where `scan.batch` coalescing happens, which `agent-rs` does not implement), so its arbiter
+sink carries only the 64-entry steady-state depth and the collector hands events on with a suspending
+send — backpressure lands on the coordinator's single reservation instead of a second copy of it.
+Physical fan-out itself never suspends on either agent, so a stalled connection cannot slow the radio.
 `multiplexed` guarantees filter and lifecycle isolation, not Apple discovery completeness; operator
 choice of `uncontrolled` retains the direct backend path and makes no isolation claim.
 - **`connect`** — `peripheral.connect()`; Kable suspends until connected (discovering

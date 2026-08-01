@@ -573,6 +573,14 @@ impl AgentServer {
     // The WebSocket handshake callback must return `http::Response` in its Err arm
     // (tungstenite's API), which clippy flags as a large Err variant. The type is
     // fixed by the upstream signature, so the lint doesn't apply here.
+    /// Test-only convenience wrapper: mints a **fresh** [ScanCoordinator] for this one connection.
+    ///
+    /// That deliberately defeats the agent-wide guarantee — two connections accepted through this
+    /// helper do not share a coordinator, so `single` admission, cross-client multiplexing, the
+    /// stable-client cap and grace-held rebinds would all appear to work when they do not. It
+    /// exists for tests about auth, leases and framing, where scans are not the subject. **Any
+    /// test that asserts scan-concurrency behaviour must call [Self::accept_connection_with_scan]
+    /// with one shared coordinator instead.**
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     #[allow(dead_code)]
     async fn accept_connection<S>(

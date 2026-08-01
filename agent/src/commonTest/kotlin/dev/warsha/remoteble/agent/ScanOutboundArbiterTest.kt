@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
@@ -34,17 +35,27 @@ class ScanOutboundArbiterTest {
     }
 
     @Test
-    fun replayReservationFitsTheWholeRetainedSetBeforeArbitration() = runTest {
-        val arbiter = ScanOutboundArbiter(this, emit = {}, mailboxCapacity = 320)
+    fun aFullReplayBurstSurvivesTheSteadyStateSinkByBackpressuringTheCollector() = runTest {
+        // The arbiter sink is sized for steady state only; the replay reservation lives once, in
+        // the coordinator mailbox. So a full 256-entry burst must still arrive intact, carried by
+        // the collector's suspending send rather than by a second copy of the reservation.
+        val delivered = mutableListOf<String>()
+        val arbiter = ScanOutboundArbiter(this, { event ->
+            delivered += (event as AgentEvent.ScanResult).advertisement.device.value
+        })
         val sink = arbiter.register(1)
-        repeat(256) { index ->
-            assertTrue(
-                sink.events.trySend(
+        val collector = launch {
+            repeat(256) { index ->
+                sink.events.send(
                     AgentEvent.ScanResult(1, AdvertisementDto(DeviceHandle("replay-$index"), null, -50)),
-                ).isSuccess,
-                "the full retained replay must fit before the arbiter begins delivery",
-            )
+                )
+                arbiter.signal()
+            }
         }
+        collector.join()
+        runCurrent()
+
+        assertEquals(List(256) { "replay-$it" }, delivered, "every retained entry must reach the transport, in order")
         arbiter.unregister(sink)
         arbiter.close()
     }

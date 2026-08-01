@@ -150,9 +150,25 @@ class ScanCoordinatorTest {
         coordinator.startOrReplace(LogicalScanKey("b", 2), 2, listOf(ScanFilter(service = "180f")))
         testScheduler.runCurrent()
         assertEquals(2, backend.scanFilters.last().size)
-        coordinator.startOrReplace(LogicalScanKey("c", 3), 3, emptyList())
+        val broad = assertIs<ScanAdmission.Accepted>(
+            coordinator.startOrReplace(LogicalScanKey("c", 3), 3, emptyList()),
+        )
         testScheduler.runCurrent()
         assertTrue(backend.scanFilters.last().isEmpty())
+
+        // The narrowing half of the invariant: dropping the predicate that forced the unfiltered
+        // plan must NOT renarrow while service-coverable scans are still running. Renarrowing
+        // would silently change what the survivors can discover mid-scan.
+        val startsBeforeStop = backend.scanFilters.size
+        coordinator.stop(broad.registration)
+        testScheduler.runCurrent()
+        coordinator.startOrReplace(LogicalScanKey("d", 4), 4, listOf(ScanFilter(service = "1809")))
+        testScheduler.runCurrent()
+        assertTrue(
+            backend.scanFilters.last().isEmpty(),
+            "the physical plan must stay unfiltered until the last logical scan stops",
+        )
+        assertTrue(backend.scanFilters.size >= startsBeforeStop)
     }
 
     @Test

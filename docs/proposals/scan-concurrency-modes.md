@@ -598,6 +598,35 @@ Completed in that worktree:
 - The documentation now describes `multiplexed` only as filter and lifecycle isolation. It does not
   claim Apple discovery completeness or a resolved release blocker.
 
+### Review pass on the committed branch (2026-08-01)
+
+A read of the committed implementation against this document found, and the branch now fixes:
+
+- **The reference client did not offer the capabilities on the documented construction path.**
+  `sendHello` added only `identifier.translate`; the trio came from the Koin module alone, so every
+  manually constructed `DefaultAgentSession` — the form used by `getting-started.md`, `flows.md` and
+  `client-sdk.md` — read a new agent as `LEGACY_OR_UNKNOWN` and was downgraded to `AGENT_BUSY`
+  against a `single`-mode agent. They now live in `ALWAYS_OFFERED_CAPABILITIES`, alongside
+  `identifier.translate`, and are no longer restated in the module.
+- **`BtleplugBackend::start_scan` had lost its atomic first-scan check.** Emptiness was read, the
+  lock dropped, and the registration published only after the await, so two concurrent starts could
+  both drive `adapter.start_scan()` (reachable in `uncontrolled`, where starts are only serialized
+  per `scanId`) and advertisements arriving in the window were dropped. Both are decided under one
+  lock again, with `is_first` taken *before* the insert so a reconfigure of the sole active scan is
+  correctly not first — which is the clobber case the branch was right to fix.
+- **Waiting for a physical collector to unwind was unbounded** while holding the agent-wide
+  coordinator lock inside `NonCancellable`, so one uncooperative backend teardown could wedge scan
+  admission for every client and stall connection teardown with it. Bounded by
+  `PHYSICAL_SCAN_TEARDOWN_TIMEOUT`; a straggler is already fenced by `physicalGeneration`.
+- **Kotlin reserved the 320-entry replay budget twice** (coordinator mailbox *and* arbiter sink)
+  where Rust reserves it once. The arbiter sink is now steady-state depth and suspends, so
+  backpressure lands on the single reservation and drop-newest is applied only where the physical
+  fan-out writes.
+- Smaller: the write-ordering turn is now released by the command's own `finally` rather than only
+  by the `Op.Write` branch; the guaranteed path regained its `scan started` debug line; the
+  `accept_connection` test shim documents that its per-call coordinator defeats the agent-wide
+  guarantee; and the never-narrows half of the physical-plan invariant is asserted.
+
 The completed local validation at this checkpoint is:
 
 ```text

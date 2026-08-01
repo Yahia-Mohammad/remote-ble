@@ -225,6 +225,25 @@ fun defaultRetryPolicyFor(op: Op): RetryPolicy = when {
     else -> RetryPolicies.maxAttempts(2)
 }
 
+/**
+ * Capabilities every session offers regardless of what the caller configured, because the SDK
+ * always implements them and a client that fails to offer one is silently downgraded by the agent.
+ *
+ * The `scan.concurrency.*` trio is here rather than only in the Koin module because a client learns
+ * the agent's scan-isolation policy *only* from the negotiated intersection: a session that offers
+ * none reads a brand-new multiplexed agent as [ScanConcurrencyMode.LEGACY_OR_UNKNOWN], and a
+ * `single`-mode agent has to fall back to `AGENT_BUSY` instead of the typed `SCAN_UNAVAILABLE`.
+ * Manually constructed sessions — the form every doc example uses — would otherwise never see it.
+ * All three are offered so the intersection returns exactly the one mode the agent is configured
+ * for; the SDK can decode any of them.
+ */
+private val ALWAYS_OFFERED_CAPABILITIES: Set<String> = setOf(
+    Capabilities.IDENTIFIER_TRANSLATION,
+    Capabilities.SCAN_CONCURRENCY_MULTIPLEXED,
+    Capabilities.SCAN_CONCURRENCY_SINGLE,
+    Capabilities.SCAN_CONCURRENCY_UNCONTROLLED,
+)
+
 @OptIn(ExperimentalAtomicApi::class)
 class DefaultAgentSession(
     private val transport: AgentTransport,
@@ -545,7 +564,7 @@ class DefaultAgentSession(
      * drop path will fire and a reconnect will re-handshake.
      */
     private suspend fun sendHello() {
-        val caps = clientCapabilities + Capabilities.IDENTIFIER_TRANSLATION
+        val caps = clientCapabilities + ALWAYS_OFFERED_CAPABILITIES
         val fmt = currentIdentifierFormat()
         runCatchingNonCancellation {
             transport.send(

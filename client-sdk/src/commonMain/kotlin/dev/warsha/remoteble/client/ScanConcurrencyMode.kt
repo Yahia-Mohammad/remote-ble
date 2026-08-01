@@ -25,11 +25,13 @@ public enum class ScanConcurrencyMode {
                     Capabilities.SCAN_CONCURRENCY_UNCONTROLLED,
                 ),
             )
+            // singleOrNull() is the contradiction check as well as the absence check: an agent
+            // advertising two modes is as unreadable as one advertising none, and both land in
+            // the `else` branch below rather than picking a winner.
             return when (advertised.singleOrNull()) {
                 Capabilities.SCAN_CONCURRENCY_MULTIPLEXED -> MULTIPLEXED
                 Capabilities.SCAN_CONCURRENCY_SINGLE -> SINGLE
                 Capabilities.SCAN_CONCURRENCY_UNCONTROLLED -> UNCONTROLLED
-                null -> LEGACY_OR_UNKNOWN
                 else -> LEGACY_OR_UNKNOWN
             }
         }

@@ -125,7 +125,7 @@ When prompted: change the readable value, toggle the write-error control on then
 Kable's `Peripheral` ran unchanged against a remote agent — **and** that read/write-with-response
 completion is exact while WWR/notify remain best-effort by BLE design, not by implementation gap.
 
-### The write-error step is a known failure on btleplug-backed agents
+### The write-error step is a known failure on macOS-hosted btleplug agents
 
 Confirmed on hardware (Rig A, 2026-07-27) against both desktop agents: btleplug on macOS never
 delivers the completion for a write-with-response that the peripheral answers with an ATT error —
@@ -135,14 +135,29 @@ is honest but is not the documented expectation, so the step is recorded as **XF
 still exits zero. The expectation itself is deliberately unchanged — relaxing it to accept `TIMEOUT`
 would erase the distinction between "the radio rejected it" and "no answer, outcome unknown".
 
-The runner assumes a btleplug-backed agent, since both desktop reference agents are. When pointing
-it at the Android or Apple agent, declare it. The **Apple** backend is now **verified on hardware**
-(Rig B, 2026-07-29, iPhone-hosted agent): it reports `WRITE_FAILED` on an ATT error and does not
-poison the connection afterwards, so both gated steps pass outright and report XPASS when the gate
-is left on. The gap really is btleplug-specific. The **Android** backend remains unverified.
+**Corrected 2026-08-04: this is btleplug's CoreBluetooth backend, not btleplug.** This section, and
+the gate itself, used to say "btleplug-backed agents" — generalising from macOS, the only host Rig A
+could reach. Rig D then XPASSed both steps on **Linux/BlueZ** across two runs: `WRITE_FAILED` is
+delivered correctly and the following write succeeds without a reconnect. So a Linux-hosted
+`agent-rs` or JVM agent was being excused from an expectation it actually meets.
+
+Where each backend stands:
+
+| Agent host | Backend | ATT errors | Gate |
+|---|---|---|---|
+| macOS | btleplug / CoreBluetooth | not delivered; poisons the connection | **XFAIL** |
+| Linux | btleplug / BlueZ | delivered; no poisoning (Rig D, 2026-08-03) | ungated |
+| iOS | Kable native / CoreBluetooth | delivered; no poisoning (Rig B, 2026-07-29) | ungated |
+| Android | Kable native | **unverified** | ungated |
+
+Declare the agent's host with `REMOTE_BLE_E2E_AGENT_HOST` (`macos` / `linux` / `android` / `ios`).
+It replaces `REMOTE_BLE_E2E_BTLEPLUG`, which asked about the library when the defect belongs to one
+of its backends. Left unset it guesses from the *runner's* own OS, which is right only when the
+agent is local — so set it explicitly whenever the agent is on another machine. The run prints which
+way it resolved.
 
 ```sh
-REMOTE_BLE_E2E_BTLEPLUG=false REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080/agent"
+REMOTE_BLE_E2E_AGENT_HOST=linux REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080/agent"
 ```
 
 If the step ever reports **XPASS**, the gap is fixed on that backend and the gate should be removed.

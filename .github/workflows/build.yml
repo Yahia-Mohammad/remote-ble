@@ -81,6 +81,18 @@ jobs:
       - name: Build + test
         run: ./gradlew build
 
+      # Gradle's console prints only the exception class and line for a failing test, so without
+      # this the assertion message dies with the runner.
+      - name: Archive Kotlin test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-android-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
   ios-klibs:
     name: iOS klib compile check
     runs-on: macos-latest

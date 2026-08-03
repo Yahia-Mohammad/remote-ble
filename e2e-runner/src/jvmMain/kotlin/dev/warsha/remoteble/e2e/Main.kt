@@ -41,43 +41,68 @@ private const val NOTIFY = "a1b2c3d4-0000-4000-8000-000000000004"
 private const val SECURE = "a1b2c3d4-0000-4000-8000-000000000005"
 
 /**
- * Why the write-error scenario is gated rather than expected to pass on btleplug-backed agents.
+ * Why the write-error scenario is gated rather than expected to pass on a CoreBluetooth-hosted
+ * btleplug agent.
  *
  * Confirmed on hardware (Rig A, 2026-07-27): btleplug on macOS never delivers the completion for a
  * write-with-response the peripheral answers with an ATT error — the native call neither returns
  * nor throws, so no agent above it can report WRITE_FAILED. The agents bound the transaction and
  * report TIMEOUT instead (`EngineBleBackend.GATT_OP_TIMEOUT`), which is honest but is not the
  * documented expectation, so this is an XFAIL rather than a relaxed assertion.
+ *
+ * **Narrowed 2026-08-04 (item 22).** This was gated on btleplug generally until Rig D XPASSed it
+ * twice on Linux/BlueZ, where WRITE_FAILED arrives correctly. The defect is btleplug's
+ * *CoreBluetooth* backend, not btleplug — the wording said otherwise because macOS was the only
+ * host Rig A could reach.
  */
 private const val BTLEPLUG_ATT_ERROR_GAP =
-    "btleplug does not deliver ATT errors for write-with-response; the agent reports TIMEOUT instead"
+    "btleplug on CoreBluetooth does not deliver ATT errors for write-with-response; the agent " +
+        "reports TIMEOUT instead (BlueZ delivers them correctly — Rig D, 2026-08-03)"
 
 /**
  * The same backend gap, second symptom.
  *
- * Confirmed on hardware (Rig A, 2026-07-28): once btleplug has had one write-with-response answered
- * by an ATT error, it stops delivering write completions for that peripheral for the rest of the
- * connection. The peripheral's own log shows the later write arriving and being accepted with error
- * injection already off, yet no completion comes back. Reads still work, and a fresh connection
- * writes normally in ~66ms — reconnecting is the only observed recovery, so no agent-side handling
- * can make this step pass on btleplug. Gated for the same reason as [BTLEPLUG_ATT_ERROR_GAP]:
- * the expectation is right, this backend cannot meet it.
+ * Confirmed on hardware (Rig A, 2026-07-28): once btleplug-on-CoreBluetooth has had one
+ * write-with-response answered by an ATT error, it stops delivering write completions for that
+ * peripheral for the rest of the connection. The peripheral's own log shows the later write arriving
+ * and being accepted with error injection already off, yet no completion comes back. Reads still
+ * work, and a fresh connection writes normally in ~66ms — reconnecting is the only observed
+ * recovery, so no agent-side handling can make this step pass there.
+ *
+ * **Narrowed 2026-08-04 (item 22)** for the same reason as [BTLEPLUG_ATT_ERROR_GAP]: on Linux/BlueZ
+ * the next write succeeded without a reconnect, so nothing is poisoned.
  */
 private const val BTLEPLUG_WRITE_POISONING =
-    "btleplug stops delivering write completions for the rest of the connection after an ATT error; " +
-        "only reconnecting recovers"
+    "btleplug on CoreBluetooth stops delivering write completions for the rest of the connection " +
+        "after an ATT error; only reconnecting recovers (BlueZ recovers on its own — Rig D, 2026-08-03)"
 
 /**
- * Whether the agent under test sits on btleplug (the Kotlin JVM agent on macOS/Linux, or agent-rs).
+ * Whether the agent under test is btleplug **on CoreBluetooth** — the only configuration in which
+ * the two ATT-error gates above hold.
  *
- * Operator-declared: the wire protocol carries no agent/platform identity, and the runner is
- * already driven by hand against a chosen agent. Defaults to true because both desktop reference
- * agents are btleplug-backed; set `REMOTE_BLE_E2E_BTLEPLUG=false` when pointing the runner at the
- * Android or Apple agent, whose native Kable backends are expected to deliver ATT errors properly
- * (unverified on hardware as of 2026-07-27 — an XPASS there is the confirmation).
+ * Operator-declared, because the wire protocol carries no agent/platform identity and the runner is
+ * already pointed at a chosen agent by hand. The default reads the *runner's* host as a hint, which
+ * is right for the common case of running against a local desktop agent and wrong the moment the
+ * agent is somewhere else — so set [ENV_HOST] explicitly whenever the agent is remote.
+ *
+ * `REMOTE_BLE_E2E_AGENT_HOST=macos` gates both steps; `linux`, `android` or `ios` runs them
+ * ungated, and an XPASS there means the gate has gone stale again.
+ *
+ * Replaces `REMOTE_BLE_E2E_BTLEPLUG`, which asked the wrong question: it gated on the *library*
+ * when the defect belongs to the library's Apple backend, so a Linux agent was wrongly excused.
  */
-private val btleplugBackedAgent: Boolean =
-    System.getenv("REMOTE_BLE_E2E_BTLEPLUG")?.toBooleanStrictOrNull() ?: true
+private const val ENV_HOST = "REMOTE_BLE_E2E_AGENT_HOST"
+
+private val btleplugOnCoreBluetoothAgent: Boolean =
+    when (val declared = System.getenv(ENV_HOST)?.lowercase()) {
+        null -> System.getProperty("os.name").orEmpty().startsWith("Mac")
+        // macOS hosts the two btleplug agents (Kotlin JVM and agent-rs), so it is the gated case.
+        // `ios` is Apple too but runs Kable's *native* backend, which Rig B proved delivers ATT
+        // errors correctly — so it is deliberately ungated. Do not collapse the two into "apple".
+        "macos", "mac", "darwin" -> true
+        "linux", "android", "ios" -> false
+        else -> error("$ENV_HOST must be one of macos/linux/android/ios, got '$declared'")
+    }
 
 /**
  * Live end-to-end runner: client SDK -> WebSocket -> agent -> radio -> the test peripheral.
@@ -97,6 +122,13 @@ fun main(args: Array<String>): Unit = runBlocking {
     println("agent : $url")
     println("token : ${if (token != null) "set" else "none"}")
     println("device: service $SERVICE (advertised as \"$ADVERTISED_NAME\")")
+    // State the gate configuration rather than leaving it to be inferred from what was typed: a
+    // defaulted host silently gating (or not gating) the two ATT-error steps is exactly the kind of
+    // unstated configuration that has produced wrong readings on this project before.
+    println(
+        "gates : ATT-error steps ${if (btleplugOnCoreBluetoothAgent) "GATED (XFAIL)" else "ungated"}" +
+            " — agent host ${System.getenv(ENV_HOST) ?: "defaulted from this runner's OS; set $ENV_HOST if the agent is remote"}",
+    )
     println()
 
     val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -187,7 +219,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         readlnOrNull()
         report.knownFailing(
             "Write-with-response error surfaces WRITE_FAILED (F)",
-            expectedToFail = btleplugBackedAgent,
+            expectedToFail = btleplugOnCoreBluetoothAgent,
             reason = BTLEPLUG_ATT_ERROR_GAP,
         ) {
             val failure = runCatching {
@@ -210,7 +242,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         readlnOrNull()
         report.knownFailing(
             "Write-with-response succeeds again — a failed write never poisons the session",
-            expectedToFail = btleplugBackedAgent,
+            expectedToFail = btleplugOnCoreBluetoothAgent,
             reason = BTLEPLUG_WRITE_POISONING,
         ) {
             peripheral.write(writable, byteArrayOf(0x01, 0x02), WriteType.WithResponse)

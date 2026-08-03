@@ -133,7 +133,14 @@ runs, each against a freshly restarted peripheral:
 So the two XFAIL gates carried since Rig A are **genuinely btleplug-specific**, not a general
 agent gap. They must stay for the btleplug-backed agents (JVM `:agent` on desktop, `agent-rs`),
 where they still legitimately fail, and the runner's existing `REMOTE_BLE_E2E_BTLEPLUG` switch is
-the correct mechanism — nothing needs removing. What changes is the *knowledge*: the Apple native
+the correct mechanism — nothing needs removing.
+
+> **Correction, 2026-08-04.** "Genuinely btleplug-specific" was still one generalisation too many —
+> this rig could only distinguish *Apple-native Kable* from *btleplug on macOS*, and it read the
+> difference as the library. Rig D then XPASSed both steps on **Linux/BlueZ**, so the gates belong to
+> btleplug's **CoreBluetooth** backend alone. `REMOTE_BLE_E2E_BTLEPLUG` is replaced by
+> `REMOTE_BLE_E2E_AGENT_HOST`; see item 22 in
+> [0.10.0-progress-status.md](proposals/0.10.0-progress-status.md). The measurements below stand. What changes is the *knowledge*: the Apple native
 Kable backend reports `WRITE_FAILED` on an ATT error and does not poison the connection
 afterwards, which [phase7-bringup.md](phase7-bringup.md) had recorded as unverified on hardware.
 

@@ -30,7 +30,22 @@ breaking `authToken` provider change for applications upgrading from an earlier 
 1. Run the permanent gates and archive their workflow URLs/artifacts.
 2. Build every row above from the exact candidate commit and record SHA-256/digests in release
    evidence (never store credentials or bearer tokens there).
-3. Complete clean Android and KMP/iOS consumer resolution against the staging/released coordinates.
+3. ~~Complete clean Android and KMP/iOS consumer resolution against the staging/released
+   coordinates.~~ **Reclassified 2026-08-04 to a post-publish check — this step could not be
+   performed as written.** It assumed a staging window that this project does not have:
+   [`release.yml`](../.github/workflows/release.yml) runs `publishAndReleaseToMavenCentral`, which
+   publishes *and* releases in one irreversible step, and nothing else here produces a repository a
+   consumer could resolve from. A Central Portal deployment is not resolvable until it is released,
+   so "resolve from staging before approving the tag" has no artifact to point at.
+
+   What stands in its place: the three `consumer-tests/*` fixtures pass against **Maven local** and
+   run as permanent CI gates, and each was verified to fail on an unpublished version, so they are
+   not vacuous. Re-run all three against the **released** `0.10.0` coordinates immediately after the
+   publish, and treat a failure there as a `0.10.1` trigger. **This is a real reduction in
+   assurance** — a broken POM or metadata closure would now be caught after Central has the
+   artifacts rather than before — and it is accepted deliberately rather than overlooked. Closing it
+   properly means publishing to a resolvable staging repository (GitHub Packages) first; that is
+   0.10.1 work.
 4. ~~Complete PR8’s real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.~~ **All four rigs are run
    (25/25) as of 2026-08-03** — see [pr8-validation-plan.md](pr8-validation-plan.md). Rig D passed
    6/6 on **one amd64 Linux host** under the option-1 relaxation, *not* on the Ubuntu and Pi hosts

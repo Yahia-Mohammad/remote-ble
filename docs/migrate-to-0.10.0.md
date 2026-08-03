@@ -29,6 +29,28 @@ The provider runs for every connection attempt, including reconnects. Use it to 
 credential when tokens rotate; return `null` (or a blank value) for an unauthenticated agent. The
 SDK does not cache the returned credential.
 
+## Required build change for Android consumers on AGP 9
+
+**An Android consumer on AGP 9 must put Kotlin 2.4+ on its build classpath, or the SDK will not
+compile.** AGP 9's *built-in* Kotlin compiler is 2.2.0 and reads Kotlin metadata only up to 2.3.0,
+while this SDK publishes 2.4.0 metadata. A stock AGP 9 module therefore fails with:
+
+> was compiled with an incompatible version of Kotlin
+
+Declare KGP with `apply false` in the consumer's `plugins` block. That puts 2.4.x on the build
+classpath for AGP's built-in compilation without applying a second Kotlin plugin:
+
+```kotlin
+plugins {
+    id("org.jetbrains.kotlin.multiplatform") version "2.4.10" apply false
+    id("com.android.library") version "9.3.0"
+}
+```
+
+Do **not** reach for `org.jetbrains.kotlin.android` instead — AGP 9 removed it, and applying it is a
+hard error. This affects Android consumers only; JVM and Apple consumers are unaffected, which is
+why it is easy to miss until an Android build is attempted.
+
 ## Platform and protocol compatibility
 
 - The wire protocol remains **v1**. Existing Kotlin agents and clients interoperate when their

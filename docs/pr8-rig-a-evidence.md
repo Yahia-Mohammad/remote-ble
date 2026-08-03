@@ -150,6 +150,15 @@ WRITE 01 02 from FC:B2:14:C6:39:8D   <- final write ARRIVED, injection off
 connection completes the identical write in **66 ms**. So the 10 s bound stops the permanent wedge
 but the connection stays write-poisoned until it is torn down.
 
+> **Correction, 2026-08-04 — the scope recorded here was too wide.** Everything measured above is
+> accurate for *this* rig, which ran on macOS. What was wrong is the generalisation drawn from it:
+> both gates were written as "btleplug does not…", and Rig D later XPASSed both on **Linux/BlueZ**
+> (`WRITE_FAILED` delivered correctly, the next write fine without a reconnect). The defect is
+> btleplug's **CoreBluetooth** backend. The gates are now keyed on the agent's host
+> (`REMOTE_BLE_E2E_AGENT_HOST`, replacing `REMOTE_BLE_E2E_BTLEPLUG`); see item 22 in
+> [0.10.0-progress-status.md](proposals/0.10.0-progress-status.md). Readings below are left as
+> recorded — only the conclusion drawn from them is narrowed.
+
 **Addressed after this run**, in two parts: the step is now gated XFAIL on btleplug-backed agents
 (no agent-side handling can make it pass while the backend behaves this way), and the agent
 short-circuits writes on a degraded connection so they fail immediately with the same error instead

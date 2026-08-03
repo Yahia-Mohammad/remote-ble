@@ -66,6 +66,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 class ScanConcurrencyWebSocketTest {
 
+    private companion object {
+        /** Upper bound on any single blocking receive — see [bounded]. */
+        val RECEIVE_TIMEOUT = 10.seconds
+    }
+
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val httpClient = defaultWebSocketHttpClient()
     private val codec = CborProtocolCodec()
@@ -141,11 +146,29 @@ class ScanConcurrencyWebSocketTest {
 
     private fun url(server: AgentWebSocketServer): String = "ws://localhost:${server.portForTest()}/agent"
 
+    /**
+     * Bounds a blocking wait so a frame that never arrives fails one test instead of wedging the run.
+     *
+     * Every receive helper below loops on `socket.incoming.receive()`, which returns only when the
+     * awaited frame shows up. These tests also turn on sub-second timings — transport grace,
+     * scan-start ordering — that a loaded CI runner can miss. Unbounded, one missed frame suspends
+     * `:client-sdk:jvmTest` forever: the task never completes, Gradle prints nothing further, and the
+     * CI job sits until its own limit kills it with no indication of which test was stuck. That is
+     * exactly what happened on this branch and on the scan-concurrency PR before it.
+     *
+     * [what] names the wait, so the failure says what never arrived rather than just "timed out".
+     * Call sites asserting that nothing arrives use their own much shorter `withTimeoutOrNull`;
+     * [RECEIVE_TIMEOUT] is deliberately far longer so it can never pre-empt one of those.
+     */
+    private suspend fun <T> bounded(what: String, block: suspend () -> T): T =
+        withTimeoutOrNull(RECEIVE_TIMEOUT) { block() }
+            ?: error("timed out after $RECEIVE_TIMEOUT waiting to $what")
+
     private suspend fun AgentWebSocketServer.openClient(
         clientId: String,
         capabilities: Set<String> = emptySet(),
         expectedCapabilities: Set<String>? = null,
-    ): DefaultClientWebSocketSession {
+    ): DefaultClientWebSocketSession = bounded("open a client session for '$clientId'") {
         val socket = httpClient.webSocketSession(urlString = url(this)) {
             header(dev.warsha.remoteble.protocol.CLIENT_ID_HEADER, clientId)
         }
@@ -154,18 +177,20 @@ class ScanConcurrencyWebSocketTest {
         val serverHello = assertIs<ServerHello>(hello)
         assertEquals(1, serverHello.version)
         expectedCapabilities?.let { assertEquals(it, serverHello.capabilities) }
-        return socket
+        socket
     }
 
-    private suspend fun receiveFrame(socket: DefaultClientWebSocketSession): Frame {
-        while (true) {
-            when (val frame = socket.incoming.receive()) {
-                is WsFrame.Binary -> return codec.decode(frame.readBytes())
-                is WsFrame.Close -> error("WebSocket closed before the expected protocol frame")
-                else -> Unit
+    private suspend fun receiveFrame(socket: DefaultClientWebSocketSession): Frame =
+        bounded("receive a protocol frame") {
+            while (true) {
+                when (val frame = socket.incoming.receive()) {
+                    is WsFrame.Binary -> return@bounded codec.decode(frame.readBytes())
+                    is WsFrame.Close -> error("WebSocket closed before the expected protocol frame")
+                    else -> Unit
+                }
             }
+            @Suppress("UNREACHABLE_CODE") error("unreachable")
         }
-    }
 
     private suspend fun request(
         socket: DefaultClientWebSocketSession,
@@ -180,19 +205,21 @@ class ScanConcurrencyWebSocketTest {
         socket.send(WsFrame.Binary(true, codec.encode(Command(cid, op))))
     }
 
-    private suspend fun receiveReply(socket: DefaultClientWebSocketSession, cid: Long): OpResult {
-        while (true) {
-            when (val frame = receiveFrame(socket)) {
-                is Reply -> if (frame.cid == cid) return frame.result
-                else -> Unit
+    private suspend fun receiveReply(socket: DefaultClientWebSocketSession, cid: Long): OpResult =
+        bounded("receive the reply to cid=$cid") {
+            while (true) {
+                when (val frame = receiveFrame(socket)) {
+                    is Reply -> if (frame.cid == cid) return@bounded frame.result
+                    else -> Unit
+                }
             }
+            @Suppress("UNREACHABLE_CODE") error("unreachable")
         }
-    }
 
     private suspend fun receiveReplies(
         socket: DefaultClientWebSocketSession,
         expected: Set<Long>,
-    ): Map<Long, OpResult> {
+    ): Map<Long, OpResult> = bounded("receive replies to cids=$expected") {
         val replies = mutableMapOf<Long, OpResult>()
         while (replies.keys != expected) {
             when (val frame = receiveFrame(socket)) {
@@ -200,28 +227,45 @@ class ScanConcurrencyWebSocketTest {
                 else -> Unit
             }
         }
-        return replies
+        replies
     }
 
     private suspend fun receiveAdvertisement(
         socket: DefaultClientWebSocketSession,
         scanId: Long,
-    ): AdvertisementDto {
+    ): AdvertisementDto = bounded("receive an advertisement for scanId=$scanId") {
         while (true) {
             when (val frame = receiveFrame(socket)) {
                 is Event -> when (val event = frame.event) {
-                    is AgentEvent.ScanResult if event.scanId == scanId -> return event.advertisement
-                    is AgentEvent.ScanResultBatch if event.scanId == scanId -> return event.advertisements.first()
+                    is AgentEvent.ScanResult if event.scanId == scanId -> return@bounded event.advertisement
+                    is AgentEvent.ScanResultBatch if event.scanId == scanId ->
+                        return@bounded event.advertisements.first()
                     else -> Unit
                 }
                 else -> Unit
             }
         }
+        @Suppress("UNREACHABLE_CODE") error("unreachable")
     }
 
+    /**
+     * Waits until the coordinator's collector is actually subscribed to [ScriptedBackend.advertisements].
+     *
+     * Gating on `activeScans` alone was a race: [ScriptedBackend.scan] increments that counter
+     * *before* it calls `advertisements.collect`, and the flow has `replay = 0`, so anything a test
+     * emitted in the window between the two was dropped on the floor with no subscriber to take it.
+     * The test then waited for an advertisement that had already been discarded. `subscriptionCount`
+     * is the fact the emit actually depends on, so wait on that instead.
+     */
     private suspend fun awaitStarted(backend: ScriptedBackend, count: Int = 1) {
         withTimeout(5.seconds) {
-            while (backend.scanFilters.size < count || backend.activeScans.get() == 0) delay(1.milliseconds)
+            while (
+                backend.scanFilters.size < count ||
+                backend.activeScans.get() == 0 ||
+                backend.advertisements.subscriptionCount.value == 0
+            ) {
+                delay(1.milliseconds)
+            }
         }
     }
 

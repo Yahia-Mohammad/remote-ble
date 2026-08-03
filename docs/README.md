@@ -34,14 +34,14 @@ maintainer-internal and are not part of the published docs.
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
 | [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | **Not started** — making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host |
-| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | **Release blocker for 0.10.0** — the design record behind [scanning.md](scanning.md): why concurrent scans were not isolated on Apple hosts (and the Kotlin/Rust agents diverged), the three agent modes (`multiplexed`/`single`/`uncontrolled`), their wire surface, and the rejected alternatives |
+| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | **Closed 2026-08-03, hardware-validated** — the design record behind [scanning.md](scanning.md): why concurrent scans were not isolated on Apple hosts (and the Kotlin/Rust agents diverged), the three agent modes (`multiplexed`/`single`/`uncontrolled`), their wire surface, and the rejected alternatives |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
 | [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
 | [pr8-validation-plan.md](pr8-validation-plan.md) | The PR8 hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
-| [scan-concurrency-validation.md](scan-concurrency-validation.md) | **The remaining 0.10.0 scan gate** — the hardware run that closes the concurrent-scan blocker: instruments, rig prerequisites, cases, and what each result is allowed to change |
+| [scan-concurrency-validation.md](scan-concurrency-validation.md) | **Closed 2026-08-03** — the hardware run that closed the concurrent-scan blocker: instruments, rig prerequisites, cases, and what each result is allowed to change |
 | [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The supported `wss://` recipe** (`TLS-PROXY-01`) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
 | [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) | **Rig A real-radio evidence** — per-case results, the two peripheral defects that had to be fixed before the rig could run, the operator prerequisites, and what remains |
 | [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
@@ -60,7 +60,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | Validated CI/deployment release without changing the client programming model | **Accepted for 0.10.0** |
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
-| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Implemented on both agents with paired conformance evidence; the [hardware run](scan-concurrency-validation.md) blocks the 0.10.0 tag** |
+| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Implemented on both agents with paired conformance evidence, and [hardware-validated](scan-concurrency-validation.md) 2026-08-03** |
 
 ---
 

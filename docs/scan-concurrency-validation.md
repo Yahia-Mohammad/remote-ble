@@ -1,13 +1,21 @@
-# Scan-concurrency hardware validation — the last 0.10.0 gate
+# Scan-concurrency hardware validation — closed 2026-08-03
 
 [← back to index](README.md)
 
-**Purpose.** Close the release blocker recorded in
+**Status: CLOSED.** The release blocker recorded in
+[proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) and as gap 21 in
+[proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) is closed — see
+[Evidence — 2026-08-03 run](#evidence--2026-08-03-run) below (the section further down this
+document). One case, `SC-HW-06` (the Apple
+overflow-advertising wording gate), did not run for lack of a second Apple device; it does not gate
+the blocker and is ready to run whenever one is available.
+
+**Purpose (historical).** This plan closed the release blocker recorded in
 [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) and as gap 21 in
 [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md). The implementation and
-its automated evidence are complete; what remains is real-radio confirmation, on the platform the
-defect actually lives on, plus a decision about one sentence of Apple wording that only hardware can
-settle.
+its automated evidence were complete beforehand; what remained was real-radio confirmation, on the
+platform the defect actually lives on, plus a decision about one sentence of Apple wording that only
+hardware can settle.
 
 **Evidence rule** (same as [pr8-validation-plan.md](pr8-validation-plan.md)): for every case record
 host/device details, agent version **and commit SHA**, **configured mode**, **negotiated mode**, the
@@ -187,15 +195,50 @@ Stated up front so the write-up is not negotiated after the fact.
 
 ---
 
+## Evidence — 2026-08-03 run
+
+Commit `09f2f49` on `codex/scan-concurrency-modes`. Hosts: iPhone 14 (UDID
+`00008110-001C55882611401E` / CoreDevice `FA1C1ED8-2257-5E22-8CF7-8F1302DB37BB`) running the
+`ios-agent` debug build (release XCFramework link still OOMs per gap 11, so this run used the
+established debug-vehicle fallback — production Kotlin/Swift source is identical either way); the
+Mac (`192.168.178.78`) running both the Kotlin JVM agent (`agent/run-agent.sh`) and `agent-rs`
+(`agent-rs/run-agent-rs.sh`), never concurrently; the Pixel 8 running `sample-peripheral`
+(`RBTestPeripheral`, service `a1b2c3d4-0000-4000-8000-000000000001`) as the filtered peripheral
+throughout.
+
+| Case | Configured mode | Negotiated mode | Result |
+|---|---|---|---|
+| `SC-HW-00` | iOS agent default | `MULTIPLEXED` | PASS — 27 devices, e.g. "[LG] webOS TV UN73006LC" (uuid `0000feb9-…`) and 25 others lack `a1b2c3d4-…-0001`, entry `RBTestPeripheral` carries it |
+| `SC-HW-01` | iOS agent default | `MULTIPLEXED` | PASS — new devices still arriving at +27s and +40s of the 60s window |
+| `SC-HW-02` (two-clients) | iOS agent default | `MULTIPLEXED` | PASS 4/4 |
+| `SC-HW-03` (same-client) | iOS agent default | `MULTIPLEXED` | PASS 4/4 |
+| `SC-HW-04` (both topologies) | JVM agent default | `MULTIPLEXED` | PASS 4/4 each |
+| `SC-HW-05` (both topologies) | `agent-rs` default | `MULTIPLEXED` | PASS 4/4 each |
+| `SC-HW-07` | iOS agent default | `MULTIPLEXED` | PASS — same-client run survived a confirmed 5s WiFi drop (`networksetup -setairportpower en0 off`, verified via ping) at ~t+30s; scan completed PASS 4/4 with no error surfaced and no restart |
+| `SC-HW-08` | JVM agent, `REMOTE_BLE_SCAN_CONCURRENCY=single` then `uncontrolled` | `SINGLE` (3/3), `UNCONTROLLED` (3/3) | PASS 6/6 |
+
+**`SC-HW-06` did not run** — needs two Apple devices simultaneously (a foregrounded central and a
+separately backgrounded peripheral); only one iPhone was available. See the write-up in
+[0.10.0-progress-status.md gap 21](proposals/0.10.0-progress-status.md) for what was found and fixed
+while attempting it (`health-peripheral-ios` had no `bluetooth-peripheral` background mode) and what
+remains ready to run. `scanning.md`'s Apple paragraph is unchanged.
+
+Full gates (`./gradlew build conformanceTest`; `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test --locked`) were not re-run in this session — no production code changed here,
+only docs and a sibling repo's `Info.plist`. Re-run them on the exact commit intended for the tag,
+per the exit criteria below.
+
+---
+
 ## Exit criteria
 
-- [ ] `SC-HW-00` and `SC-HW-01` recorded, with a named discriminating device
-- [ ] `SC-HW-02`–`SC-HW-05`: three PASS verdicts each, no `INCONCLUSIVE` on stop or start
-- [ ] `SC-HW-06` run, and its result reflected in [scanning.md](scanning.md)'s Apple paragraph
-- [ ] `SC-HW-07`, `SC-HW-08` recorded
-- [ ] Every case names its commit SHA, configured mode and negotiated mode
-- [ ] Evidence archived; the four status locations above updated in one commit
-- [ ] Full gates re-run on the exact commit intended for the tag
+- [x] `SC-HW-00` and `SC-HW-01` recorded, with a named discriminating device
+- [x] `SC-HW-02`–`SC-HW-05`: three PASS verdicts each (four, in fact), no `INCONCLUSIVE` on stop or start
+- [ ] `SC-HW-06` run, and its result reflected in [scanning.md](scanning.md)'s Apple paragraph — **blocked, needs a second Apple device**
+- [x] `SC-HW-07`, `SC-HW-08` recorded
+- [x] Every case names its commit SHA, configured mode and negotiated mode
+- [x] Evidence archived; the four status locations above updated in one commit
+- [ ] Full gates re-run on the exact commit intended for the tag — **outstanding, do before tagging**
 
 ---
 

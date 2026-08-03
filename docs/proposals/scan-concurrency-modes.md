@@ -2,9 +2,14 @@
 
 [← back to index](../README.md)
 
-- **Status:** Production implementation, deterministic boundaries, and paired WebSocket adapters
-  are complete locally on `codex/scan-concurrency-modes`; Rig B evidence pending — **release
-  blocker for 0.10.0 until hardware validation completes**
+- **Status:** **CLOSED 2026-08-03.** Production implementation, deterministic boundaries, and
+  paired WebSocket adapters are complete on `codex/scan-concurrency-modes`
+  (`09f2f49`); hardware validation ([scan-concurrency-validation.md](../scan-concurrency-validation.md))
+  passed on the iOS agent (iPhone 14), the Kotlin JVM agent, and `agent-rs`, all three in agreement,
+  no `INCONCLUSIVE` verdicts. The release blocker is closed. `SC-HW-06` (the Apple
+  overflow-advertising wording case) did not run — it needs a second Apple device — so
+  [scanning.md](../scanning.md)'s existing Apple wording is unchanged, neither confirmed nor
+  narrowed.
 - **Type:** Agent configuration + capability-gated protocol extension
 - **Fixes:** gap 21 in [0.10.0-progress-status.md](0.10.0-progress-status.md) — concurrent scans
   through one agent interfere on Apple hosts

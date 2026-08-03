@@ -21,6 +21,9 @@ pub mod capabilities {
     pub const CONN_PARAMS: &str = "conn.params";
     pub const SCAN_BATCH: &str = "scan.batch";
     pub const IDENTIFIER_TRANSLATION: &str = "identifier.translate";
+    pub const SCAN_CONCURRENCY_MULTIPLEXED: &str = "scan.concurrency.multiplexed";
+    pub const SCAN_CONCURRENCY_SINGLE: &str = "scan.concurrency.single";
+    pub const SCAN_CONCURRENCY_UNCONTROLLED: &str = "scan.concurrency.uncontrolled";
 }
 
 #[derive(Debug, Clone, PartialEq)]

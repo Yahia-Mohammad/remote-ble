@@ -171,6 +171,10 @@ self-heals once the agent appears, rather than the first attempt being one-shot.
 - **Streams.** Both sides express scans/subscriptions as cold `Flow`s opened on
   collect and torn down on cancel (`channelFlow` + `awaitClose`), so lifecycle is tied
   to collection — no manual bookkeeping leaks.
+- **Scan ownership.** Guaranteed scan modes are agent-lifetime resources keyed by stable client
+  identity plus `scanId`; the connection generation fences delayed stop and grace cleanup. A single
+  physical collector fans out only matching merged advertisements, while independent logical
+  mailboxes and round-robin connection arbitration prevent one scan from monopolising another.
 - **Event flow never backpressures the decode loop.** The session's `events()` shared
   flow is `MutableSharedFlow(extraBufferCapacity = 256, onBufferOverflow = DROP_OLDEST)`.
   Events are emitted from the *same* coroutine that decodes replies, so a suspending
@@ -300,6 +304,19 @@ multi-agent fan-out API. Multiple **clients** may share one agent, with authenti
 peripheral ownership keeping them from colliding on the same hardware (above). Transparent
 multi-agent aggregation, if a concrete deployment needs it, belongs behind one ordinary endpoint in
 the future [AgentProxy](proposals/agent-proxy.md); it remains a non-goal for 0.10.0.
+
+**The claim has a defined scope for scanning, and it did not always.** Peripheral ownership isolates
+*connections*; it says nothing about the radio's single scan, and until 0.10.0 the Kotlin agent gave
+each `scan.start` its own platform scanner — which on Apple, where one `CBCentralManager` has exactly
+one scan, meant two scans silently interfering with no error on either. Concurrent scanning is now a
+configured, handshake-advertised agent property rather than whatever the host happens to do, and what
+it guarantees is stated rather than implied: agent-side filter correctness and lifecycle isolation,
+**not** discovery completeness equal to an isolated Apple scan. See [scanning.md](scanning.md) for the
+consumer-facing contract and
+[proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) for the record. The
+general lesson generalizes past scanning: "multiple clients share one agent" is only true for the
+resources the agent actually arbitrates, so a shared resource without an arbiter is a defect waiting
+to be found on the platform with the tightest constraint.
 
 ## Monorepo: SDK and agent share one repository
 

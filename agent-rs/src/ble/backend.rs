@@ -15,6 +15,14 @@ pub struct StreamKey {
     pub local_id: i64,
 }
 
+/// Reserved backend subscription used by the agent-lifetime scan coordinator.  Backends must send
+/// raw advertisements to this stream: identity merging and logical filtering happen in the
+/// coordinator, where replay and memory bounds are enforced.
+pub const COORDINATOR_SCAN_STREAM: StreamKey = StreamKey {
+    connection: 0,
+    local_id: i64::MIN,
+};
+
 #[async_trait]
 pub trait BleBackend: Send + Sync {
     fn capabilities(&self) -> Vec<String>;

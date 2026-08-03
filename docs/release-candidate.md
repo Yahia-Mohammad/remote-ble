@@ -32,7 +32,15 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    evidence (never store credentials or bearer tokens there).
 3. Complete clean Android and KMP/iOS consumer resolution against the staging/released coordinates.
 4. Complete PR8’s real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.
-5. Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.
+5. ~~Complete the scan-concurrency hardware run~~ — **DONE 2026-08-03**, evidence in
+   [scan-concurrency-validation.md](scan-concurrency-validation.md). Passed on the iOS agent, the
+   Kotlin JVM agent and `agent-rs`, all three in agreement, no `INCONCLUSIVE` verdicts. One case
+   (`SC-HW-06`, the Apple overflow-advertising wording) is still unrun for want of a second Apple
+   device; it does not gate the tag, and [scanning.md](scanning.md)'s Apple paragraph therefore
+   stands unchanged. **The published capability strings and the `SCAN_UNAVAILABLE` `ErrorKind` this
+   introduced are now hardware-backed** — which is what made it a separate blocker from item 4,
+   since Central cannot unpublish them.
+6. Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.
 
 The tag and publication are PR9 actions. This document is an inventory and approval checklist, not
 evidence that publication or hardware validation has happened. Release assets must include a

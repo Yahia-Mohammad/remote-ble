@@ -73,6 +73,9 @@ object Capabilities {
     const val RSSI             = "rssi"          // Op.ReadRssi connected read (backend-level, Android/Apple)
     const val CONN_PARAMS      = "conn.params"   // Op.SetConnParams (backend-level, Android-only); ⊃ conn.priority
     const val SCAN_BATCH       = "scan.batch"    // AgentEvent.ScanResultBatch coalescing (agent-level)
+    const val SCAN_CONCURRENCY_MULTIPLEXED = "scan.concurrency.multiplexed"
+    const val SCAN_CONCURRENCY_SINGLE = "scan.concurrency.single"
+    const val SCAN_CONCURRENCY_UNCONTROLLED = "scan.concurrency.uncontrolled"
     const val RADIO_STATE      = "radio.state"   // AgentEvent.RadioState + ErrorKind.RADIO_OFF (backend-level, Android/Apple)
 }
 ```
@@ -80,6 +83,10 @@ object Capabilities {
 Capabilities are either **backend-level** (depend on the radio engine — the backend declares
 them via `BleBackend.capabilities`) or **agent-level** (radio-independent, implemented by the
 agent itself — `BleAgent.AGENT_CAPABILITIES`). The advertised set is the union of the two.
+
+An agent contributes exactly one `scan.concurrency.*` capability. Its absence is legacy/unknown,
+never implicit `uncontrolled`; `SCAN_UNAVAILABLE` is emitted only after negotiating the `single`
+capability, so old clients continue to receive `AGENT_BUSY`.
 
 Three deliberate properties:
 
@@ -315,6 +322,7 @@ change. This is the *error* half of the retry decision — the *operation* half 
 | `NOT_CONNECTED` | transient | `TRANSPORT_LOST` | transient |
 | | | `INCOMPATIBLE_PROTOCOL` | permanent |
 | | | `RADIO_OFF` | transient |
+| | | `SCAN_UNAVAILABLE` | transient |
 
 `gattStatus` carries the raw BLE-stack status when the radio answered. `TIMEOUT` and
 `TRANSPORT_LOST` are minted **client-side** by the session (the agent never sends
@@ -329,6 +337,16 @@ that is permanent, and reporting it under a transient kind would invite an endle
 against an already-established link are also left alone — the radio going off drops those links,
 and the resulting disconnect is a more precise thing to report than a blanket radio error. See the full taxonomy discussion in
 [design-decisions.md](design-decisions.md#the-error-taxonomy-where-not-just-what).
+
+`SCAN_UNAVAILABLE` answers `ScanStart` when the agent runs in `single` scan-concurrency mode and
+another logical scan already holds the agent-wide slot. It is gated the same way and for the same
+reason as `RADIO_OFF`: sent **only to a client that negotiated `scan.concurrency.single`**, with
+`AGENT_BUSY` — which every v1 client can already decode — used otherwise. `single` is its **only**
+source; a backend or radio failure is not an admission decision and keeps its existing `RADIO_OFF` /
+`GATT_ERROR` mapping, and exceeding `MAX_ACTIVE_SCANS` is an `INVALID_REQUEST` because retrying it
+cannot help. It is transient because the slot really can free up — the incumbent may stop, or its
+grace may expire — which is also the honest admission that `single` makes scanning a contended
+global resource. See [scanning.md](scanning.md) for the consumer-facing handling.
 
 ### Retryability: `transient` × `isIdempotent`
 

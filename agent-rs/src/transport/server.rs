@@ -28,6 +28,9 @@ use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
 };
+use crate::transport::scan_coordinator::{ScanAdmission, ScanArbiter, ScanCoordinator};
+
+pub use crate::transport::scan_coordinator::ScanConcurrencyMode;
 
 /// Outbound frame buffer per connection. Bounds memory for a slow/stalled client.
 const FRAME_CHANNEL_CAP: usize = 512;
@@ -68,6 +71,7 @@ fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_FRAME_BYTES))
 }
 static NEXT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SCAN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// A write retains the completion sender for its position in one device's receive-order chain.
 /// Dropping it (including on cancellation) wakes the successor, so a failed task cannot wedge
@@ -80,6 +84,21 @@ struct WriteReservation {
 }
 
 struct WriteTail {
+    sequence: u64,
+    receiver: oneshot::Receiver<()>,
+}
+
+/// A scan lifecycle turn preserves receive order for one connection-local scan id.  Start/stop
+/// commands still run concurrently with unrelated operations, but cannot publish stale bindings
+/// after a newer same-id command has committed.
+struct ScanReservation {
+    scan_id: i64,
+    sequence: u64,
+    predecessor: Option<oneshot::Receiver<()>>,
+    _completion: oneshot::Sender<()>,
+}
+
+struct ScanTail {
     sequence: u64,
     receiver: oneshot::Receiver<()>,
 }
@@ -123,6 +142,37 @@ fn release_write_tail(
     }
 }
 
+fn reserve_scan(
+    tails: &parking_lot::Mutex<HashMap<i64, ScanTail>>,
+    scan_id: i64,
+) -> ScanReservation {
+    let sequence = NEXT_SCAN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let (completion, receiver) = oneshot::channel();
+    let predecessor = tails
+        .lock()
+        .insert(scan_id, ScanTail { sequence, receiver })
+        .map(|tail| tail.receiver);
+    ScanReservation {
+        scan_id,
+        sequence,
+        predecessor,
+        _completion: completion,
+    }
+}
+
+fn release_scan_tail(
+    tails: &parking_lot::Mutex<HashMap<i64, ScanTail>>,
+    reservation: &ScanReservation,
+) {
+    let mut tails = tails.lock();
+    if tails
+        .get(&reservation.scan_id)
+        .is_some_and(|tail| tail.sequence == reservation.sequence)
+    {
+        tails.remove(&reservation.scan_id);
+    }
+}
+
 struct ExecuteContext<'a> {
     client_id: &'a str,
     backend: &'a Arc<dyn BleBackend>,
@@ -132,6 +182,11 @@ struct ExecuteContext<'a> {
     connection_live: &'a AtomicBool,
     stream_connection: u64,
     streams: &'a StreamReservations,
+    scan_coordinator: &'a ScanCoordinator,
+    scan_mode: ScanConcurrencyMode,
+    scan_arbiter: &'a ScanArbiter,
+    scan_bindings: &'a ScanBindings,
+    negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// Per-connection reservations for streaming BLE work. Backend stream keys are scoped to the
@@ -141,6 +196,32 @@ struct ExecuteContext<'a> {
 struct StreamReservations {
     scans: parking_lot::Mutex<HashSet<StreamKey>>,
     observations: parking_lot::Mutex<HashSet<StreamKey>>,
+}
+
+struct ScanBinding {
+    registration: crate::transport::scan_coordinator::ScanRegistration,
+    handle: crate::transport::scan_coordinator::ScanArbiterHandle,
+}
+
+#[derive(Default)]
+struct ScanBindings {
+    scans: tokio::sync::Mutex<HashMap<i64, ScanBinding>>,
+}
+
+impl ScanBindings {
+    async fn replace(&self, scan_id: i64, binding: ScanBinding) {
+        if let Some(previous) = self.scans.lock().await.insert(scan_id, binding) {
+            previous.handle.close();
+        }
+    }
+    async fn remove(&self, scan_id: i64) -> Option<ScanBinding> {
+        self.scans.lock().await.remove(&scan_id)
+    }
+    async fn clear(&self) -> Vec<ScanBinding> {
+        std::mem::take(&mut *self.scans.lock().await)
+            .into_values()
+            .collect()
+    }
 }
 
 impl StreamReservations {
@@ -198,6 +279,8 @@ pub struct ServerConfig {
     /// Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
     /// connections; when set, handles pass through untranslated.
     pub strict_identifiers: Arc<AtomicBool>,
+    pub scan_concurrency: ScanConcurrencyMode,
+    pub transport_grace: Duration,
 }
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
@@ -237,6 +320,22 @@ fn authenticate(
 
 fn session_key(principal: &str, client_id: &str) -> String {
     format!("{principal}\0{client_id}")
+}
+
+fn supported_capabilities(
+    mut backend_capabilities: Vec<String>,
+    scan_mode: ScanConcurrencyMode,
+) -> Vec<String> {
+    backend_capabilities.retain(|capability| {
+        !matches!(
+            capability.as_str(),
+            crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED
+                | crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE
+                | crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED
+        )
+    });
+    backend_capabilities.push(scan_mode.capability().to_string());
+    backend_capabilities
 }
 
 /// Allows exactly one live WebSocket generation for each authenticated stable client identity.
@@ -360,6 +459,7 @@ pub struct AgentServer {
     live_sessions: Arc<LiveSessionRegistry>,
     failed_auth_limiter: Arc<AuthFailureLimiter>,
     revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+    scan_coordinator: ScanCoordinator,
 }
 
 impl AgentServer {
@@ -368,6 +468,12 @@ impl AgentServer {
         backend: Arc<dyn BleBackend>,
         registry: PeripheralRegistry,
     ) -> Self {
+        let scan_coordinator = ScanCoordinator::new(
+            backend.clone(),
+            config.scan_concurrency,
+            config.transport_grace,
+            MAX_ACTIVE_SCANS,
+        );
         Self {
             config,
             backend,
@@ -375,6 +481,7 @@ impl AgentServer {
             live_sessions: Arc::new(LiveSessionRegistry::default()),
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
             revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            scan_coordinator,
         }
     }
 
@@ -440,8 +547,10 @@ impl AgentServer {
             let live_sessions = self.live_sessions.clone();
             let failed_auth_limiter = self.failed_auth_limiter.clone();
             let revoked_principals = self.revoked_principals.clone();
+            let scan_coordinator = self.scan_coordinator.clone();
+            let scan_mode = self.config.scan_concurrency;
 
-            tokio::spawn(Self::accept_connection(
+            tokio::spawn(Self::accept_connection_with_scan(
                 stream,
                 peer_addr,
                 backend,
@@ -451,6 +560,8 @@ impl AgentServer {
                 live_sessions,
                 failed_auth_limiter,
                 revoked_principals,
+                scan_coordinator,
+                scan_mode,
             ));
         }
     }
@@ -462,7 +573,16 @@ impl AgentServer {
     // The WebSocket handshake callback must return `http::Response` in its Err arm
     // (tungstenite's API), which clippy flags as a large Err variant. The type is
     // fixed by the upstream signature, so the lint doesn't apply here.
+    /// Test-only convenience wrapper: mints a **fresh** [ScanCoordinator] for this one connection.
+    ///
+    /// That deliberately defeats the agent-wide guarantee — two connections accepted through this
+    /// helper do not share a coordinator, so `single` admission, cross-client multiplexing, the
+    /// stable-client cap and grace-held rebinds would all appear to work when they do not. It
+    /// exists for tests about auth, leases and framing, where scans are not the subject. **Any
+    /// test that asserts scan-concurrency behaviour must call [Self::accept_connection_with_scan]
+    /// with one shared coordinator instead.**
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    #[allow(dead_code)]
     async fn accept_connection<S>(
         stream: S,
         peer_addr: SocketAddr,
@@ -473,6 +593,43 @@ impl AgentServer {
         live_sessions: Arc<LiveSessionRegistry>,
         failed_auth_limiter: Arc<AuthFailureLimiter>,
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::accept_connection_with_scan(
+            stream,
+            peer_addr,
+            backend.clone(),
+            registry,
+            credentials,
+            strict,
+            live_sessions,
+            failed_auth_limiter,
+            revoked_principals,
+            ScanCoordinator::new(
+                backend.clone(),
+                ScanConcurrencyMode::Multiplexed,
+                Duration::from_secs(10),
+                MAX_ACTIVE_SCANS,
+            ),
+            ScanConcurrencyMode::Multiplexed,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    async fn accept_connection_with_scan<S>(
+        stream: S,
+        peer_addr: SocketAddr,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        credentials: Arc<HashMap<String, String>>,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        failed_auth_limiter: Arc<AuthFailureLimiter>,
+        revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+        scan_coordinator: ScanCoordinator,
+        scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -556,7 +713,7 @@ impl AgentServer {
                 let connection = NEXT_LOG_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
                 let span = tracing::info_span!("conn", connection, peer = %peer_addr);
                 tracing::info!(parent: &span, "Client connected");
-                Self::handle_connection(
+                Self::handle_connection_with_scan(
                     ws_stream,
                     client_id,
                     backend,
@@ -564,6 +721,8 @@ impl AgentServer {
                     strict,
                     live_sessions,
                     session_generation.expect("accepted session must have a generation"),
+                    scan_coordinator,
+                    scan_mode,
                 )
                 .instrument(span)
                 .await;
@@ -577,6 +736,7 @@ impl AgentServer {
         }
     }
 
+    #[allow(dead_code)]
     async fn handle_connection<S>(
         ws_stream: tokio_tungstenite::WebSocketStream<S>,
         client_id: String,
@@ -585,6 +745,39 @@ impl AgentServer {
         strict: Arc<AtomicBool>,
         live_sessions: Arc<LiveSessionRegistry>,
         session_generation: u64,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::handle_connection_with_scan(
+            ws_stream,
+            client_id,
+            backend.clone(),
+            registry,
+            strict,
+            live_sessions,
+            session_generation,
+            ScanCoordinator::new(
+                backend.clone(),
+                ScanConcurrencyMode::Multiplexed,
+                Duration::from_secs(10),
+                MAX_ACTIVE_SCANS,
+            ),
+            ScanConcurrencyMode::Multiplexed,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_connection_with_scan<S>(
+        ws_stream: tokio_tungstenite::WebSocketStream<S>,
+        client_id: String,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        session_generation: u64,
+        scan_coordinator: ScanCoordinator,
+        scan_mode: ScanConcurrencyMode,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -604,9 +797,11 @@ impl AgentServer {
         let mut command_tasks = JoinSet::new();
         let stream_connection = NEXT_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed);
         let streams = Arc::new(StreamReservations::default());
+        let scan_bindings = Arc::new(ScanBindings::default());
         // Reserved in the sequential receive loop, rather than inside tasks, to preserve command
         // receive order for writes to the same physical device while other work stays concurrent.
         let write_tails = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let scan_tails = Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
         // Liveness: a client that vanishes without a TCP FIN (Wi-Fi drop, NAT timeout, sleep)
         // would otherwise hold its slot/lease until the OS keepalive fires (minutes). We ping
@@ -672,6 +867,7 @@ impl AgentServer {
         });
 
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAP);
+        let scan_arbiter = ScanArbiter::new(event_tx.clone());
         let frame_tx_event = frame_tx.clone();
         let translator_event = translator.clone();
         let event_task = tokio::spawn(async move {
@@ -691,6 +887,8 @@ impl AgentServer {
 
         // Per-connection handshake state — first hello wins; see [Negotiation].
         let mut negotiation = Negotiation::new();
+        let negotiated_capabilities =
+            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
         let mut closing_for_protocol = false;
 
         loop {
@@ -772,17 +970,18 @@ impl AgentServer {
                                         identifier_format,
                                     },
                                     &translator,
-                                    || backend.capabilities(),
+                                    || supported_capabilities(backend.capabilities(), scan_mode),
                                     || registry.held_by(&client_id),
                                 );
                                 let reply_frame = Frame::ServerHello {
                                     version,
-                                    capabilities: caps,
+                                    capabilities: caps.clone(),
                                     agent_info: Some(
                                         concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"))
                                             .into(),
                                     ),
                                 };
+                                *negotiated_capabilities.lock() = caps.clone();
                                 let _ = frame_tx.send(Outbound::Frame(reply_frame)).await;
                             }
                             Frame::Command { cid, op } => {
@@ -807,7 +1006,12 @@ impl AgentServer {
                                 let translator = translator.clone();
                                 let connection_live = connection_live.clone();
                                 let write_tails = write_tails.clone();
+                                let scan_tails = scan_tails.clone();
                                 let streams = streams.clone();
+                                let scan_coordinator = scan_coordinator.clone();
+                                let scan_arbiter = scan_arbiter.clone();
+                                let scan_bindings = scan_bindings.clone();
+                                let negotiated_capabilities = negotiated_capabilities.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
                                     Op::Write { device, .. } => {
@@ -815,11 +1019,24 @@ impl AgentServer {
                                     }
                                     _ => None,
                                 };
+                                let scan_reservation = match &op {
+                                    Op::ScanStart { scan_id, .. } | Op::ScanStop { scan_id } => {
+                                        Some(reserve_scan(&scan_tails, *scan_id))
+                                    }
+                                    _ => None,
+                                };
                                 command_tasks.spawn(
                                     async move {
                                         let _permit = permit;
                                         let mut write_reservation = write_reservation;
+                                        let mut scan_reservation = scan_reservation;
                                         if let Some(reservation) = &mut write_reservation
+                                            && let Some(predecessor) =
+                                                reservation.predecessor.take()
+                                        {
+                                            let _ = predecessor.await;
+                                        }
+                                        if let Some(reservation) = &mut scan_reservation
                                             && let Some(predecessor) =
                                                 reservation.predecessor.take()
                                         {
@@ -836,6 +1053,11 @@ impl AgentServer {
                                                 connection_live: &connection_live,
                                                 stream_connection,
                                                 streams: &streams,
+                                                scan_coordinator: &scan_coordinator,
+                                                scan_mode,
+                                                scan_arbiter: &scan_arbiter,
+                                                scan_bindings: &scan_bindings,
+                                                negotiated_capabilities: &negotiated_capabilities,
                                             },
                                         )
                                         .await;
@@ -844,7 +1066,11 @@ impl AgentServer {
                                         if let Some(reservation) = &write_reservation {
                                             release_write_tail(&write_tails, reservation);
                                         }
+                                        if let Some(reservation) = &scan_reservation {
+                                            release_scan_tail(&scan_tails, reservation);
+                                        }
                                         drop(write_reservation);
+                                        drop(scan_reservation);
                                         let _ = frame_tx
                                             .send(Outbound::Frame(Frame::Reply { cid, result }))
                                             .await;
@@ -880,6 +1106,11 @@ impl AgentServer {
             }
         }
 
+        scan_coordinator.detach_generation(stream_connection).await;
+        for binding in scan_bindings.clear().await {
+            binding.handle.close();
+        }
+        scan_arbiter.close();
         if let Err(e) = backend.stop_connection_streams(stream_connection).await {
             tracing::warn!("failed to stop connection-owned BLE streams: {}", e);
         }
@@ -914,6 +1145,11 @@ impl AgentServer {
             connection_live,
             stream_connection,
             streams,
+            scan_coordinator,
+            scan_mode,
+            scan_arbiter,
+            scan_bindings,
+            negotiated_capabilities,
         } = context;
         match op {
             Op::ScanStart { filters, .. } if filters.len() > MAX_SCAN_FILTERS => {
@@ -946,6 +1182,65 @@ impl AgentServer {
                     )),
                 ))
             }
+            Op::ScanStart { scan_id, filters }
+                if scan_mode != ScanConcurrencyMode::Uncontrolled =>
+            {
+                let (delivery, handle) = scan_arbiter.register(scan_id);
+                let admission = match scan_coordinator
+                    .start_or_replace(
+                        client_id.to_string(),
+                        scan_id,
+                        stream_connection,
+                        filters,
+                        delivery,
+                    )
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        handle.close();
+                        return OpResult::err(error);
+                    }
+                };
+                match admission {
+                    ScanAdmission::Accepted(registration) => {
+                        scan_bindings
+                            .replace(
+                                scan_id,
+                                ScanBinding {
+                                    registration,
+                                    handle,
+                                },
+                            )
+                            .await;
+                        OpResult::ok(None)
+                    }
+                    ScanAdmission::LimitExceeded => {
+                        handle.close();
+                        OpResult::err(AgentError::new(
+                            ErrorKind::InvalidRequest,
+                            Some(format!(
+                                "at most {MAX_ACTIVE_SCANS} active scans are allowed"
+                            )),
+                        ))
+                    }
+                    ScanAdmission::SingleOccupied => {
+                        handle.close();
+                        let kind = if negotiated_capabilities
+                            .lock()
+                            .contains(crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE)
+                        {
+                            ErrorKind::ScanUnavailable
+                        } else {
+                            ErrorKind::AgentBusy
+                        };
+                        OpResult::err(AgentError::new(
+                            kind,
+                            Some("the agent-wide scan slot is held".into()),
+                        ))
+                    }
+                }
+            }
             Op::ScanStart { scan_id, filters } => {
                 let stream = StreamKey {
                     connection: stream_connection,
@@ -960,6 +1255,13 @@ impl AgentServer {
                     streams.release_scan(stream);
                 }
                 OpResult::from_unit(result)
+            }
+            Op::ScanStop { scan_id } if scan_mode != ScanConcurrencyMode::Uncontrolled => {
+                if let Some(binding) = scan_bindings.remove(scan_id).await {
+                    scan_coordinator.stop(&binding.registration).await;
+                    binding.handle.close();
+                }
+                OpResult::ok(None)
             }
             Op::ScanStop { scan_id } => {
                 let stream = StreamKey {
@@ -1353,7 +1655,7 @@ mod tests {
             .expect("command must send");
     }
 
-    async fn recv_reply<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> OpResult
+    async fn recv_frame<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> Frame
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -1361,15 +1663,977 @@ mod tests {
             let msg = ws
                 .next()
                 .await
-                .expect("stream ended before a reply arrived")
+                .expect("stream ended before a protocol frame arrived")
                 .expect("websocket read must not error");
             if msg.is_binary() {
-                match decode_cbor(&msg.into_data()).expect("reply must decode") {
-                    Frame::Reply { result, .. } => return result,
-                    _ => continue,
+                return decode_cbor(&msg.into_data()).expect("protocol frame must decode");
+            }
+        }
+    }
+
+    async fn recv_reply<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> OpResult
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            if let Frame::Reply { result, .. } = recv_frame(ws).await {
+                return result;
+            }
+        }
+    }
+
+    struct ScanWsClient {
+        ws: tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        accept_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl ScanWsClient {
+        async fn close(self) {
+            drop(self.ws);
+            let _ = self.accept_task.await;
+        }
+    }
+
+    struct ScanWsHarness {
+        fake: Arc<FakeBackend>,
+        backend: Arc<dyn BleBackend>,
+        registry: PeripheralRegistry,
+        credentials: Arc<HashMap<String, String>>,
+        strict: Arc<AtomicBool>,
+        live_sessions: Arc<LiveSessionRegistry>,
+        failed_auth_limiter: Arc<AuthFailureLimiter>,
+        revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+        scan_coordinator: ScanCoordinator,
+        scan_mode: ScanConcurrencyMode,
+    }
+
+    impl ScanWsHarness {
+        fn new(scan_mode: ScanConcurrencyMode, transport_grace: Duration) -> Self {
+            let fake = Arc::new(FakeBackend::default());
+            let backend: Arc<dyn BleBackend> = fake.clone();
+            let registry = PeripheralRegistry::new(LeaseConfig::default());
+            let scan_coordinator = ScanCoordinator::new(
+                backend.clone(),
+                scan_mode,
+                transport_grace,
+                MAX_ACTIVE_SCANS,
+            );
+            Self {
+                fake,
+                backend,
+                registry,
+                credentials: Arc::new(HashMap::new()),
+                strict: Arc::new(AtomicBool::new(false)),
+                live_sessions: Arc::new(LiveSessionRegistry::default()),
+                failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
+                revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+                scan_coordinator,
+                scan_mode,
+            }
+        }
+
+        async fn client(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+        ) -> ScanWsClient {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+            let (server_io, client_io) = tokio::io::duplex(65_536);
+            let accept_task = tokio::spawn(AgentServer::accept_connection_with_scan(
+                server_io,
+                "127.0.0.1:1".parse().unwrap(),
+                self.backend.clone(),
+                self.registry.clone(),
+                self.credentials.clone(),
+                self.strict.clone(),
+                self.live_sessions.clone(),
+                self.failed_auth_limiter.clone(),
+                self.revoked_principals.clone(),
+                self.scan_coordinator.clone(),
+                self.scan_mode,
+            ));
+            let mut request = "ws://localhost/agent".into_client_request().unwrap();
+            request.headers_mut().insert(
+                "X-RemoteBle-Client",
+                client_id.parse().expect("client id header must be valid"),
+            );
+            let (mut ws, _) = tokio_tungstenite::client_async(request, client_io)
+                .await
+                .expect("scan client must complete the WebSocket handshake");
+            let offered = capabilities.iter().map(|cap| (*cap).to_string()).collect();
+            ws.send(Message::Binary(
+                encode_cbor(&Frame::ClientHello {
+                    min_version: 1,
+                    max_version: 1,
+                    capabilities: offered,
+                    identifier_format: None,
+                })
+                .expect("hello must encode")
+                .into(),
+            ))
+            .await
+            .expect("hello must send");
+            match recv_frame(&mut ws).await {
+                Frame::ServerHello { capabilities, .. } => {
+                    let expected = expected_server_capabilities
+                        .iter()
+                        .map(|cap| (*cap).to_string())
+                        .collect();
+                    assert_eq!(capabilities, expected);
+                }
+                other => panic!("expected server hello, got {other:?}"),
+            }
+            ScanWsClient { ws, accept_task }
+        }
+
+        async fn wait_for_scan_start(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.fake.scan_filters.lock().len() >= count {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("coordinator must start a physical scan");
+        }
+    }
+
+    async fn recv_scan_result(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        scan_id: i64,
+    ) -> crate::protocol::events::AdvertisementDto {
+        loop {
+            if let Frame::Event { event } = recv_frame(ws).await {
+                match event {
+                    AgentEvent::ScanResult {
+                        scan_id: event_scan_id,
+                        advertisement,
+                    } if event_scan_id == scan_id => return advertisement,
+                    AgentEvent::ScanResultBatch {
+                        scan_id: event_scan_id,
+                        mut advertisements,
+                    } if event_scan_id == scan_id => {
+                        return advertisements
+                            .drain(..)
+                            .next()
+                            .expect("scan batch must not be empty");
+                    }
+                    _ => {}
                 }
             }
         }
+    }
+
+    fn test_advertisement(
+        device: &str,
+        service: Option<&str>,
+        name: Option<&str>,
+        rssi: i32,
+    ) -> crate::protocol::events::AdvertisementDto {
+        crate::protocol::events::AdvertisementDto {
+            device: DeviceHandle {
+                value: device.to_string(),
+            },
+            name: name.map(str::to_string),
+            rssi,
+            service_uuids: service.into_iter().map(str::to_string).collect(),
+            manufacturer_data: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_conc_01_different_filtered_scans_receive_only_their_own_matches() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        let mut second = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+
+        send_command(
+            &mut first.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180d".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        send_command(
+            &mut second.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180f".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut second.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        harness
+            .fake
+            .emit_scan(test_advertisement("hr", Some("180d"), None, -50))
+            .await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("battery", Some("180f"), None, -60))
+            .await;
+        assert_eq!(recv_scan_result(&mut first.ws, 1).await.device.value, "hr");
+        assert_eq!(
+            recv_scan_result(&mut second.ws, 1).await.device.value,
+            "battery"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_scan_result(&mut first.ws, 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_scan_result(&mut second.ws, 1),
+            )
+            .await
+            .is_err()
+        );
+        first.close().await;
+        second.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_02_stopping_one_scan_leaves_the_survivor_on_the_same_physical_scan() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        let mut second = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        for (ws, cid, service) in [(&mut first.ws, 1, "180d"), (&mut second.ws, 1, "180f")] {
+            send_command(
+                ws,
+                cid,
+                Op::ScanStart {
+                    scan_id: 1,
+                    filters: vec![ScanFilter {
+                        name: None,
+                        service: Some(service.into()),
+                    }],
+                },
+            )
+            .await;
+            assert!(matches!(recv_reply(ws).await, OpResult::Ok { .. }));
+        }
+        harness.wait_for_scan_start(1).await;
+        let starts_before_stop = harness.fake.scan_filters.lock().len();
+        send_command(&mut first.ws, 2, Op::ScanStop { scan_id: 1 }).await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        harness
+            .fake
+            .emit_scan(test_advertisement("battery", Some("180f"), None, -60))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut second.ws, 1).await.device.value,
+            "battery"
+        );
+        assert_eq!(harness.fake.scan_filters.lock().len(), starts_before_stop);
+        first.close().await;
+        second.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_03_late_join_receives_replay_within_the_window() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180d".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement(
+                "hr",
+                Some("180d"),
+                Some("Heart Rate"),
+                -50,
+            ))
+            .await;
+        assert_eq!(recv_scan_result(&mut first.ws, 1).await.device.value, "hr");
+
+        let mut late = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        send_command(
+            &mut late.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180d".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut late.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert_eq!(recv_scan_result(&mut late.ws, 1).await.device.value, "hr");
+        first.close().await;
+        late.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_04_sparse_identity_is_merged_before_logical_matching() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180d".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement(
+                "hr",
+                Some("180d"),
+                Some("Heart Rate"),
+                -50,
+            ))
+            .await;
+        let _ = recv_scan_result(&mut client.ws, 1).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("hr", None, None, -41))
+            .await;
+        let sparse = recv_scan_result(&mut client.ws, 1).await;
+        assert_eq!(sparse.name.as_deref(), Some("Heart Rate"));
+        assert_eq!(sparse.service_uuids, vec!["180d"]);
+        assert_eq!(sparse.rssi, -41);
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_05_single_mode_refuses_a_different_key_without_disturbing_incumbent() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
+        let mut incumbent = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        let mut contender = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut incumbent.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut incumbent.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        send_command(
+            &mut contender.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut contender.ws).await,
+            OpResult::Err { error } if error.kind == ErrorKind::ScanUnavailable
+        ));
+        harness
+            .fake
+            .emit_scan(test_advertisement("survivor", None, Some("survivor"), -50))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut incumbent.ws, 1).await.device.value,
+            "survivor"
+        );
+        incumbent.close().await;
+        contender.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_06_reissuing_the_incumbent_key_replaces_it_atomically() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        for (cid, service) in [(1, "180d"), (2, "180f")] {
+            send_command(
+                &mut client.ws,
+                cid,
+                Op::ScanStart {
+                    scan_id: 1,
+                    filters: vec![ScanFilter {
+                        name: None,
+                        service: Some(service.into()),
+                    }],
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+        }
+        harness.wait_for_scan_start(2).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("battery", Some("180f"), None, -60))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut client.ws, 1).await.device.value,
+            "battery"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_scan_result(&mut client.ws, 1),
+            )
+            .await
+            .is_err()
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn pipelined_same_id_scan_lifecycle_commands_follow_receive_order() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180d".into()),
+                }],
+            },
+        )
+        .await;
+        send_command(
+            &mut client.ws,
+            2,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![ScanFilter {
+                    name: None,
+                    service: Some("180f".into()),
+                }],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("hr", Some("180d"), None, -50))
+            .await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("battery", Some("180f"), None, -60))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut client.ws, 1).await.device.value,
+            "battery"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_scan_result(&mut client.ws, 1),
+            )
+            .await
+            .is_err()
+        );
+        send_command(&mut client.ws, 3, Op::ScanStop { scan_id: 1 }).await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness
+            .fake
+            .emit_scan(test_advertisement("battery-2", Some("180f"), None, -60))
+            .await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_scan_result(&mut client.ws, 1),
+            )
+            .await
+            .is_err()
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_07_server_advertises_exactly_its_configured_mode() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
+        let client = harness
+            .client(
+                "scan-a",
+                &[
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED,
+                ],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_08_legacy_client_gets_legacy_agent_busy_on_contention() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
+        let mut incumbent = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        let mut legacy = harness.client("scan-b", &[], &[]).await;
+        send_command(
+            &mut incumbent.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut incumbent.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        send_command(
+            &mut legacy.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut legacy.ws).await,
+            OpResult::Err { error } if error.kind == ErrorKind::AgentBusy
+        ));
+        incumbent.close().await;
+        legacy.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_09_dropped_connection_enters_grace_and_other_clients_survive() {
+        let harness =
+            ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_millis(100));
+        let mut dropped = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        let mut survivor = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        for ws in [&mut dropped.ws, &mut survivor.ws] {
+            send_command(
+                ws,
+                1,
+                Op::ScanStart {
+                    scan_id: 1,
+                    filters: vec![],
+                },
+            )
+            .await;
+            assert!(matches!(recv_reply(ws).await, OpResult::Ok { .. }));
+        }
+        harness.wait_for_scan_start(1).await;
+        dropped.close().await;
+        harness
+            .fake
+            .emit_scan(test_advertisement("survivor", None, Some("survivor"), -50))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut survivor.ws, 1).await.device.value,
+            "survivor"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let mut resumed = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED],
+            )
+            .await;
+        send_command(
+            &mut resumed.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut resumed.ws).await,
+            OpResult::Ok { .. }
+        ));
+        survivor.close().await;
+        resumed.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_10_reconnect_within_grace_rebinds_on_the_first_attempt() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        first.close().await;
+
+        let mut rebound = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut rebound.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut rebound.ws).await,
+            OpResult::Ok { .. }
+        ));
+        rebound.close().await;
+    }
+
+    #[tokio::test]
+    async fn grace_expiry_releases_the_single_slot_for_a_different_key() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_millis(100));
+        let mut owner = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut owner.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut owner.ws).await,
+            OpResult::Ok { .. }
+        ));
+        owner.close().await;
+
+        let mut contender = harness
+            .client(
+                "scan-b",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut contender.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 2,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut contender.ws).await,
+            OpResult::Err { error } if error.kind == ErrorKind::ScanUnavailable
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        send_command(
+            &mut contender.ws,
+            2,
+            Op::ScanStart {
+                scan_id: 2,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut contender.ws).await,
+            OpResult::Ok { .. }
+        ));
+        contender.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_conc_11_stale_grace_cleanup_cannot_remove_a_rebound_scan() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_millis(100));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+        first.close().await;
+
+        let mut rebound = harness
+            .client(
+                "scan-a",
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
+            )
+            .await;
+        send_command(
+            &mut rebound.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut rebound.ws).await,
+            OpResult::Ok { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        harness
+            .fake
+            .emit_scan(test_advertisement(
+                "still-alive",
+                None,
+                Some("still-alive"),
+                -50,
+            ))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut rebound.ws, 1).await.device.value,
+            "still-alive"
+        );
+        rebound.close().await;
+    }
+
+    #[tokio::test]
+    async fn uncontrolled_mode_uses_the_legacy_backend_path_for_both_scans() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Uncontrolled, Duration::from_secs(1));
+        let mut first = harness
+            .client(
+                "scan-a",
+                &[
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED,
+                ],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED],
+            )
+            .await;
+        let mut second = harness
+            .client(
+                "scan-b",
+                &[
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE,
+                    crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED,
+                ],
+                &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED],
+            )
+            .await;
+        for ws in [&mut first.ws, &mut second.ws] {
+            send_command(
+                ws,
+                1,
+                Op::ScanStart {
+                    scan_id: 1,
+                    filters: vec![],
+                },
+            )
+            .await;
+            assert!(matches!(recv_reply(ws).await, OpResult::Ok { .. }));
+        }
+        harness.wait_for_scan_start(2).await;
+        harness
+            .fake
+            .emit_scan_to_all(test_advertisement("legacy", None, Some("legacy"), -50))
+            .await;
+        assert_eq!(
+            recv_scan_result(&mut first.ws, 1).await.device.value,
+            "legacy"
+        );
+        assert_eq!(
+            recv_scan_result(&mut second.ws, 1).await.device.value,
+            "legacy"
+        );
+        first.close().await;
+        second.close().await;
     }
 
     /// AUTH-PRINCIPAL-01: two credentials reusing one stable client ID must not let a lease or
@@ -1498,6 +2762,8 @@ mod tests {
                 addr: "127.0.0.1:0".parse().unwrap(),
                 credentials,
                 strict_identifiers: Arc::new(AtomicBool::new(false)),
+                scan_concurrency: ScanConcurrencyMode::Multiplexed,
+                transport_grace: Duration::from_secs(10),
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -1606,6 +2872,8 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend {
         scans: Mutex<Vec<StreamKey>>,
+        scan_filters: Mutex<Vec<Vec<ScanFilter>>>,
+        scan_senders: Mutex<Vec<mpsc::Sender<AgentEvent>>>,
         observations: Mutex<Vec<StreamKey>>,
         stopped_observations: Mutex<Vec<StreamKey>>,
         reads: AtomicUsize,
@@ -1656,10 +2924,12 @@ mod tests {
         async fn start_scan(
             &self,
             stream: StreamKey,
-            _filters: Vec<ScanFilter>,
-            _tx: mpsc::Sender<AgentEvent>,
+            filters: Vec<ScanFilter>,
+            tx: mpsc::Sender<AgentEvent>,
         ) -> Result<(), AgentError> {
             self.scans.lock().push(stream);
+            self.scan_filters.lock().push(filters);
+            self.scan_senders.lock().push(tx);
             Ok(())
         }
         async fn stop_scan(&self, _stream: StreamKey) -> Result<(), AgentError> {
@@ -1723,6 +2993,32 @@ mod tests {
         }
     }
 
+    impl FakeBackend {
+        async fn emit_scan(&self, advertisement: crate::protocol::events::AdvertisementDto) {
+            let sender = self.scan_senders.lock().last().cloned();
+            if let Some(sender) = sender {
+                let _ = sender
+                    .send(AgentEvent::ScanResult {
+                        scan_id: 1,
+                        advertisement,
+                    })
+                    .await;
+            }
+        }
+
+        async fn emit_scan_to_all(&self, advertisement: crate::protocol::events::AdvertisementDto) {
+            let senders = self.scan_senders.lock().clone();
+            for sender in senders {
+                let _ = sender
+                    .send(AgentEvent::ScanResult {
+                        scan_id: 1,
+                        advertisement: advertisement.clone(),
+                    })
+                    .await;
+            }
+        }
+    }
+
     fn context<'a>(
         client_id: &'a str,
         backend: &'a Arc<dyn BleBackend>,
@@ -1752,6 +3048,17 @@ mod tests {
         ))));
         let (event_tx, _) = mpsc::channel(EVENT_CHANNEL_CAP);
         let streams = Box::leak(Box::new(StreamReservations::default()));
+        let scan_coordinator = Box::leak(Box::new(ScanCoordinator::new(
+            backend.clone(),
+            ScanConcurrencyMode::Multiplexed,
+            Duration::from_secs(10),
+            MAX_ACTIVE_SCANS,
+        )));
+        let scan_arbiter = Box::leak(Box::new(ScanArbiter::new(event_tx.clone())));
+        let scan_bindings = Box::leak(Box::new(ScanBindings::default()));
+        let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
+            std::collections::BTreeSet::new(),
+        )));
         ExecuteContext {
             client_id,
             backend,
@@ -1761,6 +3068,11 @@ mod tests {
             connection_live: live,
             stream_connection: generation,
             streams,
+            scan_coordinator,
+            scan_mode: ScanConcurrencyMode::Multiplexed,
+            scan_arbiter,
+            scan_bindings,
+            negotiated_capabilities,
         }
     }
 
@@ -1908,7 +3220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_local_scan_id_is_isolated_by_connection_generation() {
+    async fn guaranteed_scans_use_the_coordinator_physical_stream() {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
@@ -1927,13 +3239,32 @@ mod tests {
             *fake.scans.lock(),
             vec![
                 StreamKey {
-                    connection: 1,
-                    local_id: 1
+                    connection: 0,
+                    local_id: i64::MIN
                 },
                 StreamKey {
-                    connection: 2,
-                    local_id: 1
+                    connection: 0,
+                    local_id: i64::MIN
                 }
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_mode_is_the_only_advertised_scan_concurrency_capability() {
+        let supported = supported_capabilities(
+            vec![
+                crate::protocol::frame::capabilities::SCAN_CONCURRENCY_MULTIPLEXED.into(),
+                crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE.into(),
+                "other".into(),
+            ],
+            ScanConcurrencyMode::Uncontrolled,
+        );
+        assert_eq!(
+            supported,
+            vec![
+                "other".to_string(),
+                crate::protocol::frame::capabilities::SCAN_CONCURRENCY_UNCONTROLLED.into(),
             ]
         );
     }

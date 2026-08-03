@@ -127,7 +127,7 @@ that last part is reconcile-on-reconnect replaying the subscription through `wss
 
 ## Recorded evidence
 
-First full run — 2026-07-27, `c7c6680`, macOS 26.5.2 / arm64, Caddy 2.11.4, JDK 17.0.14, agent
+First full run — 2026-07-27, `7e044af`, macOS 26.5.2 / arm64, Caddy 2.11.4, JDK 17.0.14, agent
 0.10.0 against the canonical `agent/simulation/sim-hrm.json`.
 
 | Case | Result | Evidence |

@@ -24,9 +24,18 @@ docker run --rm --name remoteble-agent -p 8080:8080 \
 
 Do not add `--privileged`, host networking, HCI mounts, or a credential-bearing health check. The
 image’s `--version` and fail-closed startup checks are covered by `container-smoke.sh`; D-Bus access,
-read-only filesystem operation, SIGTERM, and real BLE scan/connect/read must still be recorded on
-Ubuntu amd64 and Pi arm64 in the PR8 hardware-validation bundle. The authoritative support contract
-is [the container proposal](proposals/rust-agent-container.md).
+read-only filesystem operation, SIGTERM, and real BLE scan/connect/read must still be recorded on a
+Linux host in the PR8 hardware-validation bundle (Rig D — **not yet run**).
+
+> **The host list changed and this line used to overstate it.** The original criteria named Ubuntu
+> amd64 *and* Raspberry Pi arm64. The accepted Rig D scope is now **option 1**: validate the one
+> available amd64 Linux host (Fedora-based Nobara), then relax the criteria to "one amd64 Linux host
+> validated; AppArmor and arm64 unvalidated" and label the image accordingly. Ubuntu was named
+> *because of* AppArmor, and Fedora ships SELinux — so that run yields a third data point rather
+> than a substitute. See gap 2 in
+> [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md).
+
+The authoritative support contract is [the container proposal](proposals/rust-agent-container.md).
 
 On every PR and `main`, [Rust agent container CI](../.github/workflows/agent-container.yml) builds
 the amd64 image and runs that smoke script. A version tag (or explicit tag dispatch) first passes

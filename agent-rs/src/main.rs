@@ -15,7 +15,7 @@ use ble::backend::BleBackend;
 use ble::btleplug_impl::BtleplugBackend;
 use protocol::op::DeviceHandle;
 use registry::peripheral_lease::{LeaseConfig, PeripheralRegistry};
-use transport::server::{AgentServer, ServerConfig};
+use transport::server::{AgentServer, ScanConcurrencyMode, ServerConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Native cross-platform RemoteBLE Agent", long_about = None)]
@@ -84,6 +84,11 @@ struct Args {
         env = "REMOTE_BLE_WRITE_FAIL_FAST"
     )]
     write_fail_fast: bool,
+
+    /// Scan isolation policy: one physical multiplexed scan (default), a global single slot, or
+    /// the backend's independent legacy paths.
+    #[arg(long, value_enum, default_value_t = ScanConcurrencyMode::Multiplexed, env = "REMOTE_BLE_SCAN_CONCURRENCY")]
+    scan_concurrency: ScanConcurrencyMode,
 }
 
 #[tokio::main]
@@ -128,6 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Degraded-write fail-fast: {} (REMOTE_BLE_WRITE_FAIL_FAST)",
         if args.write_fail_fast { "on" } else { "off" }
     );
+    tracing::info!(
+        "Scan concurrency: {:?} (REMOTE_BLE_SCAN_CONCURRENCY)",
+        args.scan_concurrency
+    );
 
     let registry = PeripheralRegistry::new(lease_config);
     let ble_backend = Arc::new(
@@ -159,6 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         addr,
         credentials: Arc::new(credentials),
         strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
+        scan_concurrency: args.scan_concurrency,
+        transport_grace: Duration::from_millis(args.transport_grace_ms),
     };
 
     let backend_for_shutdown = ble_backend.clone();

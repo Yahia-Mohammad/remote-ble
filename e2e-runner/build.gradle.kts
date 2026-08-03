@@ -50,6 +50,21 @@ tasks.register<JavaExec>("scanRun") {
     mainClass.set("dev.warsha.remoteble.e2e.ScanMainKt")
 }
 
+// Concurrent-scan probe (ScanConcurrencyMain.kt): two staggered scans through one agent — a broad
+// scan A for the whole window and a service-filtered scan B inside it — with separate verdicts on
+// gap 21's stop and start directions plus B's filter correctness. Run `scanRun` for the same window
+// first: without that baseline, A going quiet is unattributable. See docs/scan-concurrency-validation.md.
+//   ./gradlew :e2e-runner:scanConcurrencyRun --args "ws://192.168.178.85:8080/agent a1b2c3d4-0000-4000-8000-000000000001"
+//   ./gradlew :e2e-runner:scanConcurrencyRun --args "ws://192.168.178.85:8080/agent <svc> same-client 60 15 10"
+tasks.register<JavaExec>("scanConcurrencyRun") {
+    group = "application"
+    description = "Run two staggered concurrent scans against a live agent and grade both hazard directions."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.ScanConcurrencyMainKt")
+}
+
 // Connected-RSSI (F2) live check (RssiMain.kt): connect to a peripheral and print the connected
 // link RSSI once a second. Needs an agent with the `rssi` capability (Kable Android/Apple backend);
 // the JVM/btleplug + agent-rs backends don't advertise it, so rssi() there fails fast.

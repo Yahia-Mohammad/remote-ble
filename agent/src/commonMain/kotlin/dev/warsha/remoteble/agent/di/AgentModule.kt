@@ -10,6 +10,8 @@ import dev.warsha.remoteble.agent.ConnectionWatcher
 import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.EngineBleBackend
 import dev.warsha.remoteble.agent.PeripheralRegistry
+import dev.warsha.remoteble.agent.ScanConcurrencyMode
+import dev.warsha.remoteble.agent.ScanCoordinator
 import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.agent.StrictModeState
@@ -42,6 +44,8 @@ data class AgentConfig(
     val leaseGrace: Duration = 10.seconds,
     val transportGrace: Duration = 10.seconds,
     val livenessProbeInterval: Duration = 15.seconds,
+    /** Scan isolation policy advertised for this process lifetime. */
+    val scanConcurrency: ScanConcurrencyMode = ScanConcurrencyMode.MULTIPLEXED,
     /**
      * Whether a device whose writes have stopped completing rejects further writes immediately
      * instead of waiting out `EngineBleBackend.GATT_OP_TIMEOUT` on each one. Same error either way
@@ -103,6 +107,14 @@ fun agentModule(config: AgentConfig): Module = module {
         config.simulationProfile?.let { SimulatedBleBackend(it, scope) }
             ?: EngineBleBackend(scope = scope, failFastOnDegradedWrites = config.failFastOnDegradedWrites)
     }
+    single {
+        ScanCoordinator(
+            backend = get(),
+            scope = get(qualifier = org.koin.core.qualifier.named("agent")),
+            mode = config.scanConcurrency,
+            transportGrace = config.transportGrace,
+        )
+    }
     single<AgentBackend> {
         BleAgentBackend(
             backend = get(),
@@ -112,6 +124,7 @@ fun agentModule(config: AgentConfig): Module = module {
             observer = get<AgentMonitor>(),
             agentInfo = "RemoteBLE Agent 0.10.0 (kable/${platformName()})",
             strictMode = get(),
+            scanCoordinator = get(),
         )
     }
     single {

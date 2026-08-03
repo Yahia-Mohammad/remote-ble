@@ -72,6 +72,11 @@ public fun remoteBleClientModule(config: RemoteBleClientConfig): Module = module
     single<AgentSession> {
         DefaultAgentSession(
             get(), get(), get(),
+            // Opt-in features this wiring supports. `identifier.translate` and the
+            // `scan.concurrency.*` trio are deliberately NOT listed: every session offers those
+            // unconditionally (see `ALWAYS_OFFERED_CAPABILITIES`), so listing them here again
+            // would suggest this module is what makes them negotiated — the assumption that left
+            // manually constructed sessions unable to read an agent's scan-concurrency mode.
             clientCapabilities = setOf(
                 Capabilities.DESCRIPTORS,
                 Capabilities.PAIRING,

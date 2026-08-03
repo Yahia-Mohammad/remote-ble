@@ -7,6 +7,7 @@ import dev.warsha.remoteble.client.RemoteAdvertisement
 import dev.warsha.remoteble.client.RemoteScanner
 import dev.warsha.remoteble.client.TransportState
 import dev.warsha.remoteble.client.WebSocketAgentTransport
+import dev.warsha.remoteble.client.awaitScanConcurrencyMode
 import dev.warsha.remoteble.client.defaultWebSocketHttpClient
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.ScanFilter
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 
 /**
@@ -65,6 +67,9 @@ fun main(args: Array<String>): Unit = runBlocking {
         print("• connecting transport ... ")
         withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
         println("CONNECTED")
+        // Printed on every run because the same command means different things in different modes,
+        // so an evidence file that does not name the negotiated mode cannot be read back later.
+        println("• scan concurrency: ${withTimeoutOrNull(10.seconds) { session.awaitScanConcurrencyMode() } ?: "UNKNOWN"}")
 
         val seen = LinkedHashSet<String>()
         println("• scanning (listing devices as they arrive):")

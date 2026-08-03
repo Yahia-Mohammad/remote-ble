@@ -6,13 +6,13 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures_util::stream::StreamExt;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::backend::{BleBackend, StreamKey};
+use super::backend::{BleBackend, COORDINATOR_SCAN_STREAM, StreamKey};
 use crate::protocol::{
     errors::{AgentError, ErrorKind},
     events::{AdvertisementDto, AgentEvent, BleConnState},
@@ -34,12 +34,9 @@ pub struct BtleplugBackend {
     /// Cross-client ownership. An unsolicited BLE drop notifies it so the lease
     /// is released (after its grace window) rather than leaking.
     registry: PeripheralRegistry,
-    /// Per-device last-known name / service UUIDs for advertisement coalescing (see
-    /// [coalesce_identity]). Scoped to the *scan session*, not the process: [Self::stop_scan]
-    /// clears it once the last scan ends, so it can't grow without bound (rotating private
-    /// addresses mint a fresh key on every rotation) and identity never bleeds from one scan
-    /// into the next. This matches the KMP agent, whose coalescer is per-scan.
-    scan_identity: Arc<Mutex<HashMap<String, ScanIdentity>>>,
+    /// Legacy direct-scan identity coalescing. Guaranteed-mode scans bypass this state and send
+    /// raw advertisements to ScanCoordinator, which owns bounded identity/replay retention.
+    scan_identity: Arc<Mutex<ScanIdentityCache>>,
     /// Tracks devices whose write-with-response completions have stopped arriving. Mirrors
     /// `EngineBleBackend.writeDegraded`/`failFastOnDegradedWrites` in the Kotlin agent — see
     /// [DegradedWrites] for the defect this works around.
@@ -49,6 +46,21 @@ pub struct BtleplugBackend {
 /// Last-known `(local name, service UUIDs)` for a device within a scan session, used to
 /// backfill sparse advertisement packets (see [coalesce_identity]).
 type ScanIdentity = (Option<String>, Vec<String>);
+
+const LEGACY_SCAN_IDENTITY_CAP: usize = 256;
+
+#[derive(Default)]
+struct ScanIdentityCache {
+    entries: HashMap<String, ScanIdentity>,
+    order: VecDeque<String>,
+}
+
+impl ScanIdentityCache {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
 
 /// Tracks per-device write-with-response degradation and the fail-fast short-circuit.
 ///
@@ -263,7 +275,7 @@ impl BtleplugBackend {
         let active_scans = Arc::new(Mutex::new(HashMap::new()));
         let active_observations = Arc::new(Mutex::new(HashMap::new()));
         let connected = Arc::new(Mutex::new(HashMap::new()));
-        let scan_identity = Arc::new(Mutex::new(HashMap::new()));
+        let scan_identity = Arc::new(Mutex::new(ScanIdentityCache::default()));
         let backend = Self {
             adapter,
             active_scans,
@@ -422,21 +434,18 @@ impl BtleplugBackend {
                                     mfg_data.insert(k as i32, v);
                                 }
 
-                                // Backfill missing name/UUIDs from earlier packets in this scan
-                                // session (the map is cleared when scanning stops, see stop_scan).
-                                let (name, service_uuids) = coalesce_identity(
-                                    &mut scan_identity.lock(),
-                                    &device_handle.value,
-                                    props.local_name.clone(),
-                                    props.services.iter().map(|u| u.to_string()).collect(),
-                                );
-                                let dto = AdvertisementDto {
+                                let raw = AdvertisementDto {
                                     device: device_handle,
-                                    name,
+                                    name: props.local_name.clone(),
                                     rssi: props.rssi.unwrap_or(0) as i32,
-                                    service_uuids,
+                                    service_uuids: props
+                                        .services
+                                        .iter()
+                                        .map(|u| u.to_string())
+                                        .collect(),
                                     manufacturer_data: mfg_data,
                                 };
+                                let mut legacy_coalesced = None;
 
                                 tracing::debug!(
                                     "Discovered BLE device: {:?} ({:?})",
@@ -444,14 +453,42 @@ impl BtleplugBackend {
                                     id
                                 );
                                 for (stream, subscription) in subscribers {
-                                    if scan_matches(&subscription.filters, &dto) {
+                                    // The coordinator deliberately receives raw advertisements so
+                                    // it alone performs bounded identity merge and logical matching.
+                                    // Direct/uncontrolled subscribers retain the legacy backend path.
+                                    let dto = if stream == COORDINATOR_SCAN_STREAM {
+                                        raw.clone()
+                                    } else {
+                                        legacy_coalesced
+                                            .get_or_insert_with(|| {
+                                                let (name, service_uuids) = coalesce_identity(
+                                                    &mut scan_identity.lock(),
+                                                    &raw.device.value,
+                                                    raw.name.clone(),
+                                                    raw.service_uuids.clone(),
+                                                );
+                                                AdvertisementDto {
+                                                    device: raw.device.clone(),
+                                                    name,
+                                                    rssi: raw.rssi,
+                                                    service_uuids,
+                                                    manufacturer_data: raw
+                                                        .manufacturer_data
+                                                        .clone(),
+                                                }
+                                            })
+                                            .clone()
+                                    };
+                                    if stream == COORDINATOR_SCAN_STREAM
+                                        || scan_matches(&subscription.filters, &dto)
+                                    {
                                         // Advertisements are explicitly lossy under pressure: the
                                         // next packet is a fresher snapshot, and try_send keeps a
                                         // slow client from blocking the adapter event loop.
                                         let _ = subscription.event_tx.try_send(
                                             AgentEvent::ScanResult {
                                                 scan_id: stream.local_id,
-                                                advertisement: dto.clone(),
+                                                advertisement: dto,
                                             },
                                         );
                                     }
@@ -666,17 +703,30 @@ impl BleBackend for BtleplugBackend {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), AgentError> {
         tracing::info!("Received start_scan request (scan_id: {})", stream.local_id);
+        // Only the empty -> non-empty transition needs the radio. This backend deliberately scans
+        // unfiltered and matches agent-side, so `filters` never reaches the adapter and one running
+        // physical scan already serves every subscriber, new or reconfigured. Re-issuing
+        // `adapter.start_scan()` for a key that is merely rebinding would be a redundant call
+        // against an already-discovering adapter, whose per-platform behaviour is not uniform.
+        //
+        // Emptiness is decided and the registration published under ONE lock acquisition. Reading
+        // it, dropping the lock and registering after the await would let two concurrent starts
+        // both see an empty map and both drive the adapter, and would drop advertisements arriving
+        // in between. Note `is_first` is taken *before* the insert: a reconfigure of the sole
+        // active scan leaves the map non-empty, so it is not first and must not touch the radio.
         let is_first = {
             let mut scans = self.active_scans.lock();
+            let is_first = scans.is_empty();
             scans.insert(stream, ScanSubscription { filters, event_tx });
-            scans.len() == 1
+            is_first
         };
 
         if is_first {
             tracing::info!("Initiating btleplug adapter.start_scan()...");
             if let Err(e) = self.adapter.start_scan(BtleScanFilter::default()).await {
-                // Don't leak the registration we just made if the radio never started scanning,
-                // or a later stop_scan would never bring the map back to empty.
+                // Reachable only when this call created the first registration, so rolling it back
+                // cannot clobber an incumbent subscription that surviving logical scans depend on.
+                // Without the rollback a later stop_scan would never bring the map back to empty.
                 self.active_scans.lock().remove(&stream);
                 return Err(AgentError::new(
                     ErrorKind::GattError,
@@ -976,12 +1026,13 @@ impl BleBackend for BtleplugBackend {
 /// and service UUIDs per device and backfills them when a later packet lacks them. RSSI is not
 /// retained — it legitimately varies per packet and is forwarded as received.
 fn coalesce_identity(
-    last_seen: &mut HashMap<String, ScanIdentity>,
+    last_seen: &mut ScanIdentityCache,
     handle: &str,
     name: Option<String>,
     service_uuids: Vec<String>,
 ) -> ScanIdentity {
     let entry = last_seen
+        .entries
         .entry(handle.to_string())
         .or_insert_with(|| (None, Vec::new()));
     if name.is_some() {
@@ -994,6 +1045,15 @@ fn coalesce_identity(
         service_uuids
     };
     let resolved_name = name.or_else(|| entry.0.clone());
+    last_seen.order.retain(|key| key != handle);
+    last_seen.order.push_back(handle.to_string());
+    while last_seen.entries.len() > LEGACY_SCAN_IDENTITY_CAP {
+        if let Some(oldest) = last_seen.order.pop_front() {
+            last_seen.entries.remove(&oldest);
+        } else {
+            break;
+        }
+    }
     (resolved_name, resolved_uuids)
 }
 
@@ -1019,13 +1079,16 @@ fn scan_matches(filters: &[ScanFilter], advertisement: &AdvertisementDto) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::{DegradedWrites, coalesce_identity, scan_matches};
+    use super::{
+        DegradedWrites, LEGACY_SCAN_IDENTITY_CAP, ScanIdentityCache, coalesce_identity,
+        scan_matches,
+    };
     use crate::protocol::{
         errors::ErrorKind,
         events::AdvertisementDto,
         op::{DeviceHandle, ScanFilter},
     };
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     // --- degraded-write fail-fast ---------------------------------------------------------
     // The condition itself (btleplug dropping write completions after an ATT error) reproduces
@@ -1180,7 +1243,7 @@ mod tests {
 
     #[test]
     fn retains_last_known_name_and_uuids_when_a_later_packet_omits_them() {
-        let mut seen = HashMap::new();
+        let mut seen = ScanIdentityCache::default();
 
         let first = coalesce_identity(
             &mut seen,
@@ -1203,7 +1266,7 @@ mod tests {
 
     #[test]
     fn adopts_a_name_once_one_arrives_and_keeps_devices_separate() {
-        let mut seen = HashMap::new();
+        let mut seen = ScanIdentityCache::default();
 
         let a1 = coalesce_identity(&mut seen, "a", None, Vec::new());
         assert_eq!(a1, (None, Vec::<String>::new()));
@@ -1218,7 +1281,7 @@ mod tests {
 
     #[test]
     fn clearing_between_scans_drops_stale_identity() {
-        let mut seen = HashMap::new();
+        let mut seen = ScanIdentityCache::default();
         coalesce_identity(
             &mut seen,
             "dev",
@@ -1232,6 +1295,25 @@ mod tests {
         // A fresh scan session: a nameless packet must NOT resurrect the previous scan's identity.
         let after = coalesce_identity(&mut seen, "dev", None, Vec::new());
         assert_eq!(after, (None, Vec::<String>::new()));
+    }
+
+    #[test]
+    fn legacy_identity_cache_evicts_the_oldest_device_at_capacity() {
+        let mut seen = ScanIdentityCache::default();
+        for index in 0..=LEGACY_SCAN_IDENTITY_CAP {
+            coalesce_identity(
+                &mut seen,
+                &format!("device-{index}"),
+                Some(format!("name-{index}")),
+                Vec::new(),
+            );
+        }
+        assert_eq!(seen.entries.len(), LEGACY_SCAN_IDENTITY_CAP);
+        assert!(!seen.entries.contains_key("device-0"));
+        assert!(
+            seen.entries
+                .contains_key(&format!("device-{LEGACY_SCAN_IDENTITY_CAP}"))
+        );
     }
 
     #[test]

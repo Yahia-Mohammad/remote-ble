@@ -26,6 +26,21 @@ protocol version: **1**.
 
 ### Added
 
+- **Scan-concurrency lifecycle hardening.** Guaranteed scans now use per-admission fencing tokens,
+  serialized Kotlin physical-scanner replacement, direct bounded Rust arbiter mailboxes, and raw
+  coordinator delivery in the Rust backend. Each logical scan has exactly one bounded reservation on
+  both agents, and waiting for a physical collector to unwind is time-bounded so a slow backend
+  teardown cannot hold the agent-wide coordinator lock. Paired WebSocket conformance and
+  deterministic boundary evidence run locally; real-radio Rig B validation remains a separate
+  release gate.
+
+- **Configured scan concurrency modes.** Agents advertise exactly one of `multiplexed` (default),
+  `single`, or `uncontrolled`; guaranteed modes use stable-client ownership, replay-safe rebind,
+  bounded replay, and fair logical-scan mailboxes. Every client session offers all three capability
+  strings automatically, including manually constructed `DefaultAgentSession`s, so the negotiated
+  intersection is always exactly the agent's configured mode. `SCAN_UNAVAILABLE` is capability-gated
+  so legacy clients retain `AGENT_BUSY`. Final Apple hardware evidence remains release-gated.
+
 - **Clean-consumer gates for the Android and Apple publication variants.** `consumer-tests/android`
   and `consumer-tests/kmp` join the existing JVM fixture, each a standalone Gradle build resolving
   Maven coordinates only. They exist because `jvm`, `android` (`.aar`) and Apple (klib) artifacts are

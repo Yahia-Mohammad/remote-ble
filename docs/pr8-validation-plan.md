@@ -14,10 +14,15 @@ the release commit before tag approval — see `release-candidate.md` step 4.
 
 ## Progress — 19 of 25 cases run
 
-**Updated 2026-07-30.** Every case below is marked inline with its outcome. Per-case detail lives in
+**Updated 2026-08-03.** Every case below is marked inline with its outcome. Per-case detail lives in
 the evidence docs; this table is the index, and
 [`0.10.0-progress-status.md`](proposals/0.10.0-progress-status.md) carries the open-gap list that the
 runs produced.
+
+The 25 counted here are this plan's own rigs (A 8 + B 6 + C 5 + D 6). The **scan-concurrency run is
+tracked separately** in [scan-concurrency-validation.md](scan-concurrency-validation.md) — 8 cases,
+7 run and passed on 2026-08-03 — because that feature landed after this plan was written. **Rig D is
+the only rig still outstanding.**
 
 | Rig | Cases | Status | Evidence |
 |---|---|---|---|
@@ -34,18 +39,16 @@ runs produced.
 2. **Gap 13's mechanism** (Rig B case 5's follow-up) — one discriminating run against an *unbonded*
    peripheral. The link outliving a killed agent is measured at ≥26 min, but it may belong to this
    rig's bonded phone pair rather than to iOS. Not a blocker.
-3. **Two-client scan isolation** (gap 21) — never run. If client A is scanning and client B stops its
-   own scan, does A's scan survive? Our layer isolates them (`BleAgent` is per-connection, and
-   `EngineBleBackend.scan` builds a new Kable `Scanner` per call), but Apple's `Scanner` holds a
-   process-wide `CentralManager.Default` whose `stopScan()` takes no arguments, because a
-   `CBCentralManager` has one scan — so interference is expected there, and the *start* direction is
-   worse than the stop: Apple **documents** that a second scan's parameters replace the running scan's,
-   so B silently narrows what A sees. Rig A case 3 had only client B scanning, so this has never been
-   exercised. Two staggered `:e2e-runner:scanRun` clients against one agent settle it.
-   **Release blocker (raised 2026-07-30, was "not a blocker" here)** — it is reachable by one ordinary
-   client holding two `RemoteScanner`s, and "single agent, multiple clients" is a headline property.
-   The design and plan are [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); this run
-   is its Phase 0.
+3. ~~**Two-client scan isolation** (gap 21)~~ **CLOSED 2026-08-03.** The design is
+   [scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); the checklist of record was
+   [scan-concurrency-validation.md](scan-concurrency-validation.md). Hardware run: `SC-HW-00`
+   through `SC-HW-05`, `SC-HW-07`, `SC-HW-08` all **PASS**, on the iOS agent (iPhone 14), the Kotlin
+   JVM agent, and `agent-rs` (both on the Mac), covering both the two-client and one-client-two-
+   scanners topologies. Kotlin and Rust agree on every verdict — no parity divergence, no
+   `INCONCLUSIVE`. `SC-HW-06` (the iOS-background overflow-area case that gates the Apple wording in
+   [scanning.md](scanning.md)) did **not** run — it needs a second Apple device to background the
+   peripheral while the agent stays foregrounded, which was not available this session — so that
+   wording stays as-is, neither confirmed nor narrowed. Commit `09f2f49`.
 4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
 

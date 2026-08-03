@@ -409,7 +409,7 @@ Key properties:
 Tracing a serial WWR loop end-to-end shows the dominant cost isn't the radio — it's **N sequential
 WebSocket round trips**, one per `write()` call, because `session.request()` suspends until its
 Reply lands before the next write is even sent. `writeWithoutResponseBurst` fixes that without
-touching the wire: it uses [`AgentSession.dispatch`](#agentsession) to send up to `window` frames
+touching the wire: it uses [`AgentSession.dispatch`](#layer-2--session-agentsession) to send up to `window` frames
 before awaiting any of their Replies, instead of one-at-a-time.
 
 ```kotlin
@@ -463,6 +463,30 @@ class RemoteScanSource(session: AgentSession) {
 
 Opens a scan with a session-global `scanId` on collect, streams `ScanResult` events
 filtered to that id, and issues a best-effort `ScanStop` on cancel.
+
+Filter semantics, concurrent-scanner behaviour, replay for late joiners, the agent's
+scan-concurrency modes and the errors they produce are in **[scanning.md](scanning.md)**; this
+section documents only the class.
+
+### `ScanConcurrencyMode`
+
+[`ScanConcurrencyMode.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/ScanConcurrencyMode.kt)
+
+```kotlin
+enum class ScanConcurrencyMode { MULTIPLEXED, SINGLE, UNCONTROLLED, LEGACY_OR_UNKNOWN }
+
+suspend fun AgentSession.awaitScanConcurrencyMode(): ScanConcurrencyMode
+```
+
+The agent's scan-isolation policy, derived from the negotiated capability set. Exactly one of
+`scan.concurrency.multiplexed` / `.single` / `.uncontrolled` is advertised; a missing **or
+contradictory** set is `LEGACY_OR_UNKNOWN`, never an inferred `UNCONTROLLED` — a client must not
+read a safety property from an agent that did not state one.
+
+Every session offers all three strings automatically, whether constructed directly or through Koin,
+so the intersection returns exactly the agent's configured mode. That is also what gates the typed
+`SCAN_UNAVAILABLE` error: an agent only sends it to a client that negotiated
+`scan.concurrency.single`, and falls back to `AGENT_BUSY` otherwise.
 
 ### `RemoteTimeouts`
 

@@ -2,8 +2,14 @@
 
 [← back to index](../README.md)
 
-- **Status:** Accepted 2026-07-30; **finalized after three review passes, 2026-07-30** — not
-  implemented, **release blocker for 0.10.0**
+- **Status:** **CLOSED 2026-08-03.** Production implementation, deterministic boundaries, and
+  paired WebSocket adapters are complete on `codex/scan-concurrency-modes`
+  (`09f2f49`); hardware validation ([scan-concurrency-validation.md](../scan-concurrency-validation.md))
+  passed on the iOS agent (iPhone 14), the Kotlin JVM agent, and `agent-rs`, all three in agreement,
+  no `INCONCLUSIVE` verdicts. The release blocker is closed. `SC-HW-06` (the Apple
+  overflow-advertising wording case) did not run — it needs a second Apple device — so
+  [scanning.md](../scanning.md)'s existing Apple wording is unchanged, neither confirmed nor
+  narrowed.
 - **Type:** Agent configuration + capability-gated protocol extension
 - **Fixes:** gap 21 in [0.10.0-progress-status.md](0.10.0-progress-status.md) — concurrent scans
   through one agent interfere on Apple hosts
@@ -37,7 +43,7 @@ work on both agents. See [the parity finding](#the-parity-finding-agent-rs-alrea
 Full write-up in gap 21; the short form:
 
 `MAX_ACTIVE_SCANS = 16` is enforced **per client**
-([`BleAgent.kt:500`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:500)),
+([`BleAgent.kt`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)),
 so this is reachable by **one ordinary app** holding two `RemoteScanner`s — one filtered for
 heart-rate monitors, one for thermometers. Both drive Kable `Scanner`s inside the agent, and on
 Apple every Kable `Scanner` shares the process-wide `CentralManager.Default`. A `CBCentralManager`
@@ -66,17 +72,16 @@ is not a mitigation.
 
 ### The parity finding: `agent-rs` already multiplexes
 
-[`start_scan`](../../agent-rs/src/ble/btleplug_impl.rs:662) reference-counts subscribers in an
-agent-wide `active_scans: HashMap<StreamKey, ScanSubscription>`, starts **one** adapter scan on the
-first subscriber with `BtleScanFilter::default()` — i.e. **unfiltered** — and stops it on the last.
-Advertisements are coalesced by device identity *before* fan-out
-([`coalesce_identity`](../../agent-rs/src/ble/btleplug_impl.rs:427)), then matched per subscriber with
-`scan_matches`. Delivery then enters the connection's shared bounded `event_tx` via `try_send`,
-explicitly lossy under pressure; there is no per-logical-scan mailbox today.
+The pre-existing Rust backend already reference-counted backend subscriptions in an agent-wide
+`active_scans: HashMap<StreamKey, ScanSubscription>` and ran one unfiltered adapter scan. In the
+guaranteed modes, its reserved coordinator subscription now receives **raw** advertisements; bounded
+identity merge, replay, matching, logical mailboxes, and fair connection arbitration are owned by
+`ScanCoordinator`. The legacy direct path retains its independently bounded backend coalescer for
+`uncontrolled` mode.
 
-The physical-scan sharing, identity coalescing, and agent-side matching at the core of this proposal
-are therefore already shipping on one reference agent. Stable-key replay, per-logical-scan
-mailboxes, and fair outbound arbitration are not. What follows from it:
+The physical-scan sharing was therefore already shipping on one reference agent. The guaranteed-mode
+coordinator completes the stable-key replay, bounded merge/cache, per-logical-scan mailboxes, and fair
+outbound arbitration that the old implementation lacked. What follows from it:
 
 - **The reference agents diverge today.** Neither the conformance suite nor
   [agent-parity-verification.md](../agent-parity-verification.md) caught it — a gap this work closes.
@@ -113,8 +118,9 @@ can distinguish it from an old agent.
 
 ## Filter semantics (normative — previously mis-filed as an open question)
 
-Already documented at [agent.md:433](../agent.md:433) and implemented by `agent-rs`
-([`scan_matches`](../../agent-rs/src/ble/btleplug_impl.rs:1003)). Making the agent the filtering
+Already documented in [agent.md's op-by-op `scan` entry](../agent.md#op-by-op) and implemented by
+`agent-rs` (`scan_matches` in
+[`btleplug_impl.rs`](../../agent-rs/src/ble/btleplug_impl.rs)). Making the agent the filtering
 authority requires it in the spec:
 
 ```text
@@ -129,14 +135,15 @@ matches(filters, advertisement) =
 So: OR across list entries, AND within one entry, an empty list and an empty `ScanFilter()` both
 match all, exact name comparison, canonical UUID comparison.
 
-**Two defects to fix before lifting a shared matcher**, both in `SimulatedBleBackend`:
+**Two defects had to be fixed before a shared matcher could be lifted**, both in
+[`SimulatedBleBackend`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt).
+**Both are now fixed** (verified 2026-08-03):
 
-1. [`matches`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt:178)
-   uses `filters.all { … }` — AND across the list, contradicting the documented and Rust-implemented
-   OR.
-2. [`scan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt:52)
-   filters on profile service UUIDs but emits an `AdvertisementDto` carrying only
-   `device`/`name`/`rssi`. Any agent-side re-filter by service rejects everything it emits.
+1. `matches` used `filters.all { … }` — AND across the list, contradicting the documented and
+   Rust-implemented OR. It now reads `filters.isEmpty() || filters.any { … }`.
+2. `scan` filtered on profile service UUIDs but emitted an `AdvertisementDto` carrying only
+   `device`/`name`/`rssi`, so any agent-side re-filter by service rejected everything it emitted.
+   It now emits `serviceUuids` from the profile advertisement.
 
 Multi-predicate tests are required: two logical scans with one predicate each do not exercise list
 semantics.
@@ -268,7 +275,7 @@ backend or radio failure is not an admission decision either: those keep their e
 `GATT_ERROR` mappings. If the future strict fourth mode lands, it becomes this kind's second source.
 
 **It must be capability-gated.** `ErrorKind` is a plain `@Serializable` enum that serializes by name,
-and [`Capabilities.kt:74`](../../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt:74)
+and [`Capabilities.kt`](../../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
 records the consequence: an unknown enum name fails a v1 client's decode. This is why `RADIO_OFF` is
 gated behind `radio.state`, and the same applies here — a client that negotiated no scan-concurrency
 capability receives the existing `AGENT_BUSY` instead.
@@ -303,7 +310,7 @@ to the connection's negotiated capability set, so it cannot choose between `SCAN
 `AGENT_BUSY`.
 
 The seam already exists:
-[`BleAgent.startScan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:493)
+[`BleAgent.startScan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)
 performs mutex-guarded admission for today's connection-local cap, starts the job `LAZY`, and
 implements same-key replacement via `previous?.cancel()`. That location remains the command-path
 seam, but cap ownership moves into the agent-lifetime coordinator so reconnecting cannot acquire a
@@ -348,7 +355,7 @@ scan has rebound, and would otherwise tear down its replacement. `LEASE-DUPLICAT
 live sockets for one client key; it does not order these. The registry already solves the analogous
 problem the same way — `Lease(owner, connected, graceJob)` with cancellable grace jobs and
 lease-object identity
-([`PeripheralRegistry.kt:64`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralRegistry.kt:64)) —
+([`PeripheralRegistry.kt`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralRegistry.kt)) —
 so scans should follow it rather than invent a second scheme.
 
 Lifecycle rules, all generation-guarded:
@@ -399,7 +406,7 @@ A failed rebind leaves the previous definition running.
 ### Identity aggregation moves ahead of matching
 
 The Kotlin agent coalesces name and service UUIDs *after* the backend, per scan
-([BleAgent.kt:534](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:534)),
+([BleAgent.kt](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)),
 because repeated packets from one device routinely carry only an RSSI refresh. Filtering below that
 point would discard a sparse update for a service-filtered subscriber even after an earlier packet
 established that device's service UUID. The pipeline must be:
@@ -428,10 +435,10 @@ device seen in the window" contradicts the cap the moment `cap + 1` devices appe
 > `SCAN_REPLAY_WINDOW`, keeping the most recently observed and evicting oldest-observation-first when
 > the cap is exceeded. A joining logical scan MUST receive every **retained** entry its filters match.
 
-Reference agents use a 30 s window; window and cap are confirmed and published in Phase 0. Where the
-platform permits it, enable duplicate discovery so entries refresh; where it does not, document that
-the cache reflects recent platform callbacks rather than asserting current presence. `agent-rs` has no
-replay cache today.
+Reference agents use a 30 s window and retain at most 256 devices. Every pre-arbitration logical
+mailbox has 320 entries: the complete 256-entry replay reservation plus 64 entries of steady-state
+headroom. Where the platform permits it, enable duplicate discovery so entries refresh; where it does
+not, document that the cache reflects recent platform callbacks rather than asserting current presence.
 
 ### Fan-out and backpressure
 
@@ -447,7 +454,7 @@ drop events after fair arbitration without violating filter or lifecycle correct
 
 **This is new work on both agents, and an earlier draft of this document got `agent-rs` wrong.** The
 Rust agent creates **one** `event_tx` per WebSocket connection
-([server.rs:674](../../agent-rs/src/transport/server.rs:674)) and clones it into every op, so all
+([server.rs](../../agent-rs/src/transport/server.rs)) and clones it into every op, so all
 scans, observations and connection events on a connection share a single `EVENT_CHANNEL_CAP` budget.
 Its `try_send` also drops the **event being sent** when the channel is full, not the oldest queued
 one — so neither "per-subscriber mailbox" nor "drop-oldest" described the shipping behaviour.
@@ -489,10 +496,11 @@ safe one, which is the point of choosing it.
    iOS-background peripheral.
 2. **Does Kable expose duplicate delivery on Apple?** Determines whether replay entries refresh, and
    therefore the wording of the cache's meaning — not whether the cache is needed.
-3. **Replay window, cache cap, mailbox depth** — pick and publish the numbers.
-4. **Mailbox policy** — finalize per-logical-scan mailboxes with drop-newest and fair arbitration
-   (option 1 above) rather than keeping `agent-rs`'s per-connection budget, since it sets Phase 4's
-   size.
+3. **Replay window, cache cap, mailbox depth** — settled: 30 s, 256 retained devices, and a 320-entry
+   replay-capable mailbox (256 replay + 64 steady-state headroom).
+4. **Mailbox policy** — settled: per-logical-scan mailboxes with drop-newest and fair round-robin
+   arbitration (option 1 above), on both agents, rather than `agent-rs`'s former per-connection
+   budget.
 
 *Closed since the first draft:* filter AND/OR semantics (documented and Rust-implemented; see above),
 and whether btleplug multiplexes (moot — `agent-rs` never opens a second adapter scan).
@@ -552,6 +560,7 @@ Paired Kotlin/Rust adapters — these are the parity-bearing cases:
 | `SCAN-CONC-09` | multiplexed/single | Connection drops with active scans | Scans are detached and enter grace; other clients survive; grace expiry releases them. |
 | `SCAN-CONC-10` | single | Drop with an active scan, immediate reconnect, replay the same `scanId` | **First-attempt success** — a rebind, not contention, with no transient-retry round trip. |
 | `SCAN-CONC-11` | multiplexed/single | Stale cleanup after rebind: old generation's stop/grace-expiry fires after the resumed scan rebound | The stale registration is a no-op; the resumed scan survives. |
+| `SCAN-CONC-12` | multiplexed/single | Two `scan.start`s for one `scanId` pipelined without awaiting the first reply | Both reply `Ok`; the **second** definition is the live one. Same-`scanId` lifecycle follows receive order. |
 
 Agent-local tests (simulated backend or unit, not paired adapters — the behaviour is not
 parity-bearing and doubling the adapter cost buys nothing):
@@ -570,6 +579,81 @@ parity-bearing and doubling the adapter cost buys nothing):
   asserted;
 - a race harness starting two scans simultaneously, repeatedly, proving `single` admission is
   linearizable and never admits two winners.
+
+## Implementation checkpoint and handoff (2026-07-30)
+
+Work is on `codex/scan-concurrency-modes`, based on `main` at `ce0b72f`. The implementation
+landed in the branch history through `62fb2f4` (`docs: record scan concurrency implementation`).
+There is also an **uncommitted review-hardening worktree** at this checkpoint; do not discard it
+when resuming.
+
+Completed in that worktree:
+
+- Kotlin and Rust guaranteed-mode coordinators now use stable logical keys and per-admission fencing,
+  so a same-key replacement cannot be stopped by an earlier generation.
+- Kotlin waits for a physical collector to finish before replacing it; Rust retains a working
+  collector if a replacement scan cannot start. Rust coordinator traffic now enters the bounded
+  coordinator path before identity merging rather than an unbounded backend cache.
+- Both agents advertise exactly the configured scan-concurrency capability. Rust delivery uses
+  direct per-logical bounded mailboxes and a round-robin arbiter; Kotlin teardown cancels command
+  work before detaching coordinator delivery.
+- Deterministic regression coverage was added for replacement fencing, collector ownership/failure,
+  arbiter fairness, bounded legacy identity state, replay expiry/capacity, stable-client caps,
+  linearizable `single` admission, and exactly-one capability advertisement.
+- Paired WebSocket adapters now execute `SCAN-CONC-01` through `SCAN-CONC-12` against both agents,
+  plus an explicit `uncontrolled` legacy-path boundary case, using radio-less scripted backends.
+- The documentation now describes `multiplexed` only as filter and lifecycle isolation. It does not
+  claim Apple discovery completeness or a resolved release blocker.
+
+### Review pass on the committed branch (2026-08-01)
+
+A read of the committed implementation against this document found, and the branch now fixes:
+
+- **The reference client did not offer the capabilities on the documented construction path.**
+  `sendHello` added only `identifier.translate`; the trio came from the Koin module alone, so every
+  manually constructed `DefaultAgentSession` — the form used by `getting-started.md`, `flows.md` and
+  `client-sdk.md` — read a new agent as `LEGACY_OR_UNKNOWN` and was downgraded to `AGENT_BUSY`
+  against a `single`-mode agent. They now live in `ALWAYS_OFFERED_CAPABILITIES`, alongside
+  `identifier.translate`, and are no longer restated in the module.
+- **`BtleplugBackend::start_scan` had lost its atomic first-scan check.** Emptiness was read, the
+  lock dropped, and the registration published only after the await, so two concurrent starts could
+  both drive `adapter.start_scan()` (reachable in `uncontrolled`, where starts are only serialized
+  per `scanId`) and advertisements arriving in the window were dropped. Both are decided under one
+  lock again, with `is_first` taken *before* the insert so a reconfigure of the sole active scan is
+  correctly not first — which is the clobber case the branch was right to fix.
+- **Waiting for a physical collector to unwind was unbounded** while holding the agent-wide
+  coordinator lock inside `NonCancellable`, so one uncooperative backend teardown could wedge scan
+  admission for every client and stall connection teardown with it. Bounded by
+  `PHYSICAL_SCAN_TEARDOWN_TIMEOUT`; a straggler is already fenced by `physicalGeneration`.
+- **Kotlin reserved the 320-entry replay budget twice** (coordinator mailbox *and* arbiter sink)
+  where Rust reserves it once. The arbiter sink is now steady-state depth and suspends, so
+  backpressure lands on the single reservation and drop-newest is applied only where the physical
+  fan-out writes.
+- Smaller: the write-ordering turn is now released by the command's own `finally` rather than only
+  by the `Op.Write` branch; the guaranteed path regained its `scan started` debug line; the
+  `accept_connection` test shim documents that its per-call coordinator defeats the agent-wide
+  guarantee; and the never-narrows half of the physical-plan invariant is asserted.
+
+The completed local validation at this checkpoint is:
+
+```text
+./gradlew --no-daemon build conformanceTest       PASS
+cargo fmt --check                                PASS
+cargo clippy --all-targets -- -D warnings        PASS
+cargo test --locked                              PASS (113 tests)
+git diff --check                                 PASS
+```
+
+Still required before this proposal or gap 21 can be closed:
+
+1. Commit the review-hardening worktree intentionally, preserving the existing preparatory commits.
+2. Perform the mandatory Rig B hardware run against the available default-multiplexed Kotlin JVM,
+   iOS, and Rust reference-agent paths: staggered broad and service-filtered scans, stopping either
+   participant while the other continues, and a dedicated iOS-background-peripheral overflow-area
+   case. Record date, branch SHA, host/agent, configured and negotiated mode, filters, timing,
+   peripheral state, and result.
+3. Amend only the Apple discovery-completeness wording from that hardware evidence. Keep the
+   release blocker open if the evidence cannot be obtained.
 
 ## Review disposition
 
@@ -659,7 +743,7 @@ are already an agent-side protocol field.
 - Each logical scan has its own bounded mailbox on both agents; fair arbitration prevents one scan
   from monopolizing scan admission to a connection's shared outbound queue.
 - New clients offer all three capabilities automatically; old clients never receive `SCAN_UNAVAILABLE`.
-- `SCAN-CONC-01`…`11` pass on both agents, and the agent-local cases pass.
+- `SCAN-CONC-01`…`12` pass on both agents, and the agent-local cases pass.
 - The staggered two-`scanRun` reproduction runs clean on Rig B against the default mode, **and** the
   iOS-background-peripheral case has been run, with its result reflected in the scope statement.
 - `uncontrolled` is never the default.

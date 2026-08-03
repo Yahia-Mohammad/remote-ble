@@ -114,13 +114,20 @@ app: RemoteScanner(session).advertisements.collect { … }   // or RemoteScanSou
 - The `channelFlow` in `RemoteScanSource` launches the event pump (filtering
   `ScanResult` by `scanId=1`) **before** sending `ScanStart`, so no early result is
   missed.
-- On the agent, `ScanStart` launches `backend.scan(filters)` and tags each
-  `AdvertisementDto` with `scanId=1`. The real backend mints each `DeviceHandle` from
-  the engine's scan result.
+- On the agent, `ScanStart` is admitted **synchronously, before the `Ok` is replied**, by the
+  agent-lifetime scan coordinator in the guaranteed modes; a shared physical scan then merges device
+  identity, matches each logical scan's filters, and fans out through that scan's own bounded
+  mailbox. Only in `uncontrolled` does `ScanStart` launch `backend.scan(filters)` directly. Either
+  way the `AdvertisementDto` is tagged with `scanId=1` and the `DeviceHandle` is minted by the
+  backend from the engine's scan result.
 - Cancelling the collector triggers `awaitClose` → best-effort `ScanStop`.
 
 `RemoteScanner` maps each `AdvertisementDto` into a Kable `RemoteAdvertisement`, whose
 `handle` is the token for connecting.
+
+The above is one scan in isolation. What changes with two — admission, refusal, replay to a late
+joiner, and rebinding after a reconnect — is in [scanning.md](scanning.md) and
+[agent.md](agent.md#scan-concurrency-policy).
 
 ---
 

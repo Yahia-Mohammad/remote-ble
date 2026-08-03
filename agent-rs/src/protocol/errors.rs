@@ -15,6 +15,7 @@ pub enum ErrorKind {
     NoConnectionSlot,
     PeripheralBusy,
     AgentBusy,
+    ScanUnavailable,
     InvalidRequest,
     Unsupported,
     Timeout,

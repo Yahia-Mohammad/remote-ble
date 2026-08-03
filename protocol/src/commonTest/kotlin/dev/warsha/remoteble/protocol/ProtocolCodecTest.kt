@@ -64,6 +64,10 @@ class ProtocolCodecTest {
     fun scanStop() = assertRoundTrips(Command(3, Op.ScanStop(scanId = 7)))
 
     @Test
+    fun scanUnavailableErrorRoundTrips() =
+        assertRoundTrips(Reply(4, OpResult.Err(AgentError(ErrorKind.SCAN_UNAVAILABLE))))
+
+    @Test
     fun connect_disconnect_discover() {
         assertRoundTrips(Command(4, Op.Connect(dev)))
         assertRoundTrips(Command(5, Op.Disconnect(dev)))

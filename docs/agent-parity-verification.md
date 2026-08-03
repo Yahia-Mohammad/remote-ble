@@ -170,21 +170,28 @@ the client-facing behavior.
 |---|---|---|
 | Per-advertisement `ScanResult` | ✅ | ✅ |
 | Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ❌ |
-| Name/UUID coalescing | ✅ (`advertisementCoalescer`, **per scan, after the backend**) | ✅ (`coalesce_identity`, **per adapter session, before fan-out**) |
-| Concurrent-scan handling | ❌ one Kable `Scanner` per `scan.start` | ✅ one adapter scan, agent-wide subscriber registry |
+| Name/UUID coalescing | ✅ coordinator-owned, before matching | ✅ coordinator-owned in guaranteed modes; bounded legacy backend coalescer in `uncontrolled` |
+| Concurrent-scan handling | ✅ configured coordinator, explicit uncontrolled escape hatch | ✅ configured coordinator, explicit uncontrolled escape hatch |
 
 **Pre-existing:** Yes. Rust never implemented scan batching.
 
-**Divergence found 2026-07-30 — concurrent scans (gap 21).** The last two rows were previously
-recorded as matching. They do not. `agent-rs` runs **one** unfiltered adapter scan reference-counted
-across an agent-wide `active_scans: HashMap<StreamKey, ScanSubscription>`, coalesces identity before
-fanning out, and filters per subscriber ([`btleplug_impl.rs:662`](../agent-rs/src/ble/btleplug_impl.rs:662));
-the Kotlin agent builds a fresh Kable `Scanner` per `scan.start` and coalesces per scan afterwards. So
-the Rust agent already isolates concurrent scans and the Kotlin agent does not — on Apple hosts the
-Kotlin path is actively defective, because one `CBCentralManager` has one scan. The coalescing row
-looked like parity because both agents do coalesce; they do it at different layers, which is what hid
-the difference. Convergence is specified in
+**Gap 21 — closed 2026-08-03, parity confirmed on hardware.** Both reference agents route guaranteed
+modes through an agent-lifetime coordinator keyed by stable client key and scan ID, with
+generation-fenced grace, bounded replay, logical mailboxes, and fair per-connection admission to the
+outbound queue. The design is
 [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md).
+
+**This section previously recorded concurrent-scan handling as matching when it did not** — the
+Kotlin agent opened one Kable `Scanner` per client while `agent-rs` already reference-counted
+subscribers onto a single adapter scan. That was a live parity defect this table asserted was
+absent, which is why it is called out here rather than quietly corrected.
+
+Parity is now verified rather than asserted: the [scan-concurrency hardware
+run](scan-concurrency-validation.md) put both topologies (two clients; one client holding two
+scanners) through the Kotlin JVM agent and `agent-rs` on the same Mac and the same radio, and the
+two **agreed on every verdict** — stop direction, start direction, and filter correctness — with no
+`INCONCLUSIVE` results. The iOS agent, which is the platform the defect actually lives on, agreed
+with both.
 
 ---
 

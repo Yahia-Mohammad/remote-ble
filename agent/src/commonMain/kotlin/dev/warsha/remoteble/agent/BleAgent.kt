@@ -27,6 +27,7 @@ import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import kotlin.concurrent.Volatile
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -35,6 +36,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -43,10 +48,12 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 
 /**
  * The real agent op handler. Decodes `Command`s, drives a [BleBackend], and emits
@@ -95,6 +102,9 @@ class BleAgent(
     // connections and flipped live from the dashboard; read on each forward handle translation.
     private val strictMode: StrictModeState = StrictModeState(),
     private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
+    // Shared by every socket only in the guaranteed modes. Null preserves the standalone/test
+    // agent's historical connection-local scan behaviour.
+    private val scanCoordinator: ScanCoordinator? = null,
 ) {
     init {
         require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
@@ -106,7 +116,16 @@ class BleAgent(
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
     private val connected = mutableSetOf<String>()
-    private val scanJobs = mutableMapOf<Long, Job>()
+    private data class ManagedScan(
+        val job: Job,
+        val registration: ScanRegistration?,
+        val sink: ScanOutboundArbiter.Sink? = null,
+    )
+    private val scanJobs = mutableMapOf<Long, ManagedScan>()
+    // Steady-state depth only. The replay reservation lives once, in the coordinator's own
+    // mailbox; the collector below hands events on with a suspending send, so a slow arbiter
+    // backpressures into that single bounded reservation instead of needing a second copy of it.
+    private val scanArbiter = ScanOutboundArbiter(scope, ::emit)
     private val observeJobs = mutableMapOf<Long, Job>()
 
     // Per-device write ordering (0.8.3 / feature C). Every command runs on its own coroutine, so a
@@ -119,8 +138,22 @@ class BleAgent(
     private val writeChain = Mutex()
     private val writeChainTails = mutableMapOf<String, CompletableDeferred<Unit>>()
 
+    // Scan lifecycle commands are stateful for one connection-local scan id.  Commands still run
+    // concurrently overall, but same-id start/stop turns are reserved on the decode loop so their
+    // coordinator admission and local binding publication follow WebSocket receive order.
+    private val scanChain = Mutex()
+    private val scanChainTails = mutableMapOf<Long, CompletableDeferred<Unit>>()
+
+    /** In-flight scan-lifecycle turns. Test seam for the bound on [scanChainTails]. */
+    internal suspend fun pendingScanTurns(): Int = scanChain.withLock { scanChainTails.size }
+
     /** A write's slot in its device's ordering chain: await [predecessor], then complete [mine]. */
     private class WriteTurn(val predecessor: CompletableDeferred<Unit>?, val mine: CompletableDeferred<Unit>)
+    private class ScanTurn(
+        val scanId: Long,
+        val predecessor: CompletableDeferred<Unit>?,
+        val mine: CompletableDeferred<Unit>,
+    )
 
     /**
      * Reserves the next turn in [realDevice]'s write chain, returning the predecessor to await (or
@@ -144,6 +177,31 @@ class BleAgent(
         val op = frame.op
         if (op !is Op.Write) return null
         return reserveWriteTurn(translator.toReal(op.device.value))
+    }
+
+    private suspend fun reserveScanTurn(scanId: Long): ScanTurn = scanChain.withLock {
+        val predecessor = scanChainTails[scanId]?.takeUnless { it.isCompleted }
+        val mine = CompletableDeferred<Unit>()
+        scanChainTails[scanId] = mine
+        ScanTurn(scanId, predecessor, mine)
+    }
+
+    /**
+     * Drops a scan id's tail once this turn is the last one holding it. `scanId` is client-chosen
+     * and a turn is reserved for every `scan.start`/`scan.stop` frame — including ones later
+     * refused — so without this the map would retain an entry per distinct id the connection has
+     * ever sent. The identity check keeps a successor's tail intact, mirroring `release_scan_tail`
+     * in the Rust agent.
+     */
+    private suspend fun releaseScanTurn(turn: ScanTurn) = scanChain.withLock {
+        if (scanChainTails[turn.scanId] === turn.mine) scanChainTails.remove(turn.scanId)
+    }
+
+    /** Reserves same-id scan lifecycle order on the sequential decode loop. */
+    private suspend fun reserveScanTurnFor(frame: Command): ScanTurn? = when (val op = frame.op) {
+        is Op.ScanStart -> reserveScanTurn(op.scanId)
+        is Op.ScanStop -> reserveScanTurn(op.scanId)
+        else -> null
     }
 
     // The capabilities negotiated with this client (clientWanted ∩ supported), set once by the
@@ -210,7 +268,13 @@ class BleAgent(
 
     fun start(): Job = scope.launch {
         registry.registerClient(clientKey, onUnsolicitedDisconnect)
-        incoming.collect { bytes ->
+        // Command work must retire before this connection is detached from the agent-lifetime
+        // coordinator. Otherwise a sibling start coroutine can resurrect a scan after grace has
+        // been scheduled for this socket generation.
+        val commandSupervisor = SupervisorJob(coroutineContext[Job])
+        val commandScope = CoroutineScope(coroutineContext + commandSupervisor)
+        try {
+            incoming.collect { bytes ->
             // A single malformed/truncated frame must not fail the collect and tear down
             // this client's whole session. Decode defensively: log the bad frame and skip
             // it, staying ready for the next valid one.
@@ -232,10 +296,26 @@ class BleAgent(
                     // Reserve the write's ordering turn HERE, on the sequential decode loop, so a
                     // burst chains in submission order before the concurrent coroutines pick it up.
                     val writeTurn = reserveWriteTurnFor(frame)
-                    scope.launch {
+                    val scanTurn = reserveScanTurnFor(frame)
+                    commandScope.launch {
                         try {
+                            scanTurn?.predecessor?.await()
                             handle(frame, writeTurn)
                         } finally {
+                            // Complete first so a waiting successor proceeds, then drop the tail
+                            // if no successor took it. NonCancellable because teardown cancels
+                            // these coroutines and the release still has to reclaim the entry.
+                            //
+                            // The write turn is completed here as well as at the backend hand-off
+                            // in `handle`: any path that leaves `handle` without reaching the
+                            // Write branch (a retired connection, an authorization failure, an
+                            // early error reply) must still release the successor rather than
+                            // leave the device's chain waiting on a turn that will never signal.
+                            // `complete` is idempotent, so the early in-branch release still wins
+                            // when it happens.
+                            writeTurn?.mine?.complete(Unit)
+                            scanTurn?.mine?.complete(Unit)
+                            scanTurn?.let { withContext(NonCancellable) { releaseScanTurn(it) } }
                             commandLimiter.release()
                         }
                     }
@@ -243,22 +323,36 @@ class BleAgent(
                 is ClientHello -> respondHello(frame)
                 else -> Unit // agent never receives Reply/Event/ServerHello
             }
-        }
-    }.also { main ->
-        // When the main job ends, the transport (WebSocket) is gone. Don't tear the radio down
-        // yet: hand off to the registry, which keeps this client's links warm for the transport
-        // grace so a brief blip can resume, then releases (and disconnects) them on expiry.
-        main.invokeOnCompletion {
+            }
+        } finally {
             // Retire this connection before the registry schedules grace, so a connect completing
             // in the teardown window sees a dead connection and leaves its lease to the grace path.
             connectionLive = false
-            registry.onTransportDropped(clientKey)
-            registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
+            withContext(NonCancellable) {
+                commandSupervisor.cancelAndJoin()
+                // The coordinator owns an agent-lifetime scope, so this cleanup survives the
+                // retiring connection. Registration fencing makes stale actions harmless.
+                scanCoordinator?.detachConnection(clientId)
+                val retiringScans = state.withLock {
+                    scanJobs.values.toList().also { scanJobs.clear() }
+                }
+                for (scan in retiringScans) {
+                    scan.sink?.let { scanArbiter.unregister(it) }
+                }
+                retiringScans.forEach { it.job.cancel() }
+                retiringScans.map { it.job }.joinAll()
+                registry.onTransportDropped(clientKey)
+                registry.unregisterClient(clientKey, onUnsolicitedDisconnect)
+            }
+            scanArbiter.close()
         }
     }
 
     private suspend fun handle(cmd: Command, writeTurn: WriteTurn? = null) {
         try {
+            // The transport is already gone, so there is nobody to reply to. Ordering turns are
+            // released by the caller's `finally`, which runs on this path too.
+            if (!connectionLive) return
             // Reverse-translate the op's client-facing handle back to the real radio handle up front,
             // so connection tracking, the registry, and the backend all deal only in real handles.
             // (mapDevice is inline, so the suspend toReal call is legal here.)
@@ -491,6 +585,57 @@ class BleAgent(
     }
 
     private suspend fun startScan(scanId: Long, op: Op.ScanStart) {
+        val coordinator = scanCoordinator
+        if (coordinator != null && coordinator.mode != ScanConcurrencyMode.UNCONTROLLED) {
+            // Once physical replacement begins, this command must commit its local binding before
+            // connection teardown can detach the generation. Otherwise cancellation between the
+            // old collector's stop and the new collector's launch strands surviving logical scans.
+            withContext(NonCancellable) {
+                when (val admission = try {
+                    coordinator.startOrReplace(LogicalScanKey(clientKey, scanId), clientId, op.filters)
+                } catch (limit: ScanLimitExceeded) {
+                    throw AgentException(AgentError(ErrorKind.INVALID_REQUEST, message = limit.message))
+                }) {
+                    ScanAdmission.SingleOccupied -> {
+                        val kind = if (Capabilities.SCAN_CONCURRENCY_SINGLE in negotiated) {
+                            ErrorKind.SCAN_UNAVAILABLE
+                        } else {
+                            ErrorKind.AGENT_BUSY
+                        }
+                        throw AgentException(AgentError(kind, message = "the agent-wide scan slot is held"))
+                    }
+                    is ScanAdmission.Accepted -> {
+                        val batched = Capabilities.SCAN_BATCH in negotiated
+                        val sink = scanArbiter.register(scanId)
+                        val job = scope.launch(start = CoroutineStart.LAZY) {
+                            try {
+                                if (batched) {
+                                    runCoordinatorBatchedScan(scanId, admission.advertisements, sink)
+                                } else {
+                                    runCoordinatorPerResultScan(scanId, admission.advertisements, sink)
+                                }
+                            } finally {
+                                scanArbiter.unregister(sink)
+                            }
+                        }
+                        val previous = state.withLock {
+                            scanJobs.put(scanId, ManagedScan(job, admission.registration, sink))
+                        }
+                        previous?.job?.cancel()
+                        job.start()
+                    }
+                }
+            }
+            val batchedLog = Capabilities.SCAN_BATCH in negotiated
+            observer.onClientLog(
+                clientId,
+                "scan started (#$scanId, ${coordinator.mode.name.lowercase()}${if (batchedLog) ", batched" else ""})",
+            )
+            Logger.debug(LogTags.ENGINE) {
+                "scan started [c=$clientId scanId=$scanId batched=$batchedLog mode=${coordinator.mode.name.lowercase()}]"
+            }
+            return
+        }
         val batched = Capabilities.SCAN_BATCH in negotiated
         val coalesce = advertisementCoalescer()
         val job = scope.launch(start = CoroutineStart.LAZY) {
@@ -502,9 +647,9 @@ class BleAgent(
                     AgentError(ErrorKind.INVALID_REQUEST, message = "at most $maxActiveScans active scans are allowed"),
                 )
             }
-            scanJobs.put(scanId, job)
+            scanJobs.put(scanId, ManagedScan(job, registration = null))
         }
-        previous?.cancel()
+        previous?.job?.cancel()
         job.start()
         observer.onClientLog(clientId, "scan started (#$scanId${if (batched) ", batched" else ""})")
         Logger.debug(LogTags.ENGINE) { "scan started [c=$clientId scanId=$scanId batched=$batched]" }
@@ -597,9 +742,78 @@ class BleAgent(
     }
 
     private suspend fun stopScan(scanId: Long) {
-        state.withLock { scanJobs.remove(scanId) }?.cancel()
+        val managed = state.withLock { scanJobs.remove(scanId) }
+        managed?.sink?.let { scanArbiter.unregister(it) }
+        managed?.job?.cancelAndJoin()
+        managed?.registration?.let { scanCoordinator?.stop(it) }
         observer.onClientLog(clientId, "scan stopped (#$scanId)")
         Logger.debug(LogTags.ENGINE) { "scan stopped [c=$clientId scanId=$scanId]" }
+    }
+
+    private suspend fun runCoordinatorPerResultScan(
+        scanId: Long,
+        source: Flow<AdvertisementDto>,
+        sink: ScanOutboundArbiter.Sink,
+    ) {
+        source.collect { ad ->
+            observer.onDeviceSeen(ad.device.value, ad.name)
+            deliverScanEvent(sink, AgentEvent.ScanResult(scanId, ad))
+        }
+    }
+
+    /**
+     * Hands one scan event to the arbiter, suspending when its steady-state mailbox is full so
+     * backpressure lands on the coordinator's single bounded reservation (which drops newest)
+     * rather than on a second copy of it here.
+     *
+     * [stopScan] closes this sink out from under a collector that may still be mid-flight, and an
+     * unguarded suspending send would throw [ClosedSendChannelException] and tear down the whole
+     * connection instead of just ending this scan's delivery — so closure is caught and reported
+     * as "not delivered". The caller keeps collecting; the coordinator closes its mailbox on stop,
+     * which is what actually ends the collect.
+     */
+    private suspend fun deliverScanEvent(sink: ScanOutboundArbiter.Sink, event: AgentEvent) {
+        try {
+            sink.events.send(event)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: ClosedSendChannelException) {
+            return
+        }
+        scanArbiter.signal()
+    }
+
+    private suspend fun runCoordinatorBatchedScan(
+        scanId: Long,
+        source: Flow<AdvertisementDto>,
+        sink: ScanOutboundArbiter.Sink,
+    ): Unit = coroutineScope {
+        val buffer = mutableListOf<AdvertisementDto>()
+        val bufLock = Mutex()
+        suspend fun flush() {
+            val batch = bufLock.withLock {
+                if (buffer.isEmpty()) null else buffer.toList().also { buffer.clear() }
+            }
+            if (batch != null) {
+                deliverScanEvent(sink, AgentEvent.ScanResultBatch(scanId, batch))
+            }
+        }
+        val flusher = launch {
+            while (isActive) {
+                delay(scanBatchWindow)
+                flush()
+            }
+        }
+        try {
+            source.collect { ad ->
+                observer.onDeviceSeen(ad.device.value, ad.name)
+                val full = bufLock.withLock { buffer.add(ad); buffer.size >= scanBatchMaxSize }
+                if (full) flush()
+            }
+        } finally {
+            flusher.cancel()
+            flush()
+        }
     }
 
     private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart) {

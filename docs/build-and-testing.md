@@ -50,16 +50,17 @@ client-sdk/src/
 
 ```sh
 ./gradlew build                      # all modules + targets compile; JVM tests run
-./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (39 tests)
+./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (41 tests)
 ./gradlew :client-sdk:jvmTest        # session / transport / kable / error-path / identifier suites
 ./gradlew conformanceTest            # named cross-agent conformance gate
-(cd agent-rs && cargo test)          # native Rust agent: 74 unit + cross-language interop tests
+(cd agent-rs && cargo test)          # native Rust agent: 113 unit + cross-language interop tests
 agent/run-agent.sh 8080                                       # run the real macOS JVM agent (NOT :agent:jvmRun)
 ./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json" # deterministic no-radio JVM agent
 agent-rs/run-agent-rs.sh 8080                                 # run the native Rust agent on macOS (Linux/Win: cargo run --bin agent-rs)
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080              # …with bearer auth
 REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080 # …with protected dashboard
 ./gradlew :e2e-runner:scanRun --args "ws://localhost:8080/agent 15"   # radio-less scan smoke test
+./gradlew :e2e-runner:scanConcurrencyRun --args "ws://localhost:8080/agent <svc> same-client 60 15 10" # two staggered scans, graded
 ./gradlew :android-client:assembleDebug                      # build the emulator client APK
 ```
 

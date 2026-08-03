@@ -40,6 +40,7 @@ enum class ErrorKind(val transient: Boolean) {
     NO_CONNECTION_SLOT(transient = true),  // a slot may free up
     PERIPHERAL_BUSY(transient = true),     // the peripheral may become free
     AGENT_BUSY(transient = true),          // the agent may become free
+    SCAN_UNAVAILABLE(transient = true),    // `single` mode is held by another logical scan
     INVALID_REQUEST(transient = false),    // request is malformed or exceeds a published limit
     UNSUPPORTED(transient = false),        // capability absent — permanently so for this agent
     TIMEOUT(transient = true),             // the agent may answer a later attempt

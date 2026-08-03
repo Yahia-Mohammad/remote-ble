@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# One in-flight run per ref. Deliberately not applied to the publishing workflows
+# (agent-artifacts, agent-container, release) — cancelling a half-finished publish is worse
+# than letting a superseded one run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   agent-rs:
     name: agent-rs build + test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: agent-rs

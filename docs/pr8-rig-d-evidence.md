@@ -267,9 +267,55 @@ The honest boundary of the option-1 relaxation. None of these is a defect; each 
    image was built locally. C5's "public digest matches recorded release evidence" is open.
 6. **Finding 1's fix is unverified on macOS.** It changes how `agent-rs` resolves peripherals on
    *every* platform, and Rig A's `agent-rs` evidence predates it. The Kotlin agent has always worked
-   this way and the change is strictly narrower than the reverted cache, so the risk is low — but a
-   short `:e2e-runner:jvmRun` against `agent-rs` on the Rig A Mac should confirm it before tag.
+   this way and the change is strictly narrower than the reverted cache, so the risk is low — but it
+   should be confirmed before tag. The procedure is
+   [below](#the-outstanding-macos-re-check-finding-1); it is short and needs no phone prompts.
 7. **Case 4's manifest half and case 2's tighter-D-Bus-policy half**, as noted inline above.
+
+## The outstanding macOS re-check (finding 1)
+
+Run on the Rig A Mac, with `RBTestPeripheral` advertising in range **of the Mac**. This confirms the
+one path finding 1 broke — connect → discover → read through the now-cached peripheral handle — on
+the CoreBluetooth backend that Rig A validated before the fix existed.
+
+Use **`peripheralStateRun`, not `jvmRun`**: the full 14-step runner pauses for phone taps, and none
+of those steps bear on this question.
+
+```sh
+# in the repo, on the branch carrying the fix
+cargo build --release
+
+# terminal 1 — 127.0.0.1 is the binary's default bind, so this needs no bind flag
+REMOTE_BLE_TOKEN=secret ./target/release/agent-rs --port 8080
+
+# terminal 2
+./gradlew :e2e-runner:peripheralStateRun \
+  --args "ws://localhost:8080/agent secret RBTestPeripheral 20 5"
+```
+
+Two things that will otherwise cost a run each:
+
+- **The port is `--port`, not positional.** `agent-rs 8080` does not parse.
+- **Pass the token as `args[1]`,** as above. That runner takes
+  `[ws-url] [token] [name] [observe-window-s] [probe-interval-s]` positionally, so the window and
+  interval are unreachable without supplying the first two, and an empty-string placeholder is
+  shell-dependent rather than reliably blank.
+
+On macOS the *terminal application itself* needs Bluetooth permission (System Settings → Privacy &
+Security → Bluetooth). Denied, the scan finds nothing and reports no error — the same false-empty
+shape Rig B case 6 documents for a radio that is off.
+
+**Pass looks like this**, and the `read OK` lines are the whole check:
+
+```
+state -> Connected
+holding for 8s to confirm the link is stable... stable.
+link probe: read OK — the radio link is STILL UP
+```
+
+**Expected, and not a failure:** `FAILED: client never reached State.Disconnected within 20s` and a
+non-zero exit. That runner is Rig A case 2's unsolicited-drop test; no drop is being triggered here,
+so the link *staying up* is the positive result. Read the probe lines, not the exit code.
 
 ## Acceptance criteria, as met on this host
 

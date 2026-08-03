@@ -39,9 +39,10 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    the tag means accepting that arm64, AppArmor, SELinux-enforcing and rootless Podman are
    unvalidated and the image is labelled accordingly** — that is a decision, not a formality.
    Two residuals worth closing first, neither strictly blocking: Rig D's `agent-rs` fix is unverified
-   on macOS (Rig A's evidence predates it), and the multi-arch manifest is unexercised because no
-   `v*` tag exists yet, so item 2's digest record and this evidence cannot yet refer to the same
-   published artifact.
+   on macOS (Rig A's evidence predates it — the re-check is short and prompt-free,
+   [commands and pass criteria here](pr8-rig-d-evidence.md#the-outstanding-macos-re-check-finding-1)),
+   and the multi-arch manifest is unexercised because no `v*` tag exists yet, so item 2's digest
+   record and this evidence cannot yet refer to the same published artifact.
 5. ~~Complete the scan-concurrency hardware run~~ — **DONE 2026-08-03**, evidence in
    [scan-concurrency-validation.md](scan-concurrency-validation.md). Passed on the iOS agent, the
    Kotlin JVM agent and `agent-rs`, all three in agreement, no `INCONCLUSIVE` verdicts. One case

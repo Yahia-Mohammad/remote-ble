@@ -63,9 +63,10 @@ has now run.**
    Linux agent is an identity pass-through. It needs a **`UUID`-declaring client (iOS, or a
    macOS-host JVM) pointed at the Linux `agent-rs`** — see Rig D finding 4. Not a blocker.
 6. **Finding 1's fix is unverified on macOS** — it changes peripheral resolution on every platform and
-   Rig A's `agent-rs` evidence predates it. A short `:e2e-runner:jvmRun` against `agent-rs` on the
-   Rig A Mac should confirm it before tag. Low risk (it is what the Kotlin agent already does), but
-   it is a real gap in coverage rather than a formality.
+   Rig A's `agent-rs` evidence predates it. Low risk (it is what the Kotlin agent already does), but
+   a real gap in coverage rather than a formality. The re-check is short and needs no phone prompts:
+   [pr8-rig-d-evidence.md → the outstanding macOS re-check](pr8-rig-d-evidence.md#the-outstanding-macos-re-check-finding-1)
+   has the exact commands and pass criteria. Use `peripheralStateRun`, not `jvmRun`.
 
 **Four things the runs changed about this plan itself**, all marked inline below: two stimuli were
 invalid as written (Rig A case 2, Rig B case 6), one expectation was disproved by the hardware (Rig B

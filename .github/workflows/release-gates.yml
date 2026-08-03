@@ -56,6 +56,18 @@ jobs:
         working-directory: agent-rs
         run: cargo test --locked
 
+      # Gradle's console prints only the exception class and line for a failing test, so without
+      # this the assertion message dies with the runner. That cost a diagnosis once already.
+      - name: Archive Kotlin test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
   consumer-jvm:
     name: Published JVM consumer
     runs-on: ubuntu-latest
@@ -145,6 +157,15 @@ jobs:
           java-version: "17"
       - name: Drive the ordinary SDK through the simulated agent
         run: ./gradlew :client-sdk:jvmTest --tests '*BleAgentOverWebSocketTest.simulatedProfileDrivesTheOrdinaryClientOverARealSocket'
+      - name: Archive Kotlin test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simulated-e2e-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
 
   kotlin-coverage:
     name: Kotlin JVM coverage
@@ -165,6 +186,17 @@ jobs:
           name: kotlin-jvm-coverage
           path: build/reports/kover/
           if-no-files-found: error
+      # coverageReport runs the JVM suites, so this job fails on a failing test — and did, which is
+      # how the scan-concurrency flake surfaced with no message to read.
+      - name: Archive Kotlin test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kotlin-coverage-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
 
   rust-coverage:
     name: Rust coverage

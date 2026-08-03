@@ -207,10 +207,23 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      # actions/dependency-review-action requires either a public repository or GitHub
+      # Advanced Security on a private one. This repo is private with no GHAS license
+      # (confirmed: repos/{owner}/{repo}'s security_and_analysis is null even for an
+      # admin-scoped token, so it isn't just unconfigured — it's unavailable on this
+      # plan), so the action fails every PR with an environment error unrelated to the
+      # change under review. Skip it with an explicit warning instead of a false
+      # failure. If GHAS is ever enabled for a private repo, replace this `if` with a
+      # check against `security_and_analysis.advanced_security.status`.
       - name: Reject vulnerable dependency changes
+        if: '!github.event.repository.private'
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+      - name: Note why this gate is skipped
+        if: github.event.repository.private
+        run: |
+          echo "::warning::Dependency review skipped — this repository is private and has no GitHub Advanced Security license, which actions/dependency-review-action requires for private repos. Enable GHAS or make the repo public to activate this gate: https://github.com/${{ github.repository }}/settings/security_analysis"
 
   rust-policy:
     name: Rust advisories and licenses

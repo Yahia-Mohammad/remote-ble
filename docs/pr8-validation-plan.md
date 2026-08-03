@@ -12,7 +12,7 @@ the release commit before tag approval — see `release-candidate.md` step 4.
 
 ---
 
-## Progress — 19 of 25 cases run
+## Progress — 25 of 25 cases run
 
 **Updated 2026-08-03.** Every case below is marked inline with its outcome. Per-case detail lives in
 the evidence docs; this table is the index, and
@@ -21,21 +21,27 @@ runs produced.
 
 The 25 counted here are this plan's own rigs (A 8 + B 6 + C 5 + D 6). The **scan-concurrency run is
 tracked separately** in [scan-concurrency-validation.md](scan-concurrency-validation.md) — 8 cases,
-7 run and passed on 2026-08-03 — because that feature landed after this plan was written. **Rig D is
-the only rig still outstanding.**
+7 run and passed on 2026-08-03 — because that feature landed after this plan was written. **Every rig
+has now run.**
 
 | Rig | Cases | Status | Evidence |
 |---|---|---|---|
 | **A** — real radio | 8/8 | ✅ **COMPLETE** (2026-07-27 → 07-28) | [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) |
 | **B** — iOS agent lifecycle | 6/6 | ✅ **COMPLETE** (2026-07-29), spill-over closed 07-30 | [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) |
 | **C** — TLS reverse proxy | 5/5 | ✅ **COMPLETE** (2026-07-27) | [tls-proxy-recipe.md](tls-proxy-recipe.md) |
-| **D** — Rust container hosts | 0/6 | ⛔ **NOT RUN** — the only rig outstanding | — |
+| **D** — Rust container hosts | 6/6 | ✅ **COMPLETE** (2026-08-03) — **one amd64 Linux host only**, per option 1 | [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md) |
 
 **What is left, precisely:**
 
-1. **Rig D's run** — the whole rig. Scope decision already taken (**option 1**): run the available
-   Nobara amd64 laptop, then relax the acceptance criteria to "one amd64 Linux host validated,
-   AppArmor and arm64 unvalidated" and label the image accordingly. This is a **release blocker**.
+1. ~~**Rig D's run**~~ **RUN 2026-08-03, 6/6 PASS** on a Nobara (Fedora-family) amd64 laptop, under
+   the **option 1** scope decision. It found **one release blocker in `agent-rs`** — every GATT op
+   re-derived its own undiscovered `Peripheral`, so the Rust agent could discover a device on Linux
+   but never read, write, or observe it (finding 1). Fixed, and the fix is the Rust parity of what
+   the Kotlin agent has always done. **The remaining Rig D work is not a run but a labelling change**:
+   `rust-agent-container.md` §2/§10 must be relaxed to "one amd64 Linux host validated; AppArmor and
+   arm64 unvalidated" and the image labelled accordingly. **arm64, AppArmor, SELinux-enforcing,
+   Podman/rootless and the published GHCR manifest all remain uncovered** — see the evidence doc's
+   "What this run does not prove", which is the load-bearing half of that document.
 2. **Gap 13's mechanism** (Rig B case 5's follow-up) — one discriminating run against an *unbonded*
    peripheral. The link outliving a killed agent is measured at ≥26 min, but it may belong to this
    rig's bonded phone pair rather than to iOS. Not a blocker.
@@ -51,11 +57,21 @@ the only rig still outstanding.**
    wording stays as-is, neither confirmed nor narrowed. Commit `09f2f49`.
 4. **Rig B case 3's screen-lock half** — the background half is measured; a manual lock was never
    performed, because the agent disables the idle timer while running. Not a blocker.
+5. **Rig A case 5's rewrite half is still unreachable** — and Rig D, which item 2 of the progress doc
+   nominated to close it, **does not**. Rewriting is driven by the *client's* declared format, and
+   `needs_rewrite` is `false` for both `STRING` and `BLUEZ_JSON`, so a Linux-host JVM client against a
+   Linux agent is an identity pass-through. It needs a **`UUID`-declaring client (iOS, or a
+   macOS-host JVM) pointed at the Linux `agent-rs`** — see Rig D finding 4. Not a blocker.
+6. **Finding 1's fix is unverified on macOS** — it changes peripheral resolution on every platform and
+   Rig A's `agent-rs` evidence predates it. A short `:e2e-runner:jvmRun` against `agent-rs` on the
+   Rig A Mac should confirm it before tag. Low risk (it is what the Kotlin agent already does), but
+   it is a real gap in coverage rather than a formality.
 
-**Three things the runs changed about this plan itself**, all marked inline below: two stimuli were
+**Four things the runs changed about this plan itself**, all marked inline below: two stimuli were
 invalid as written (Rig A case 2, Rig B case 6), one expectation was disproved by the hardware (Rig B
-case 3), and one case turned out to be partly unreachable on its rig (Rig A case 5). A reader
-following this plan should read those corrections before running the case, not after.
+case 3), one case turned out to be partly unreachable on its rig (Rig A case 5), and Rig D's case 1
+names a tool (`hciconfig`) that no longer ships on current Linux. A reader following this plan should
+read those corrections before running the case, not after.
 
 ---
 
@@ -347,42 +363,63 @@ Full procedure: [`rust-agent-container.md`](proposals/rust-agent-container.md) �
 tests". Run the following **on each host independently** — this is not one test run split across
 two machines, it's the full sequence twice:
 
-### Test cases (per host) — ⛔ NONE RUN
+### Test cases (per host) — ✅ 6/6 on one amd64 Linux host (2026-08-03)
 
-**Status 2026-07-30: this is the only rig still outstanding, and it is a release blocker.** The scope
-decision is taken (**option 1**): a Nobara (Fedora-based) amd64 laptop is available and can run all 6
-cases on a real radio, which retires the substantive risk that the container does not work on Linux.
+**Status 2026-08-03: run and complete under option 1**, on a Nobara (Fedora-family) amd64 laptop —
+Docker 29.7.1, BlueZ 5.86, locally built image (no `v*` tag exists, so nothing is published to GHCR
+yet). Full per-case detail, host record and findings:
+[`pr8-rig-d-evidence.md`](pr8-rig-d-evidence.md).
+
 It does **not** satisfy the acceptance criteria as written — Ubuntu is named in
-[`rust-agent-container.md`](proposals/rust-agent-container.md) *because of* AppArmor, and Fedora ships
-SELinux — so the plan is to run it, then relax the criteria to "one amd64 Linux host validated,
-AppArmor and arm64 unvalidated" and label the image accordingly. **arm64 stays entirely uncovered.**
-Docker Desktop on macOS cannot substitute: no host Bluetooth in its Linux VM.
+[`rust-agent-container.md`](proposals/rust-agent-container.md) *because of* AppArmor — so the
+remaining work is the **labelling change**: relax §2/§10 to "one amd64 Linux host validated, AppArmor
+and arm64 unvalidated". **arm64 stays entirely uncovered**, and Docker Desktop on macOS cannot
+substitute (no host Bluetooth in its Linux VM). Two predictions in the progress doc's item 2 turned
+out **not** to apply here and stay untested rather than disproved: SELinux was *Disabled* on this
+install (so the `:z`/`:Z` friction never arose), and the host had Docker rather than Podman (so the
+rootless-Podman D-Bus problem is untested).
 
+1. ✅ **PASS** — **Adapter visible to host BlueZ**: `bluetoothctl list` →
+   `Controller 30:03:C8:54:FA:74 nobara-pc [default]`.
+   **Correction (2026-08-03):** `hciconfig` is **not installed** on current Fedora-family systems —
+   it belongs to the deprecated net-tools-era BlueZ utilities. Use `bluetoothctl`; do not install a
+   deprecated package believing the case requires it.
+2. ✅ **PASS** — **Authenticated start**: mounted `/run/dbus/system_bus_socket`, `REMOTE_BLE_TOKEN`
+   set, per `rust-agent-container.md` §4. `Subscribed to btleplug adapter events stream` is the line
+   that proves it reached the *host's* BlueZ. `docker inspect` confirmed the supported shape —
+   non-root `65532`, `Privileged=false`, bridge networking, no added caps, only the socket bind —
+   which also discharges §6's non-root-socket-access bullet on this host.
+3. ✅ **PASS** — **Unauthenticated non-loopback startup fails closed**: exits 1 with the bind-policy
+   error and creates *no* listener (connection-refused, not 401).
+4. ✅ **PASS (version)** — `agent-rs 0.10.0`. **The manifest half was not exercised**: the image was
+   built natively, so architecture is amd64 by construction. Multi-arch manifest resolution needs the
+   published image and stays with `rust-agent-container.md` C5.
+5. ✅ **PASS after a fix** — **Ordinary client session**: full `:e2e-runner:jvmRun`, **12 passed,
+   0 failed, 2 XPASS**. Failed deterministically at first, finding a **release blocker**: every
+   `agent-rs` GATT op re-derived its own undiscovered `Peripheral`, so the Rust agent could discover
+   a device on Linux but never read/write/observe it. See evidence finding 1.
+6. ✅ **PASS** — **`SIGTERM` handling**: `docker stop` returned in **0.25 s** against a 10 s grace
+   with `Shutdown signal received; disconnecting peripherals and exiting` and exit code 0 (a hard
+   kill would have burned the full timeout), then rediscovered the peripheral after restart.
 
-1. **Adapter visible to host BlueZ** — `bluetoothctl list` / `hciconfig` shows the adapter before
-   touching the container.
-2. **Authenticated start** — mount `/run/dbus/system_bus_socket`, set `REMOTE_BLE_TOKEN`, start the
-   image per the documented `docker run` command in `rust-agent-container.md` §4.
-3. **Unauthenticated non-loopback startup fails** — confirm the bind policy still fails closed
-   inside the container (no credential → no listener on `0.0.0.0`).
-4. **`--version` reports 0.10.0** and the manifest resolves to the host's native architecture
-   (amd64 on Ubuntu, arm64 on the Pi).
-5. **Ordinary client session** — an unmodified RemoteBLE client connects through the published
-   port and completes scan → connect → discover → read → disconnect against the real peripheral.
-6. **`SIGTERM` handling** — stop the container and confirm the structured shutdown/disconnect path
-   runs (not a hard kill), then restart and repeat step 5 to prove no leaked state.
-
-**Exit: NOT MET — 0 of 6 on 0 of 2 hosts.** Under option 1 this becomes "one amd64 Linux host passes
-all 6", with the arm64 host and the AppArmor reference host recorded as unvalidated. Capture host OS,
-Docker/Podman version, BlueZ version, adapter
-model, image digest, exact command, and redacted logs for each — `rust-agent-container.md`'s
-acceptance criteria require both reference hosts before the image is called supported.
+**Exit: MET under option 1 — 6 of 6 on one amd64 Linux host**, with the arm64 host and the AppArmor
+reference host recorded as unvalidated. Host OS, Docker version, BlueZ version, adapter, image ID,
+commands and redacted logs are captured in the evidence doc. Note the original criteria in
+`rust-agent-container.md` still require **both** reference hosts before the image is called
+supported — that text is what option 1 changes, and until it is changed this rig's exit is met
+against the *relaxed* bar only.
 
 ---
 
 ## Suggested order
 
 Rigs are independent and can run in any order or in parallel if you have the hardware for more
-than one at once. **Rigs A, B and C are done — only Rig D remains, so there is no ordering left to
-choose.** The original advice, kept for a future release's re-run: sequence Rig A first, since it
-re-validates the most code and shares its peripheral with Rigs B and C.
+than one at once. **All four rigs are now done, so there is no ordering left to choose.** The
+original advice, kept for a future release's re-run: sequence Rig A first, since it re-validates the
+most code and shares its peripheral with Rigs B and C.
+
+For a future re-run, add what this round learned: Rig D found a defect that **only** a non-Apple
+btleplug host could surface, so it is not merely a packaging rig — schedule it as a first-class
+correctness rig, not an afterthought. Two of its findings also point back at Rig A (the two ATT-error
+gates are CoreBluetooth-specific, not btleplug-wide) and at a still-unreachable case (identifier
+rewriting needs a `UUID` client against the Linux agent).

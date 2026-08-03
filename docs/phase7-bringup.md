@@ -80,7 +80,7 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 > directly from a shell all still abort). The script compiles a tiny JNI launcher
 > ([`agent/macos-launcher/launcher.c`](../agent/macos-launcher/launcher.c)), wraps it in a signed
 > `RemoteBleAgent.app` carrying the key, and starts it with `open` (it streams the agent log).
-> First run prompts once for Bluetooth permission. See [agent.md](agent.md#the-runnable-agent--main).
+> First run prompts once for Bluetooth permission. See [agent.md](agent.md#the-runnable-agent-jvm--main).
 >
 > **Smoke-test the radio without the peripheral:** `agent/run-agent.sh` is already enough to scan.
 > Run `./gradlew :e2e-runner:scanRun --args "ws://localhost:8080/agent 15"` (or the `:android-client`

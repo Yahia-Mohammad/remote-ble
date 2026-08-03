@@ -58,9 +58,12 @@ Source: [`agent/src/`](../agent/src)
 | [`AgentObserver.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentObserver.kt) | Lifecycle hooks `BleAgent` reports (devices/scan/activity); no-op default |
 | [`BleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleBackend.kt) | The portable radio op surface |
 | [`EngineBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/EngineBleBackend.kt) | Real backend over Kable's common `Peripheral`/`Scanner` API — one implementation for all three targets |
+| [`ScanConcurrencyMode.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanConcurrencyMode.kt) | The configured mode (`multiplexed`/`single`/`uncontrolled`) and its `REMOTE_BLE_SCAN_CONCURRENCY` parsing — see [below](#scan-concurrency-policy) |
+| [`ScanCoordinator.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanCoordinator.kt) | Agent-lifetime owner of the single physical scan in the guaranteed modes: admission, fencing, identity merge, per-subscriber filtered fan-out |
+| [`ScanOutboundArbiter.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanOutboundArbiter.kt) | Per-connection round-robin fairness across that connection's logical scans |
 | [`SimulationProfile.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulationProfile.kt) | Strict, bounded `schemaVersion: 1` JSON profile decoded before simulated startup |
 | [`SimulatedBleBackend.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt) | Deterministic `BleBackend` implementation for the JVM agent's radio-less profile mode |
-| [`PeripheralByIdentifier.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralByIdentifier.kt) | `expect`/`actual` bridge for reconstructing a `Peripheral` from a bare identifier — see [below](#the-real-backend--enginebleblebackend) |
+| [`PeripheralByIdentifier.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralByIdentifier.kt) | `expect`/`actual` bridge for reconstructing a `Peripheral` from a bare identifier — see [below](#the-real-backend--engineblebackend) |
 | [`ConnectionWatcher.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ConnectionWatcher.kt) | Polls `BleBackend.isConnected` every tick, `BleBackend.checkLiveness` (active probe) every `livenessInterval`, to catch unsolicited drops and start the lease release grace |
 | [`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt) | A canned, radio-free agent for client tests |
 | [`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) | Thread-safe live state (clients/hardware/logs) + a `Snapshot` served as JSON (HTML dashboard) or read directly (Compose UI) |
@@ -434,26 +437,8 @@ private suspend inline fun <T> bleOp(failure: ErrorKind, block: () -> T): T =
   across them). **The agent mints the `DeviceHandle` here** from the advertisement's
   `identifier` (`DeviceHandle(advertisement.identifier.toString())`). It uses `send` (not
   `trySend`) so advertisements apply backpressure rather than being dropped; cancelling the
-  collect stops the scan.
-
-### Scan concurrency policy
-
-`AgentConfig.scanConcurrency` selects `multiplexed` (default), `single`, or `uncontrolled` for the
-process lifetime; the JVM launcher accepts `REMOTE_BLE_SCAN_CONCURRENCY`. Guaranteed modes use an
-agent-lifetime coordinator keyed by stable client key plus `scanId`, retain ownership through
-transport grace, merge identity before filter matching, and fan out through 320-item drop-newest
-logical mailboxes (256 retained replay entries plus 64 steady-state entries). A per-connection
-round-robin arbiter feeds the existing best-effort outbound path.
-
-Each logical scan has exactly **one** bounded reservation of that size on both agents, and drop-newest
-is applied once, where the physical fan-out writes. `agent-rs` reaches that by handing the arbiter's
-mailbox to the coordinator as the delivery sink. The Kotlin agent keeps a collector between the two
-(it is where `scan.batch` coalescing happens, which `agent-rs` does not implement), so its arbiter
-sink carries only the 64-entry steady-state depth and the collector hands events on with a suspending
-send — backpressure lands on the coordinator's single reservation instead of a second copy of it.
-Physical fan-out itself never suspends on either agent, so a stalled connection cannot slow the radio.
-`multiplexed` guarantees filter and lifecycle isolation, not Apple discovery completeness; operator
-choice of `uncontrolled` retains the direct backend path and makes no isolation claim.
+  collect stops the scan. In the guaranteed modes this is driven by `ScanCoordinator` rather than
+  called per client — see [Scan concurrency policy](#scan-concurrency-policy) below.
 - **`connect`** — `peripheral.connect()`; Kable suspends until connected (discovering
   services along the way) or throws → `CONNECTION_FAILED`.
 - **`disconnect`** — `peripheral.disconnect()`, then **always `close()` and evict** the
@@ -494,6 +479,41 @@ discovered-service tree (`findCharacteristic` / `findDescriptor` → `CHARACTERI
 > **Capabilities.** `btleplug` offers no bonding or connection-priority control, so the macOS
 > reference agent advertises only `descriptors`. The `pair`/`unpair`/`requestConnectionPriority`
 > ops fall back to the `BleBackend` defaults (`UNSUPPORTED`).
+
+### Scan concurrency policy
+
+Two logical scans through one agent are not isolated by the radio on Apple hosts — a
+`CBCentralManager` has exactly one scan, so a second `Scanner` can stop or silently re-parameterize
+the first. This is reachable by a single ordinary client holding two `RemoteScanner`s, so the agent
+mediates it rather than passing it through. The design record is
+[proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md); the consumer-facing
+contract is [scanning.md](scanning.md).
+
+| Type | Role |
+|---|---|
+| [`ScanConcurrencyMode.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanConcurrencyMode.kt) | The mode enum — `MULTIPLEXED` (default), `SINGLE`, `UNCONTROLLED` — plus parsing for `REMOTE_BLE_SCAN_CONCURRENCY` |
+| [`ScanCoordinator.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanCoordinator.kt) | Agent-lifetime, one instance per process. Owns the single physical scan, admits/retires logical scans, fences admissions, merges identity, and fans out per-subscriber filtered results |
+| [`ScanOutboundArbiter.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ScanOutboundArbiter.kt) | Per-connection round-robin fairness across that connection's logical scans, feeding the existing best-effort outbound path |
+
+`AgentConfig.scanConcurrency` selects the mode for the process lifetime; the JVM launcher reads
+`REMOTE_BLE_SCAN_CONCURRENCY`. The guaranteed modes (`multiplexed`, `single`) key the coordinator by
+stable client key plus `scanId`, retain ownership through transport grace, merge identity before
+filter matching, and fan out through 320-item drop-newest logical mailboxes (256 retained replay
+entries plus 64 steady-state entries).
+
+Each logical scan has exactly **one** bounded reservation of that size on both agents, and drop-newest
+is applied once, where the physical fan-out writes. `agent-rs` reaches that by handing the arbiter's
+mailbox to the coordinator as the delivery sink. The Kotlin agent keeps a collector between the two
+(it is where `scan.batch` coalescing happens, which `agent-rs` does not implement), so its arbiter
+sink carries only the 64-entry steady-state depth and the collector hands events on with a suspending
+send — backpressure lands on the coordinator's single reservation instead of a second copy of it.
+Physical fan-out itself never suspends on either agent, so a stalled connection cannot slow the radio.
+
+`multiplexed` guarantees filter and lifecycle isolation, not Apple discovery completeness; operator
+choice of `uncontrolled` retains the direct backend path and makes no isolation claim. The Rust
+counterpart is [`agent-rs/src/transport/scan_coordinator.rs`](../agent-rs/src/transport/scan_coordinator.rs),
+which must produce the same observable behaviour — that parity is what
+[agent-parity-verification.md](agent-parity-verification.md) tracks.
 
 ---
 

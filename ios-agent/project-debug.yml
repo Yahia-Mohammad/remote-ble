@@ -1,11 +1,15 @@
-# THROWAWAY XcodeGen spec — identical to project.yml except that it links the **debug**
-# XCFramework. Not the source of truth; delete it when the rig session ends.
+# Debug-linking XcodeGen spec — identical to project.yml except that it links the **debug**
+# XCFramework. NOT the source of truth for what ships: project.yml is, and it points at release.
 #
 # Why it exists: the release link performs whole-program devirtualization over the entire
 # transitive closure (Compose Multiplatform, Ktor, Kable, coroutines, serialization, Koin) and OOMs
 # unpredictably — 16g failed with the host at ~33 % free (gap 11). The debug framework links in
-# ~1 minute, runs fine on device, and is a valid vehicle for hardware verification. Using a spec
+# ~20 seconds, runs fine on device, and is a valid vehicle for hardware verification. Using a spec
 # copy rather than editing project.yml keeps the tracked file honest about what ships.
+#
+# Originally written as throwaway, but keep it until gap 11 is fixed: the release link has now
+# OOM'd on every on-device session that tried it (2026-07-30, and again 2026-08-03 during the
+# scan-concurrency run), so every such session needs this file and would otherwise re-create it.
 #
 #   ./gradlew :agent:assembleRemoteBleAgentDebugXCFramework -PiosFramework
 #   cd ios-agent && xcodegen generate --spec project-debug.yml

@@ -235,7 +235,7 @@ REMOTE_BLE_TOKEN=secret agent-rs/run-agent-rs.sh 8080
 ```
 
 On **macOS** the script wraps the binary in a signed `RemoteBleAgentRs.app` and `open`s it (the
-same TCC/`SIGABRT` reason as the [JVM agent above](#macos-tcc)); the first launch prompts once for
+same TCC/`SIGABRT` reason as the [JVM agent above](#from-source--macos-run-agentsh)); the first launch prompts once for
 Bluetooth — approve it, and re-run if the first scan is empty. On **Linux** it just builds and runs
 the binary directly, talking to BlueZ over D-Bus. Either way it streams the log; Ctrl-C stops it.
 

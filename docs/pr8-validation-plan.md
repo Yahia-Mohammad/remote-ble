@@ -14,10 +14,15 @@ the release commit before tag approval — see `release-candidate.md` step 4.
 
 ## Progress — 19 of 25 cases run
 
-**Updated 2026-07-30.** Every case below is marked inline with its outcome. Per-case detail lives in
+**Updated 2026-08-03.** Every case below is marked inline with its outcome. Per-case detail lives in
 the evidence docs; this table is the index, and
 [`0.10.0-progress-status.md`](proposals/0.10.0-progress-status.md) carries the open-gap list that the
 runs produced.
+
+The 25 counted here are this plan's own rigs (A 8 + B 6 + C 5 + D 6). The **scan-concurrency run is
+tracked separately** in [scan-concurrency-validation.md](scan-concurrency-validation.md) — 8 cases,
+7 run and passed on 2026-08-03 — because that feature landed after this plan was written. **Rig D is
+the only rig still outstanding.**
 
 | Rig | Cases | Status | Evidence |
 |---|---|---|---|

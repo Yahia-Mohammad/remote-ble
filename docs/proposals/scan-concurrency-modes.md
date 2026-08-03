@@ -43,7 +43,7 @@ work on both agents. See [the parity finding](#the-parity-finding-agent-rs-alrea
 Full write-up in gap 21; the short form:
 
 `MAX_ACTIVE_SCANS = 16` is enforced **per client**
-([`BleAgent.kt:500`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:500)),
+([`BleAgent.kt`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)),
 so this is reachable by **one ordinary app** holding two `RemoteScanner`s — one filtered for
 heart-rate monitors, one for thermometers. Both drive Kable `Scanner`s inside the agent, and on
 Apple every Kable `Scanner` shares the process-wide `CentralManager.Default`. A `CBCentralManager`
@@ -118,8 +118,9 @@ can distinguish it from an old agent.
 
 ## Filter semantics (normative — previously mis-filed as an open question)
 
-Already documented at [agent.md:433](../agent.md:433) and implemented by `agent-rs`
-([`scan_matches`](../../agent-rs/src/ble/btleplug_impl.rs:1003)). Making the agent the filtering
+Already documented in [agent.md's op-by-op `scan` entry](../agent.md#op-by-op) and implemented by
+`agent-rs` (`scan_matches` in
+[`btleplug_impl.rs`](../../agent-rs/src/ble/btleplug_impl.rs)). Making the agent the filtering
 authority requires it in the spec:
 
 ```text
@@ -134,14 +135,15 @@ matches(filters, advertisement) =
 So: OR across list entries, AND within one entry, an empty list and an empty `ScanFilter()` both
 match all, exact name comparison, canonical UUID comparison.
 
-**Two defects to fix before lifting a shared matcher**, both in `SimulatedBleBackend`:
+**Two defects had to be fixed before a shared matcher could be lifted**, both in
+[`SimulatedBleBackend`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt).
+**Both are now fixed** (verified 2026-08-03):
 
-1. [`matches`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt:178)
-   uses `filters.all { … }` — AND across the list, contradicting the documented and Rust-implemented
-   OR.
-2. [`scan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/SimulatedBleBackend.kt:52)
-   filters on profile service UUIDs but emits an `AdvertisementDto` carrying only
-   `device`/`name`/`rssi`. Any agent-side re-filter by service rejects everything it emits.
+1. `matches` used `filters.all { … }` — AND across the list, contradicting the documented and
+   Rust-implemented OR. It now reads `filters.isEmpty() || filters.any { … }`.
+2. `scan` filtered on profile service UUIDs but emitted an `AdvertisementDto` carrying only
+   `device`/`name`/`rssi`, so any agent-side re-filter by service rejected everything it emitted.
+   It now emits `serviceUuids` from the profile advertisement.
 
 Multi-predicate tests are required: two logical scans with one predicate each do not exercise list
 semantics.
@@ -273,7 +275,7 @@ backend or radio failure is not an admission decision either: those keep their e
 `GATT_ERROR` mappings. If the future strict fourth mode lands, it becomes this kind's second source.
 
 **It must be capability-gated.** `ErrorKind` is a plain `@Serializable` enum that serializes by name,
-and [`Capabilities.kt:74`](../../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt:74)
+and [`Capabilities.kt`](../../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
 records the consequence: an unknown enum name fails a v1 client's decode. This is why `RADIO_OFF` is
 gated behind `radio.state`, and the same applies here — a client that negotiated no scan-concurrency
 capability receives the existing `AGENT_BUSY` instead.
@@ -308,7 +310,7 @@ to the connection's negotiated capability set, so it cannot choose between `SCAN
 `AGENT_BUSY`.
 
 The seam already exists:
-[`BleAgent.startScan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:493)
+[`BleAgent.startScan`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)
 performs mutex-guarded admission for today's connection-local cap, starts the job `LAZY`, and
 implements same-key replacement via `previous?.cancel()`. That location remains the command-path
 seam, but cap ownership moves into the agent-lifetime coordinator so reconnecting cannot acquire a
@@ -353,7 +355,7 @@ scan has rebound, and would otherwise tear down its replacement. `LEASE-DUPLICAT
 live sockets for one client key; it does not order these. The registry already solves the analogous
 problem the same way — `Lease(owner, connected, graceJob)` with cancellable grace jobs and
 lease-object identity
-([`PeripheralRegistry.kt:64`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralRegistry.kt:64)) —
+([`PeripheralRegistry.kt`](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PeripheralRegistry.kt)) —
 so scans should follow it rather than invent a second scheme.
 
 Lifecycle rules, all generation-guarded:
@@ -404,7 +406,7 @@ A failed rebind leaves the previous definition running.
 ### Identity aggregation moves ahead of matching
 
 The Kotlin agent coalesces name and service UUIDs *after* the backend, per scan
-([BleAgent.kt:534](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt:534)),
+([BleAgent.kt](../../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/BleAgent.kt)),
 because repeated packets from one device routinely carry only an RSSI refresh. Filtering below that
 point would discard a sparse update for a service-filtered subscriber even after an earlier packet
 established that device's service UUID. The pipeline must be:
@@ -452,7 +454,7 @@ drop events after fair arbitration without violating filter or lifecycle correct
 
 **This is new work on both agents, and an earlier draft of this document got `agent-rs` wrong.** The
 Rust agent creates **one** `event_tx` per WebSocket connection
-([server.rs:674](../../agent-rs/src/transport/server.rs:674)) and clones it into every op, so all
+([server.rs](../../agent-rs/src/transport/server.rs)) and clones it into every op, so all
 scans, observations and connection events on a connection share a single `EVENT_CHANNEL_CAP` budget.
 Its `try_send` also drops the **event being sent** when the channel is full, not the oldest queued
 one — so neither "per-subscriber mailbox" nor "drop-oldest" described the shipping behaviour.

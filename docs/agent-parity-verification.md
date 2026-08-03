@@ -175,11 +175,23 @@ the client-facing behavior.
 
 **Pre-existing:** Yes. Rust never implemented scan batching.
 
-**Gap 21 implementation status.** Both reference agents now route guaranteed modes through an
-agent-lifetime coordinator keyed by stable client key and scan ID, with generation-fenced grace,
-bounded replay, logical mailboxes, and fair per-connection admission to the outbound queue. Hardware
-validation remains required before the release blocker can close; see
+**Gap 21 — closed 2026-08-03, parity confirmed on hardware.** Both reference agents route guaranteed
+modes through an agent-lifetime coordinator keyed by stable client key and scan ID, with
+generation-fenced grace, bounded replay, logical mailboxes, and fair per-connection admission to the
+outbound queue. The design is
 [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md).
+
+**This section previously recorded concurrent-scan handling as matching when it did not** — the
+Kotlin agent opened one Kable `Scanner` per client while `agent-rs` already reference-counted
+subscribers onto a single adapter scan. That was a live parity defect this table asserted was
+absent, which is why it is called out here rather than quietly corrected.
+
+Parity is now verified rather than asserted: the [scan-concurrency hardware
+run](scan-concurrency-validation.md) put both topologies (two clients; one client holding two
+scanners) through the Kotlin JVM agent and `agent-rs` on the same Mac and the same radio, and the
+two **agreed on every verdict** — stop direction, start direction, and filter correctness — with no
+`INCONCLUSIVE` results. The iOS agent, which is the platform the defect actually lives on, agreed
+with both.
 
 ---
 

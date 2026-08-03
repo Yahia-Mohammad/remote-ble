@@ -1,17 +1,26 @@
 # Making agent timeouts and limits tunable without a recompile
 
-**Status:** proposal, not started — with one exception already landed, described below. Raised
+**Status:** proposal, not started — with **two** exceptions already landed, described below. Raised
 2026-07-28 during Rig A hardware validation.
 
-> **Precedent already set.** `REMOTE_BLE_WRITE_FAIL_FAST` (default `true`) shipped ahead of this
-> proposal because it gates a *workaround for a backend defect*, and shipping that un-switchable
-> would have meant the agent silently special-casing a vendor bug. It follows the shape recommended
-> here: an `AgentConfig` field, a `REMOTE_BLE_*` environment variable, strict parsing that fails
-> startup on a bad value rather than falling back, and a startup log line so the running behaviour
-> is visible. It is now on **both** reference agents — `agent-rs` reads the same environment
-> variable and additionally exposes `--write-fail-fast <true|false>`, and both accept only `true`
-> or `false` (a typo fails startup rather than silently taking the default). Use it as the
-> reference implementation for the rest of category A.
+> **Precedent already set, twice.** `REMOTE_BLE_WRITE_FAIL_FAST` (default `true`) shipped ahead of
+> this proposal because it gates a *workaround for a backend defect*, and shipping that
+> un-switchable would have meant the agent silently special-casing a vendor bug. It follows the
+> shape recommended here: an `AgentConfig` field, a `REMOTE_BLE_*` environment variable, strict
+> parsing that fails startup on a bad value rather than falling back, and a startup log line so the
+> running behaviour is visible. It is now on **both** reference agents — `agent-rs` reads the same
+> environment variable and additionally exposes `--write-fail-fast <true|false>`, and both accept
+> only `true` or `false` (a typo fails startup rather than silently taking the default).
+>
+> **`REMOTE_BLE_SCAN_CONCURRENCY` (default `multiplexed`) followed the same shape** and shipped with
+> the scan-concurrency work — `AgentConfig.scanConcurrency`, strict parsing of
+> `multiplexed`/`single`/`uncontrolled`, a startup log line, and the same value on both reference
+> agents. It goes further than the first: the configured mode is also **advertised on the wire**, so
+> a client reads it from the handshake instead of inferring it. That the operator switch reaches the
+> handshake was verified on hardware (`SC-HW-08`, 2026-08-03, three runs per mode) — see
+> [../scan-concurrency-validation.md](../scan-concurrency-validation.md).
+>
+> Use these two as the reference implementation for the rest of category A.
 **Scope:** the Kotlin agent (`:agent`, all four hosts) and `agent-rs`. Not the client SDK.
 
 ## Why this matters

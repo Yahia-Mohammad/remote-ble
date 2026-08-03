@@ -261,8 +261,13 @@ explicitly so a client can tell it apart from an old agent.
 
 ## Known limitations
 
-- **Apple discovery completeness under mixed filter classes** — described above; being validated on
-  hardware before 0.10.0 is tagged. Filter correctness and lifecycle isolation are unaffected.
+- **Apple discovery completeness under mixed filter classes** — described above. **Stated from
+  Apple's documented scan behaviour and the design, not from measurement:** the hardware case that
+  would settle it (`SC-HW-06`) needs two Apple devices at once — a foreground central and a
+  separately backgrounded peripheral — and has not been run. It is therefore written as the
+  conservative claim; if it is ever measured and proves narrower, the wording narrows with it. Filter
+  correctness and lifecycle isolation **are** hardware-validated (2026-08-03, on the iOS agent, the
+  Kotlin JVM agent and `agent-rs`) and are unaffected by this.
 - **iOS agents are foreground-only.** Backgrounded behaviour is observed, never contract, and no
   design accommodates it.
 - **`uncontrolled` is explicitly non-conformant** with the isolation guarantee. That is the point of

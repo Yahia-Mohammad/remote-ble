@@ -409,7 +409,7 @@ Key properties:
 Tracing a serial WWR loop end-to-end shows the dominant cost isn't the radio — it's **N sequential
 WebSocket round trips**, one per `write()` call, because `session.request()` suspends until its
 Reply lands before the next write is even sent. `writeWithoutResponseBurst` fixes that without
-touching the wire: it uses [`AgentSession.dispatch`](#agentsession) to send up to `window` frames
+touching the wire: it uses [`AgentSession.dispatch`](#layer-2--session-agentsession) to send up to `window` frames
 before awaiting any of their Replies, instead of one-at-a-time.
 
 ```kotlin

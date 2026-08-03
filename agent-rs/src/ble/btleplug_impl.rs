@@ -27,10 +27,13 @@ pub struct BtleplugBackend {
     /// One notification-pump task per client subscription. The physical BLE subscription is
     /// retained until the final local consumer for the characteristic stops observing.
     active_observations: Arc<Mutex<HashMap<StreamKey, Observation>>>,
-    /// Connected devices -> the owning client's event channel, so the adapter
-    /// event listener can forward an unsolicited BLE disconnect to the client.
-    /// Keyed by device handle (`PeripheralId::to_string()`).
-    connected: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+    /// Connected devices -> the owning client's event channel plus the live `Peripheral` handle
+    /// from the `connect()` that established the link, so the adapter event listener can forward
+    /// an unsolicited BLE disconnect to the client and later ops can reuse the same discovered
+    /// GATT table instead of re-deriving an independent, undiscovered handle per op (see
+    /// [BtleplugBackend::find_connected_peripheral]). Keyed by device handle
+    /// (`PeripheralId::to_string()`).
+    connected: Arc<Mutex<HashMap<String, ConnectedDevice>>>,
     /// Cross-client ownership. An unsolicited BLE drop notifies it so the lease
     /// is released (after its grace window) rather than leaking.
     registry: PeripheralRegistry,
@@ -209,6 +212,16 @@ struct Observation {
 struct ScanSubscription {
     filters: Vec<ScanFilter>,
     event_tx: mpsc::Sender<AgentEvent>,
+}
+
+/// A live, already-`connect()`-ed peripheral handle plus the owning client's event channel.
+/// Cloning `peripheral` shares the same underlying btleplug state as the instance stored here —
+/// unlike a fresh [find_peripheral_by_id] lookup, which on the BlueZ backend does not inherit
+/// another instance's already-discovered GATT table (see
+/// [BtleplugBackend::find_connected_peripheral]).
+struct ConnectedDevice {
+    event_tx: mpsc::Sender<AgentEvent>,
+    peripheral: Peripheral,
 }
 
 /// How long [BtleplugBackend::spawn_liveness_prober]'s probe waits before treating the link
@@ -541,6 +554,37 @@ impl BtleplugBackend {
     async fn find_peripheral(&self, device: &DeviceHandle) -> Result<Peripheral, AgentError> {
         find_peripheral_by_id(&self.adapter, &device.value).await
     }
+
+    /// Resolves a handle to the live `Peripheral` that [`Self::connect`] established, rather than a
+    /// fresh, independently-enumerated one from [`Self::find_peripheral`].
+    ///
+    /// This is the Rust parity of the Kotlin agent's `EngineBleBackend.peripherals`/`resolve`,
+    /// which has always kept one long-lived `Peripheral` per connected device and reused it for
+    /// every op. `agent-rs` was the outlier: `discover`/`read`/`write`/`start_observe` each called
+    /// [`Self::find_peripheral`], so every op ran against its own instance. On the BlueZ backend
+    /// only the instance that ran `discover_services()` reports a populated `services()`, so
+    /// `find_characteristic` failed for every read/write/observe *after* a successful discover —
+    /// reproduced deterministically on real Linux hardware (Rig D, 2026-08-03). Reusing the
+    /// connection-scoped handle also drops one full `Adapter::peripherals()` enumeration per op.
+    ///
+    /// Unlike the cache described on [`Self::find_peripheral`] (tried and reverted), this never
+    /// resolves a handle across a disconnect: entries are removed on both explicit and unsolicited
+    /// disconnect and `connect()`'s own resolution is untouched, so a stale handle can never be
+    /// reused to attempt a reconnect. A missing entry fails fast with [`ErrorKind::NotConnected`],
+    /// matching the Kotlin agent's `requireConnected` — [`ErrorKind::UnknownDevice`] stays reserved
+    /// for a handle that identifies no device at all, as it is on [`find_peripheral_by_id`].
+    fn find_connected_peripheral(&self, device: &DeviceHandle) -> Result<Peripheral, AgentError> {
+        self.connected
+            .lock()
+            .get(&device.value)
+            .map(|c| c.peripheral.clone())
+            .ok_or_else(|| {
+                AgentError::new(
+                    ErrorKind::NotConnected,
+                    Some(format!("Device handle {} is not connected", device.value)),
+                )
+            })
+    }
 }
 
 async fn find_peripheral_by_id(adapter: &Adapter, id: &str) -> Result<Peripheral, AgentError> {
@@ -665,12 +709,12 @@ async fn gatt_op<T, E>(
 /// independent ways a drop can be noticed. A no-op if the device isn't tracked (e.g. an
 /// explicit `Disconnect` op already removed it).
 fn report_unsolicited_disconnect(
-    connected: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
+    connected: &Mutex<HashMap<String, ConnectedDevice>>,
     registry: &PeripheralRegistry,
     handle: &str,
 ) {
-    let sender = connected.lock().remove(handle);
-    if let Some(tx) = sender {
+    let removed = connected.lock().remove(handle);
+    if let Some(ConnectedDevice { event_tx: tx, .. }) = removed {
         tracing::info!("BLE device disconnected (unsolicited): {}", handle);
         let _ = tx.try_send(AgentEvent::ConnectionState {
             device: DeviceHandle {
@@ -798,10 +842,17 @@ impl BleBackend for BtleplugBackend {
         // connection.
         self.write_degraded.advance_generation(&device.value);
 
-        // Track the owning client's channel so an unsolicited drop can be reported.
-        self.connected
-            .lock()
-            .insert(device.value.clone(), event_tx.clone());
+        // Track the owning client's channel (so an unsolicited drop can be reported) and this
+        // now-connected handle (so later ops reuse its discovered GATT table — see
+        // find_connected_peripheral). connect()'s own lookup above is untouched: it still always
+        // does a fresh find_peripheral() scan, never falls back to a cached handle.
+        self.connected.lock().insert(
+            device.value.clone(),
+            ConnectedDevice {
+                event_tx: event_tx.clone(),
+                peripheral,
+            },
+        );
 
         let _ = event_tx.try_send(AgentEvent::ConnectionState {
             device: device.clone(),
@@ -815,17 +866,24 @@ impl BleBackend for BtleplugBackend {
         // Drop the tracking entry *before* tearing down the link so the adapter
         // event listener treats the resulting DeviceDisconnected as solicited and
         // stays quiet — we report the DISCONNECTED state ourselves below.
-        let sender = self.connected.lock().remove(&device.value);
+        let removed = self.connected.lock().remove(&device.value);
 
         // Retire the generation too: a connection that no longer exists can't be degraded, and a
         // write still running against it must not degrade its successor.
         self.write_degraded.advance_generation(&device.value);
 
-        if let Ok(peripheral) = self.find_peripheral(device).await {
+        // Prefer the tracked handle (avoids a redundant adapter.peripherals() scan); fall back to
+        // a fresh lookup if the device wasn't tracked (e.g. this races an unsolicited drop that
+        // already removed it).
+        let peripheral = match &removed {
+            Some(ConnectedDevice { peripheral, .. }) => Ok(peripheral.clone()),
+            None => self.find_peripheral(device).await,
+        };
+        if let Ok(peripheral) = peripheral {
             let _ = peripheral.disconnect().await;
         }
 
-        if let Some(tx) = sender {
+        if let Some(ConnectedDevice { event_tx: tx, .. }) = removed {
             let _ = tx.try_send(AgentEvent::ConnectionState {
                 device: device.clone(),
                 state: BleConnState::Disconnected,
@@ -836,7 +894,7 @@ impl BleBackend for BtleplugBackend {
     }
 
     async fn discover(&self, device: &DeviceHandle) -> Result<ResultPayload, AgentError> {
-        let peripheral = self.find_peripheral(device).await?;
+        let peripheral = self.find_connected_peripheral(device)?;
         peripheral.discover_services().await.map_err(|e| {
             AgentError::new(
                 ErrorKind::GattError,
@@ -871,7 +929,7 @@ impl BleBackend for BtleplugBackend {
         device: &DeviceHandle,
         char_ref: &CharRef,
     ) -> Result<ResultPayload, AgentError> {
-        let peripheral = self.find_peripheral(device).await?;
+        let peripheral = self.find_connected_peripheral(device)?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
         let bytes = gatt_op("read", peripheral.read(&characteristic))
             .await?
@@ -890,7 +948,7 @@ impl BleBackend for BtleplugBackend {
             return Err(rejection);
         }
 
-        let peripheral = self.find_peripheral(device).await?;
+        let peripheral = self.find_connected_peripheral(device)?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
         let write_type = if with_response {
             btleplug::api::WriteType::WithResponse
@@ -942,7 +1000,7 @@ impl BleBackend for BtleplugBackend {
     ) -> Result<(), AgentError> {
         // Replacing the same connection-local subscription must retire its old pump first.
         self.stop_observe(stream).await?;
-        let peripheral = self.find_peripheral(device).await?;
+        let peripheral = self.find_connected_peripheral(device)?;
         let characteristic = find_characteristic(&peripheral, char_ref)?;
         let needs_subscribe =
             !self.active_observations.lock().values().any(|observation| {
@@ -1006,8 +1064,13 @@ impl BleBackend for BtleplugBackend {
         let has_other_observer = self.active_observations.lock().values().any(|other| {
             other.device == observation.device && other.char_ref == observation.char_ref
         });
-        if !has_other_observer {
-            let peripheral = self.find_peripheral(&observation.device).await?;
+        // A device that's already disconnected has nothing to unsubscribe from — the physical
+        // subscription ended with the link, and erroring here would abort a batch cleanup loop
+        // (see the connection-teardown caller) partway through the other observations it still
+        // needs to stop.
+        if !has_other_observer
+            && let Ok(peripheral) = self.find_connected_peripheral(&observation.device)
+        {
             let characteristic = find_characteristic(&peripheral, &observation.char_ref)?;
             peripheral
                 .unsubscribe(&characteristic)

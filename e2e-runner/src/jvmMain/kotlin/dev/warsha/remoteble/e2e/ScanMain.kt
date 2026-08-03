@@ -76,7 +76,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         val filters = service?.let { listOf(ScanFilter(service = it)) } ?: emptyList()
         val job = RemoteScanner(session, filters).advertisements
             .onEach { adv: RemoteAdvertisement ->
-                val id = adv.identifier.toString()
+                val id = adv.handle.value
                 if (seen.add(id)) {
                     found++
                     val name = adv.name ?: "(no name)"

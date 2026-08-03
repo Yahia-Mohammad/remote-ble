@@ -1,12 +1,16 @@
 # Rust agent container — Linux real-radio image
 
-**Status:** implemented in 0.10.0 (Dockerfile + multi-arch workflow landed; Ubuntu/Pi host validation
-is release-gated — see [../release-candidate.md](../release-candidate.md))
+**Status:** implemented in 0.10.0 (Dockerfile + multi-arch workflow landed). Host validation ran
+**2026-08-03 on one amd64 Linux host** under the option-1 relaxation below — see
+[../pr8-rig-d-evidence.md](../pr8-rig-d-evidence.md). Publication of the image itself is still
+release-gated (see [../release-candidate.md](../release-candidate.md)).
 
 **Artifact:** `ghcr.io/yahia-mohammad/remoteble-agent-rs:<version>`
 
-**Supported hosts:** Linux with host BlueZ and system D-Bus; target validation on Ubuntu amd64 and
-Raspberry Pi OS/Debian arm64
+**Supported hosts:** Linux with host BlueZ and system D-Bus. **Validated: amd64 Fedora-family
+(Nobara 44, BlueZ 5.86, Docker 29.7.1, SELinux disabled).** **Unvalidated: arm64 (Raspberry Pi),
+AppArmor (Ubuntu), SELinux in enforcing mode, and Podman/rootless.** Label the image to match — do
+not describe arm64 as supported on the strength of a build that no one has run.
 
 ## 1. Intent
 
@@ -24,8 +28,16 @@ new agent implementation.
 - Not supported for real radio: Docker Desktop on macOS or Windows, because the Linux VM does not
   transparently provide the host CoreBluetooth/Windows BLE stack.
 - No bundled BlueZ daemon, D-Bus daemon, or `--privileged` default.
-- No claim that every Linux security policy works automatically. Ubuntu/AppArmor and Raspberry Pi
-  are release-gating reference hosts; other distributions are best effort until validated.
+- No claim that every Linux security policy works automatically. **Relaxed 2026-08-03 (option 1):**
+  Ubuntu/AppArmor and Raspberry Pi were the release-gating reference hosts; neither was available, so
+  the gate is now **one validated amd64 Linux host** (Rig D, above) with AppArmor and arm64 recorded
+  as unvalidated. Other distributions, arm64, SELinux-enforcing, and rootless Podman are best effort
+  until someone runs them. The rejected alternatives are recorded in
+  [`0.10.0-progress-status.md`](0.10.0-progress-status.md) item 2 so they are not re-litigated.
+- **Rig D is not only a packaging rig.** It found a defect that no Apple-hosted rig could reach:
+  `agent-rs` resolved a fresh, undiscovered `Peripheral` per GATT op, which CoreBluetooth's btleplug
+  backend tolerates and BlueZ does not. Treat a new host family as correctness coverage, not as a
+  repackaging check.
 
 ## 3. Image construction
 
@@ -169,4 +181,9 @@ on hosted CI, but real-radio evidence belongs to the 0.10.0 hardware gate.
 - The listener fails closed without credentials.
 - `SIGTERM` executes structured agent shutdown.
 - Linux amd64/arm64 images, digest, SBOM, and source revision are published together.
-- Ubuntu amd64 and Pi arm64 hardware smoke evidence passes before 0.10.0 publication.
+  **Open** — no `v*` tag exists yet, so the publish job has never run.
+- ~~Ubuntu amd64 and Pi arm64 hardware smoke evidence passes before 0.10.0 publication.~~
+  **Relaxed 2026-08-03 (option 1) to: one amd64 Linux host passes all six Rig D cases on a real
+  radio, with AppArmor and arm64 recorded as unvalidated in this document and on the image label.**
+  **Met** — Nobara 44 amd64, 6/6, [../pr8-rig-d-evidence.md](../pr8-rig-d-evidence.md). The original
+  two-reference-host bar is deferred, not satisfied; restoring it needs an Ubuntu host and a Pi.

@@ -9,6 +9,12 @@ on:
     - cron: "23 4 * * 1"
   workflow_dispatch:
 
+# One in-flight run per ref. Without this a superseded push leaves its predecessor running, and a
+# job that hangs (rather than fails) holds a runner for hours against a commit nobody is waiting on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -16,6 +22,7 @@ jobs:
   conformance:
     name: Cross-agent conformance
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +59,7 @@ jobs:
   consumer-jvm:
     name: Published JVM consumer
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +80,7 @@ jobs:
   consumer-android:
     name: Published Android consumer
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -102,6 +111,7 @@ jobs:
     # Kotlin/Native Apple targets only build on macOS — this gate cannot run on the Linux runners
     # the other consumer gates use.
     runs-on: macos-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -125,6 +135,7 @@ jobs:
   simulated-socket-e2e:
     name: Simulated agent socket E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK 17
@@ -138,6 +149,7 @@ jobs:
   kotlin-coverage:
     name: Kotlin JVM coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK 17
@@ -157,6 +169,7 @@ jobs:
   rust-coverage:
     name: Rust coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: agent-rs
@@ -180,6 +193,7 @@ jobs:
   secrets:
     name: Secret policy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -203,6 +217,7 @@ jobs:
     name: Dependency review
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -228,6 +243,7 @@ jobs:
   rust-policy:
     name: Rust advisories and licenses
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: agent-rs
@@ -245,6 +261,7 @@ jobs:
   sbom:
     name: Source SBOM
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Generate SPDX SBOM

@@ -1,7 +1,7 @@
-# PR8 — deferred hardware-validation test plan
+# Deferred hardware-validation test plan
 
 **Purpose:** the exact, checkable test list behind [`0.10.0-scope.md`](proposals/0.10.0-scope.md)
-Workstream D and [`release-candidate.md`](release-candidate.md)'s "Complete PR8's real-radio, iOS,
+Workstream D and [`release-candidate.md`](release-candidate.md)'s "Complete the real-radio, iOS,
 TLS-proxy, Ubuntu, and Pi evidence" line. [`bringup.md`](bringup.md) is the mechanical
 runbook for driving the real-radio rig; this document is the checklist of *what* to run on *which*
 rig, so each one can be set up once and fully exhausted before moving to the next.
@@ -26,10 +26,10 @@ has now run.**
 
 | Rig | Cases | Status | Evidence |
 |---|---|---|---|
-| **A** — real radio | 8/8 | ✅ **COMPLETE** (2026-07-27 → 07-28) | [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) |
-| **B** — iOS agent lifecycle | 6/6 | ✅ **COMPLETE** (2026-07-29), spill-over closed 07-30 | [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) |
+| **A** — real radio | 8/8 | ✅ **COMPLETE** (2026-07-27 → 07-28) | [rig-a-evidence.md](rig-a-evidence.md) |
+| **B** — iOS agent lifecycle | 6/6 | ✅ **COMPLETE** (2026-07-29), spill-over closed 07-30 | [rig-b-evidence.md](rig-b-evidence.md) |
 | **C** — TLS reverse proxy | 5/5 | ✅ **COMPLETE** (2026-07-27) | [tls-proxy-recipe.md](tls-proxy-recipe.md) |
-| **D** — Rust container hosts | 6/6 | ✅ **COMPLETE** (2026-08-03) — **one amd64 Linux host only**, per option 1 | [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md) |
+| **D** — Rust container hosts | 6/6 | ✅ **COMPLETE** (2026-08-03) — **one amd64 Linux host only**, per option 1 | [rig-d-evidence.md](rig-d-evidence.md) |
 
 **What is left, precisely:**
 
@@ -65,7 +65,7 @@ has now run.**
 6. **Finding 1's fix is unverified on macOS** — it changes peripheral resolution on every platform and
    Rig A's `agent-rs` evidence predates it. Low risk (it is what the Kotlin agent already does), but
    a real gap in coverage rather than a formality. The re-check is short and needs no phone prompts:
-   [pr8-rig-d-evidence.md → the outstanding macOS re-check](pr8-rig-d-evidence.md#the-outstanding-macos-re-check-finding-1)
+   [rig-d-evidence.md → the outstanding macOS re-check](rig-d-evidence.md#the-outstanding-macos-re-check-finding-1)
    has the exact commands and pass criteria. Use `peripheralStateRun`, not `jvmRun`.
 
 **Four things the runs changed about this plan itself**, all marked inline below: two stimuli were
@@ -106,7 +106,7 @@ suite has grown substantially — this is the first real-radio run against that 
 
    **F3 unsolicited disconnect** — an unsolicited BLE-level drop mid-session; confirm both agents
    emit the drop event and the client reaches `State.Disconnected`.
-   **Stimulus corrected (2026-07-28, see [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) case 2):**
+   **Stimulus corrected (2026-07-28, see [rig-a-evidence.md](rig-a-evidence.md) case 2):**
    *not* "Force disconnect all" — Android's `BluetoothGattServer.cancelConnection()` releases the
    server's reference without terminating a link the central established, so the radio stays up and
    the case silently measures nothing. Kill the link for real: `adb shell cmd bluetooth_manager
@@ -139,7 +139,7 @@ suite has grown substantially — this is the first real-radio run against that 
    bonded connection, then a transport blip (toggle Wi-Fi / kill `adb forward`); confirm the
    session resumes and replayed ops route correctly. Separately confirm the documented residual:
    after an **agent restart** (not just a transport blip), the client rescans rather than resuming.
-   **Scope correction (2026-07-28, see [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) case 5):** the
+   **Scope correction (2026-07-28, see [rig-a-evidence.md](rig-a-evidence.md) case 5):** the
    *rewrite* half of this is unreachable on Rig A regardless of client platform.
    `HandleTranslator.needsRewrite` only synthesizes for a `UUID`/`MAC_ADDRESS` client format that
    differs from the agent's own; Rig A's agent is macOS/Kable (native `UUID`), so a `UUID` client
@@ -222,7 +222,7 @@ peripheral in range (reuse Rig A's).
    **Screen-lock/background caveat** — background the app or lock the screen mid-session and
    capture what an already-connected client observes, *and* whether new inbound connections are
    still accepted.
-   **Expectation corrected (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 3):**
+   **Expectation corrected (2026-07-29, see [rig-b-evidence.md](rig-b-evidence.md) case 3):**
    this case previously asserted that "no *new* inbound WebSocket connections are accepted", which
    the hardware disproved. `UIBackgroundModes: bluetooth-central` keeps the process — and therefore
    the Ktor accept loop — scheduled while it holds an active CoreBluetooth link, so a backgrounded
@@ -240,7 +240,7 @@ peripheral in range (reuse Rig A's).
 
    **Stop** — tap Stop (or navigate away); confirm `IosAgentSession` is disposed
    (`Coordinator.deinit`), the radio/lease is released, and the agent is no longer reachable.
-   **Found a defect (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 4):** the
+   **Found a defect (2026-07-29, see [rig-b-evidence.md](rig-b-evidence.md) case 4):** the
    radio was released but the WebSocket server kept listening *and authenticating*, and the next
    Start aborted the process on `EADDRINUSE`. Fixed by having `AgentRunner.stop()` stop the server
    explicitly. When re-running, probe the port after Stop — checking only that device operations
@@ -269,7 +269,7 @@ peripheral in range (reuse Rig A's).
    **Failure recovery** — with the radio unavailable, confirm a graceful UI state (no crash, clear
    messaging), then restore it and confirm the agent recovers.
 
-   **Stimulus corrected (2026-07-29, see [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) case 6).**
+   **Stimulus corrected (2026-07-29, see [rig-b-evidence.md](rig-b-evidence.md) case 6).**
    This case used to say "deny the Bluetooth permission prompt on first launch". **There is no such
    prompt** — on a fresh install of a fresh bundle id, none appeared at launch, at Start, or on the
    first scan; the scan simply succeeded. The case was therefore unrunnable as written, not failing.
@@ -369,7 +369,7 @@ two machines, it's the full sequence twice:
 **Status 2026-08-03: run and complete under option 1**, on a Nobara (Fedora-family) amd64 laptop —
 Docker 29.7.1, BlueZ 5.86, locally built image (no `v*` tag exists, so nothing is published to GHCR
 yet). Full per-case detail, host record and findings:
-[`pr8-rig-d-evidence.md`](pr8-rig-d-evidence.md).
+[`rig-d-evidence.md`](rig-d-evidence.md).
 
 It does **not** satisfy the acceptance criteria as written — Ubuntu is named in
 [`rust-agent-container.md`](proposals/rust-agent-container.md) *because of* AppArmor — so the

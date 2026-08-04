@@ -46,17 +46,17 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    artifacts rather than before — and it is accepted deliberately rather than overlooked. Closing it
    properly means publishing to a resolvable staging repository (GitHub Packages) first; that is
    0.10.1 work.
-4. ~~Complete PR8’s real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.~~ **All four rigs are run
-   (25/25) as of 2026-08-03** — see [pr8-validation-plan.md](pr8-validation-plan.md). Rig D passed
+4. ~~Complete the real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.~~ **All four rigs are run
+   (25/25) as of 2026-08-03** — see [validation-plan.md](validation-plan.md). Rig D passed
    6/6 on **one amd64 Linux host** under the option-1 relaxation, *not* on the Ubuntu and Pi hosts
-   this line originally named: [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md), with
+   this line originally named: [rig-d-evidence.md](rig-d-evidence.md), with
    [rust-agent-container.md](proposals/rust-agent-container.md) §2/§10 updated to match. **Approving
    the tag means accepting that arm64, AppArmor, SELinux-enforcing and rootless Podman are
    unvalidated and the image is labelled accordingly** — that is a decision, not a formality.
    ~~Two residuals worth closing first~~ — **one left.** Rig D's `agent-rs` fix is now **verified on
    macOS (2026-08-04)**: connect, discover and read all pass through the cached peripheral handle on
    CoreBluetooth, evidence in
-   [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md#run-2026-08-04--pass-and-the-recipe-above-is-wrong-in-two-ways).
+   [rig-d-evidence.md](rig-d-evidence.md#run-2026-08-04--pass-and-the-recipe-above-is-wrong-in-two-ways).
    The remaining residual is the multi-arch manifest, unexercised because no `v*` tag exists yet, so
    item 2's digest record and this evidence cannot yet refer to the same published artifact.
 5. ~~Complete the scan-concurrency hardware run~~ — **DONE 2026-08-03**, evidence in

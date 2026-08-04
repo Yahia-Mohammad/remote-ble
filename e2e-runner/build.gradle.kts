@@ -134,7 +134,7 @@ tasks.register<JavaExec>("throughputRun") {
 // write-with-response and reports the outcome plus how long it took, then checks whether the link
 // survived. Written for the btleplug ATT-error investigation (Rig A), and the only probe here that
 // exercises a with-response write in isolation — which is what Rig B needs to tell "reads
-// specifically are broken" from "no GATT op completes" (docs/pr8-rig-b-evidence.md finding 5).
+// specifically are broken" from "no GATT op completes" (docs/rig-b-evidence.md finding 5).
 // The source existed with no task to run it.
 //   ./gradlew :e2e-runner:writeErrorProbeRun --args "ws://localhost:8080/agent RBTestPeripheral 30"
 tasks.register<JavaExec>("writeErrorProbeRun") {
@@ -146,7 +146,7 @@ tasks.register<JavaExec>("writeErrorProbeRun") {
     mainClass.set("dev.warsha.remoteble.e2e.WriteErrorProbeMainKt")
 }
 
-// Rig A case 7 (HealthMain.kt, pr8-validation-plan.md): reads Battery Level (0x180F/0x2A19) and
+// Rig A case 7 (HealthMain.kt, validation-plan.md): reads Battery Level (0x180F/0x2A19) and
 // Device Information (0x180A/0x2A29+0x2A24) through a live agent against the health-peripheral app
 // (../ble-peripheral), confirming a live (not frozen/cached) read by prompting a value change
 // mid-run. Needs stdin, same as jvmRun above.
@@ -161,7 +161,7 @@ tasks.register<JavaExec>("healthRun") {
     standardInput = System.`in`
 }
 
-// Rig A case 6, burst/ordering half (WwrBurstMain.kt, pr8-validation-plan.md): compares a serial
+// Rig A case 6, burst/ordering half (WwrBurstMain.kt, validation-plan.md): compares a serial
 // write loop against RemotePeripheral.writeWithoutResponseBurst (window > 1) against the
 // TestProfile peripheral, confirming a measured improvement and (via strictly-incrementing
 // single-byte payloads) that submission order survives pipelining.
@@ -175,7 +175,7 @@ tasks.register<JavaExec>("wwrBurstRun") {
     mainClass.set("dev.warsha.remoteble.e2e.WwrBurstMainKt")
 }
 
-// Rig A case 2, client half (PeripheralStateMain.kt, pr8-validation-plan.md): watches
+// Rig A case 2, client half (PeripheralStateMain.kt, validation-plan.md): watches
 // Peripheral.state across an unsolicited BLE-level drop ("Force disconnect all" on the phone),
 // confirming the client reaches State.Disconnected — the agent-side half of this case was already
 // confirmed, but no runner before this one watched peripheral (as opposed to transport) state.
@@ -189,7 +189,7 @@ tasks.register<JavaExec>("peripheralStateRun") {
     mainClass.set("dev.warsha.remoteble.e2e.PeripheralStateMainKt")
 }
 
-// Rig B cases 3-5 (AgentLifecycleMain.kt, pr8-validation-plan.md): holds a fully established
+// Rig B cases 3-5 (AgentLifecycleMain.kt, validation-plan.md): holds a fully established
 // session — transport connected, peripheral connected — and narrates on one timeline what an
 // already-connected client observes while the operator changes the iOS agent app's lifecycle state
 // (background/lock, Stop, Stop mid-operation). One instrument for all three cases: they differ only

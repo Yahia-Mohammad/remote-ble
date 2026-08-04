@@ -1,6 +1,6 @@
-# PR8 Rig D evidence — Rust-agent container host (Linux amd64)
+# Rig D evidence — Rust-agent container host (Linux amd64)
 
-Per-case evidence for [`pr8-validation-plan.md`](pr8-validation-plan.md)'s **Rig D**, run under the
+Per-case evidence for [`validation-plan.md`](validation-plan.md)'s **Rig D**, run under the
 **option 1** scope decision recorded in
 [`0.10.0-progress-status.md`](proposals/0.10.0-progress-status.md) item 2: validate one available
 amd64 Linux host, then relax the acceptance criteria and label the image honestly. **arm64 and

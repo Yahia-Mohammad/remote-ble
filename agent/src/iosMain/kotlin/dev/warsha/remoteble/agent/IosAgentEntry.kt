@@ -40,7 +40,7 @@ class IosAgentSession internal constructor() {
      * timer stays disabled so the screen can't auto-lock, and [AgentApp] shows a matching on-screen
      * reminder.
      *
-     * **What backgrounding actually does** (measured, Rig B case 3 — `docs/pr8-rig-b-evidence.md`;
+     * **What backgrounding actually does** (measured, Rig B case 3 — `docs/rig-b-evidence.md`;
      * this used to claim flatly that "the agent stops in the background", which the hardware
      * disproved). `Info.plist` declares `UIBackgroundModes: bluetooth-central`, which keeps the
      * process alive *while it holds an active CoreBluetooth connection* — and a live process keeps

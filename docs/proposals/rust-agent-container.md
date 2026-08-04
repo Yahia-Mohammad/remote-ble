@@ -2,7 +2,7 @@
 
 **Status:** implemented in 0.10.0 (Dockerfile + multi-arch workflow landed). Host validation ran
 **2026-08-03 on one amd64 Linux host** under the option-1 relaxation below — see
-[../pr8-rig-d-evidence.md](../pr8-rig-d-evidence.md). Publication of the image itself is still
+[../rig-d-evidence.md](../rig-d-evidence.md). Publication of the image itself is still
 release-gated (see [../release-candidate.md](../release-candidate.md)).
 
 **Artifact:** `ghcr.io/yahia-mohammad/remoteble-agent-rs:<version>`
@@ -185,5 +185,5 @@ on hosted CI, but real-radio evidence belongs to the 0.10.0 hardware gate.
 - ~~Ubuntu amd64 and Pi arm64 hardware smoke evidence passes before 0.10.0 publication.~~
   **Relaxed 2026-08-03 (option 1) to: one amd64 Linux host passes all six Rig D cases on a real
   radio, with AppArmor and arm64 recorded as unvalidated in this document and on the image label.**
-  **Met** — Nobara 44 amd64, 6/6, [../pr8-rig-d-evidence.md](../pr8-rig-d-evidence.md). The original
+  **Met** — Nobara 44 amd64, 6/6, [../rig-d-evidence.md](../rig-d-evidence.md). The original
   two-reference-host bar is deferred, not satisfied; restoring it needs an Ubuntu host and a Pi.

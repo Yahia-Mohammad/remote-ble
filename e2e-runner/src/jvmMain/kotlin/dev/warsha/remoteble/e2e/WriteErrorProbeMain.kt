@@ -74,7 +74,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         withTimeout(20.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
         // Match on the service UUID, not the name: through the Kotlin agent on Apple hosts the
         // advertised local name never arrives (it lives in the scan response — see
-        // docs/pr8-rig-b-evidence.md finding 4), so a name match never resolves there.
+        // docs/rig-b-evidence.md finding 4), so a name match never resolves there.
         val adv = withTimeout(60.seconds) {
             RemoteScanner(session).advertisements.first { a ->
                 a.uuids.any { it.toString().equals(service, ignoreCase = true) }

@@ -38,11 +38,11 @@ private fun shortUuid(short: Int): Uuid =
     Uuid.parse("%08x-0000-1000-8000-00805f9b34fb".format(short))
 
 /**
- * Rig A case 7: Battery/Device-Info on a non-iOS peripheral (pr8-validation-plan.md). Confirms
+ * Rig A case 7: Battery/Device-Info on a non-iOS peripheral (validation-plan.md). Confirms
  * live (not frozen/cached) standard-service values through a real agent — using an iPhone
  * peripheral for this case would silently shadow 0x180F/0x180A with iOS's own system battery and
  * device-info values instead of the test peripheral's, which is exactly the false pass this
- * driver exists to avoid (see docs/pr8-validation-plan.md's note against iOS here).
+ * driver exists to avoid (see docs/validation-plan.md's note against iOS here).
  *
  *   ./gradlew :e2e-runner:healthRun --args "ws://localhost:8080/agent"
  *

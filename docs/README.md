@@ -75,9 +75,9 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 Dated engineering records — the checklists and hardware results that justified taking each release
 through its gate. Written for continuity between working sessions, not for a first read; skip this
 section unless you're auditing how a specific claim was verified or picking up the release process
-itself. Filenames below still carry internal labels from before this repository was public (`PR8`,
-`Rig A`/`B`/`D`) — kept as-is rather than renamed, since the prose inside each document uses the
-same labels throughout and refers to itself by them.
+itself. `Rig A`/`B`/`D` below are just the shorthand each hardware setup is called by throughout
+these documents — Rig A is the real-radio bench, Rig B the iOS device, Rig D the Linux container
+host.
 
 | Document | Covers |
 |---|---|
@@ -85,10 +85,10 @@ same labels throughout and refers to itself by them.
 | [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
 | [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) | 0.10.0 implementation handoff and working log — status, open items, and session-by-session history |
-| [pr8-validation-plan.md](pr8-validation-plan.md) | The hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
-| [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) | **Rig A — real-radio evidence.** Per-case results, the two peripheral defects fixed before the rig could run, operator prerequisites, and what remains |
-| [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) | **Rig B — iOS agent lifecycle evidence.** Backgrounding, kill/relaunch, Bluetooth-off, and the ATT-error findings that turned out to be CoreBluetooth-specific |
-| [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md) | **Rig D — Linux container-host evidence.** The GATT-resolution defect it found in `agent-rs`, and the macOS re-check that followed |
+| [validation-plan.md](validation-plan.md) | The hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
+| [rig-a-evidence.md](rig-a-evidence.md) | **Rig A — real-radio evidence.** Per-case results, the two peripheral defects fixed before the rig could run, operator prerequisites, and what remains |
+| [rig-b-evidence.md](rig-b-evidence.md) | **Rig B — iOS agent lifecycle evidence.** Backgrounding, kill/relaunch, Bluetooth-off, and the ATT-error findings that turned out to be CoreBluetooth-specific |
+| [rig-d-evidence.md](rig-d-evidence.md) | **Rig D — Linux container-host evidence.** The GATT-resolution defect it found in `agent-rs`, and the macOS re-check that followed |
 | [scan-concurrency-validation.md](scan-concurrency-validation.md) | **Closed 2026-08-03** — the hardware run that closed the concurrent-scan blocker: instruments, rig prerequisites, cases, and what each result is allowed to change |
 | [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 

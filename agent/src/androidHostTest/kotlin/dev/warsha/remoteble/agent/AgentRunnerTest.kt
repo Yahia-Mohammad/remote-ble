@@ -164,7 +164,7 @@ class AgentRunnerTest {
     }
 
     /**
-     * Rig B case 4 regression (`docs/pr8-rig-b-evidence.md` finding 8): `stop()` must actually stop
+     * Rig B case 4 regression (`docs/rig-b-evidence.md` finding 8): `stop()` must actually stop
      * the WebSocket server, not merely close the Koin graph.
      *
      * On hardware this defect left the agent listening *and authenticating* after the user tapped

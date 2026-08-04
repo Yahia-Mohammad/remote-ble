@@ -378,6 +378,47 @@ class ScanConcurrencyWebSocketTest {
     }
 
     @Test
+    fun aScanStartReplyPrecedesEveryEventThatScanProduces() = runBlocking {
+        // The wire guarantee, asserted on raw frame order rather than through the demultiplexing
+        // helpers — which is the only way to see it, since they exist precisely to tolerate the
+        // opposite. A late joiner is the sharpest case: its replay is enqueued during admission, so
+        // before `BleAgent.replyThenDeliver` this reply lost the race about 40% of the time on a
+        // two-core runner.
+        val running = startAgent(ScanConcurrencyMode.MULTIPLEXED)
+        var first: DefaultClientWebSocketSession? = null
+        var late: DefaultClientWebSocketSession? = null
+        try {
+            val cap = setOf(Capabilities.SCAN_CONCURRENCY_MULTIPLEXED)
+            first = running.server.openClient("scan-a", cap)
+            assertIs<OpResult.Ok>(request(first!!, 1, Op.ScanStart(1, listOf(ScanFilter(service = "180d")))))
+            awaitStarted(running.backend)
+            running.backend.emit(serviceAdvertisement("hr", "180d", "Heart Rate"))
+            assertEquals("hr", receiveAdvertisement(first!!, 1).device.value)
+
+            // Nothing is read off this socket until after the command is sent, so the two frames
+            // arrive in whatever order the agent wrote them.
+            late = running.server.openClient("scan-b", cap)
+            sendCommand(late!!, 1, Op.ScanStart(1, listOf(ScanFilter(service = "180d"))))
+
+            val firstFrame = receiveFrame(late!!)
+            assertIs<Reply>(
+                firstFrame,
+                "scan.start must be acknowledged before any result it produces, but the first frame " +
+                    "on the wire was $firstFrame — a client is being handed results for a scan it " +
+                    "has not yet been told was admitted",
+            )
+            assertEquals(1L, firstFrame.cid)
+            assertIs<OpResult.Ok>(firstFrame.result)
+            // The replay still arrives; the guarantee is about order, not about dropping it.
+            assertEquals("hr", receiveAdvertisement(late!!, 1).device.value)
+        } finally {
+            close(first)
+            close(late)
+            running.server.stop()
+        }
+    }
+
+    @Test
     fun scanConc03LateJoinReceivesReplayWithinTheWindow() = runBlocking {
         val running = startAgent(ScanConcurrencyMode.MULTIPLEXED)
         var first: DefaultClientWebSocketSession? = null

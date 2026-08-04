@@ -211,6 +211,18 @@ This is a backward-compatible `1.x` addition: peers that don't name the capabili
 Every `Op` is a variant of `Command.op`. The agent MUST implement all of them. Unless stated,
 a successful op replies `OpResult.Ok` with no payload; failures reply `OpResult.Err` (§9).
 
+**Stream-opening ops MUST be acknowledged before they deliver.** For `scan.start` and
+`observe.start`, the agent MUST write the op's `Reply` to the transport **before** any event that op
+produces — a `scan.result`/`scan.result.batch` for that `scanId`, or a `notification` for that
+`subId`. A client must never receive results for a stream it has not yet been told was admitted, and
+one that reads its reply before switching to event handling would otherwise lose the stream's first
+result outright.
+
+This is observable wherever a stream can produce a result immediately: a guaranteed-mode
+`scan.start` delivers its replay cache synchronously at admission, and a characteristic may notify
+on subscribe. Admission itself still happens while handling the command — the ordering and fencing
+rules below depend on it — so agents defer *delivery*, not registration.
+
 | `type` | Fields | Agent MUST | Reply payload |
 |---|---|---|---|
 | `scan.start` | `scanId: i64`, `filters: [ScanFilter]` | Begin scanning; emit a `scan.result` event (§8) per matching advertisement, tagged with `scanId`. Starting a `scanId` already active MUST replace (cancel + restart) it — **replay-safe**. The agent MUST apply `scan.start`/`scan.stop` for the **same** `scanId` in the order it received their `cmd`s, even when handling commands concurrently, so a client may pipeline a replacement without awaiting the first reply. Different `scanId`s need not be ordered. | `Ok` |

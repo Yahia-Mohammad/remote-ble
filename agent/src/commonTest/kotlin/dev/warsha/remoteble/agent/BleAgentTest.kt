@@ -86,13 +86,32 @@ class BleAgentTest {
         // to a healthy state first and then simulate the transport going slow.
         var stallOutgoing: Boolean = false
 
+        /**
+         * Suspension points inserted immediately before a `Reply` reaches the transport.
+         *
+         * Turns the reply-before-events guarantee into a deterministic assertion instead of a race
+         * that a fast machine always wins. With delivery started before the reply — the behaviour
+         * before `BleAgent.replyThenDeliver` — a stream collector is already running during these
+         * yields and its event overtakes the reply every time. With delivery deferred, nothing can.
+         */
+        var yieldsBeforeReply: Int = 0
+
         val agent: BleAgent
 
         init {
             scope.launch { fromAgent.receiveAsFlow().collect { frames.emit(codec.decode(it)) } }
             agent = BleAgent(
                 incoming = toAgent.receiveAsFlow(),
-                outgoing = { if (stallOutgoing) kotlinx.coroutines.awaitCancellation() else fromAgent.send(it) },
+                outgoing = {
+                    if (stallOutgoing) {
+                        kotlinx.coroutines.awaitCancellation()
+                    } else {
+                        if (yieldsBeforeReply > 0 && codec.decode(it) is Reply) {
+                            repeat(yieldsBeforeReply) { kotlinx.coroutines.yield() }
+                        }
+                        fromAgent.send(it)
+                    }
+                },
                 scope = scope,
                 backend = backend,
                 codec = codec,
@@ -294,6 +313,54 @@ class BleAgentTest {
         }
         assertNull(backend.lastWrite)
         assertNull(backend.lastDescriptorWrite)
+    }
+
+    @Test
+    fun aStreamsReplyReachesTheTransportBeforeAnyEventItProduces() = runTest {
+        // The wire guarantee, made deterministic. `yieldsBeforeReply` parks the reply just short of
+        // the transport, so a collector started during the command — the behaviour this replaced —
+        // has every opportunity to overtake it. FakeBleBackend emits on its first scan turn, so
+        // there is always an event contending.
+        //
+        // Written this way because the end-to-end version of this assertion cannot fail on a fast
+        // machine: the reply wins the race by default, and the violation only showed up on a
+        // two-core CI runner, about 40% of the time.
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend)
+        h.yieldsBeforeReply = 32
+
+        // Connect first so the observe below is authorized, and get both streams running before
+        // reading anything back: order is asserted over the recorded frames, not by racing reads.
+        h.connect(1)
+        h.send(2, Op.ScanStart(scanId = 1))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+        h.send(3, Op.ObserveStart(subId = 1, device, char))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+        // Let both collectors run so there is actually something to be out of order with.
+        repeat(64) { kotlinx.coroutines.yield() }
+
+        // replayCache is the transport's frame order. Compare positions rather than reading with
+        // `first { }`, which would match a replayed frame from earlier in this same test.
+        val ordered = h.frames.replayCache
+        fun indexOfReply(cid: Long) = ordered.indexOfFirst { it is Reply && it.cid == cid }
+        fun indexOfEvent(predicate: (AgentEvent) -> Boolean) =
+            ordered.indexOfFirst { it is Event && predicate(it.event) }
+
+        val firstScanResult = indexOfEvent { it is AgentEvent.ScanResult || it is AgentEvent.ScanResultBatch }
+        assertTrue(firstScanResult >= 0, "the backend must have produced a scan result to order against")
+        assertTrue(
+            indexOfReply(2) < firstScanResult,
+            "scan.start must be acknowledged before any result it produces — a client is otherwise " +
+                "handed results for a stream it has not been told exists. Frames: $ordered",
+        )
+
+        val firstNotification = indexOfEvent { it is AgentEvent.Notification }
+        if (firstNotification >= 0) {
+            assertTrue(
+                indexOfReply(3) < firstNotification,
+                "observe.start must be acknowledged before its first notification. Frames: $ordered",
+            )
+        }
     }
 
     @Test

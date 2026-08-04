@@ -317,6 +317,54 @@ link probe: read OK — the radio link is STILL UP
 non-zero exit. That runner is Rig A case 2's unsolicited-drop test; no drop is being triggered here,
 so the link *staying up* is the positive result. Read the probe lines, not the exit code.
 
+### RUN 2026-08-04 — **PASS**, and the recipe above is wrong in two ways
+
+Host: the Rig A Mac (macOS 26.5.2, Apple silicon), `agent-rs` v0.10.0 built from `d2d4918`, the
+`RBTestPeripheral` Android app in range. **Finding 1's fix is verified on CoreBluetooth**: connect,
+discover and read all succeed through the cached peripheral handle.
+
+```
+• Connect + discover services ................. PASS — 5 services
+• Locate profile characteristics .............. PASS
+• Read the readable characteristic (baseline) . PASS
+```
+
+**Correction 1 — `cargo build --release` plus the bare binary cannot work on macOS.** The recipe
+above launches `./target/release/agent-rs` directly; that aborts with `SIGABRT` the instant it
+touches CoreBluetooth. macOS TCC kills any process without an `NSBluetoothAlwaysUsageDescription` in
+its main bundle, and the permission is only honoured for a bundle launched through LaunchServices —
+the crash report names `__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__`. Use
+[`agent-rs/run-agent-rs.sh`](../agent-rs/run-agent-rs.sh), which exists precisely for this: it
+assembles and ad-hoc-signs `RemoteBleAgentRs.app` around the binary and starts it with `open`.
+
+```sh
+REMOTE_BLE_TOKEN=secret RUST_LOG="agent_rs=debug,info" ./agent-rs/run-agent-rs.sh 8080
+```
+
+**Correction 2 — `peripheralStateRun` is the wrong instrument for this check, and it reports a
+false negative.** Its link probe reads
+`services.flatMap { characteristics }.firstOrNull { it.properties.read }` — the first readable
+characteristic across *all five* discovered services, not the profile's readable one. On this
+peripheral that lands on a pairing-gated characteristic, so the ATT transaction never completes and
+the agent correctly reports `TIMEOUT` at `GATT_OP_TIMEOUT`:
+
+```
+WARN ATT transaction did not complete; reporting TIMEOUT op="read" GATT_OP_TIMEOUT=10s
+```
+
+That reproduced on both attempts and looks exactly like finding 1 failing. It is not: the *same
+agent, same link* reads the documented readable characteristic without error under
+`:e2e-runner:jvmRun`. `Main.kt` already knows to avoid this — it notes that reading the
+encryption-required characteristic "triggers OS pairing (needs on-device user interaction), so this
+headless runner only confirms it's exposed, never reads it" — and `PeripheralStateMain` never got
+that rule. **Use `:e2e-runner:jvmRun` for finding 1**; it reads the characteristic the profile
+actually names. Left open as a harness defect: the probe should select the profile's `READABLE`
+UUID rather than the first readable characteristic it meets.
+
+An operator who declines pairing prompts (the normal case for a headless run) will therefore always
+see this timeout from `peripheralStateRun`, and **no pairing approval is needed** for the check
+itself.
+
 ## Acceptance criteria, as met on this host
 
 Against [`rust-agent-container.md`](proposals/rust-agent-container.md) §10:

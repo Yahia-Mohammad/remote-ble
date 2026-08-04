@@ -755,9 +755,17 @@ class BleAgent(
         source: Flow<AdvertisementDto>,
         sink: ScanOutboundArbiter.Sink,
     ) {
-        source.collect { ad ->
-            observer.onDeviceSeen(ad.device.value, ad.name)
-            deliverScanEvent(sink, AgentEvent.ScanResult(scanId, ad))
+        // Brackets the collector so a scan that delivers nothing can be placed: "collector started"
+        // with no following handoff means the coordinator mailbox never produced, while a handoff
+        // with nothing on the wire puts it downstream in the arbiter.
+        Logger.debug(LogTags.ENGINE) { "coordinator scan collector started [c=$clientId scanId=$scanId]" }
+        try {
+            source.collect { ad ->
+                observer.onDeviceSeen(ad.device.value, ad.name)
+                deliverScanEvent(sink, AgentEvent.ScanResult(scanId, ad))
+            }
+        } finally {
+            Logger.debug(LogTags.ENGINE) { "coordinator scan collector ended [c=$clientId scanId=$scanId]" }
         }
     }
 

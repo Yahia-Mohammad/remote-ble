@@ -67,8 +67,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 class ScanConcurrencyWebSocketTest {
 
     private companion object {
-        /** Upper bound on any single blocking receive — see [bounded]. */
-        val RECEIVE_TIMEOUT = 10.seconds
+        /**
+         * Upper bound on any single blocking receive — see [bounded].
+         *
+         * Deliberately **not** 10s, which is what it was and what
+         * `ScanCoordinator.PHYSICAL_SCAN_TEARDOWN_TIMEOUT` also is. Sharing the number made the two
+         * indistinguishable in a failure report: "timed out after 10s" could equally have been this
+         * bound expiring or a real coordinator teardown stall holding the agent-wide lock for its
+         * full budget, and the report gave no way to tell. Keep this strictly below the production
+         * bound so a stall surfaces here first, with its own number.
+         */
+        val RECEIVE_TIMEOUT = 7.seconds
     }
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())

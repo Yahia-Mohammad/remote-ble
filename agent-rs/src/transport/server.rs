@@ -217,6 +217,15 @@ impl ScanBindings {
     async fn remove(&self, scan_id: i64) -> Option<ScanBinding> {
         self.scans.lock().await.remove(&scan_id)
     }
+    /// Clears a just-admitted scan for delivery, once its reply is queued on the outbound channel.
+    ///
+    /// A no-op for a scan that was refused, so the caller can release unconditionally after the
+    /// reply without inspecting the result.
+    async fn release(&self, scan_id: i64) {
+        if let Some(binding) = self.scans.lock().await.get(&scan_id) {
+            binding.handle.release();
+        }
+    }
     async fn clear(&self) -> Vec<ScanBinding> {
         std::mem::take(&mut *self.scans.lock().await)
             .into_values()
@@ -1025,6 +1034,13 @@ impl AgentServer {
                                     }
                                     _ => None,
                                 };
+                                // Admission parks this scan's mailbox; it is cleared for delivery
+                                // only once the reply below is queued, so a replayed advertisement
+                                // cannot overtake the reply that accepts the scan.
+                                let admitted_scan = match &op {
+                                    Op::ScanStart { scan_id, .. } => Some(*scan_id),
+                                    _ => None,
+                                };
                                 command_tasks.spawn(
                                     async move {
                                         let _permit = permit;
@@ -1074,6 +1090,12 @@ impl AgentServer {
                                         let _ = frame_tx
                                             .send(Outbound::Frame(Frame::Reply { cid, result }))
                                             .await;
+                                        // Strictly after the reply is queued: events and replies
+                                        // share this one FIFO, so anything the mailbox now emits
+                                        // lands behind it on the wire.
+                                        if let Some(scan_id) = admitted_scan {
+                                            scan_bindings.release(scan_id).await;
+                                        }
                                     }
                                     .in_current_span(),
                                 );
@@ -1185,7 +1207,7 @@ impl AgentServer {
             Op::ScanStart { scan_id, filters }
                 if scan_mode != ScanConcurrencyMode::Uncontrolled =>
             {
-                let (delivery, handle) = scan_arbiter.register(scan_id);
+                let (delivery, handle) = scan_arbiter.register_parked(scan_id);
                 let admission = match scan_coordinator
                     .start_or_replace(
                         client_id.to_string(),

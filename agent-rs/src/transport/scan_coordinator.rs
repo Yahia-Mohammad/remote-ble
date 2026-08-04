@@ -478,6 +478,11 @@ impl ScanDelivery {
 struct ArbiterMailbox {
     scan_id: i64,
     rx: mpsc::Receiver<AdvertisementDto>,
+    /// Held back until `scan.start`'s reply has been written; see [`ScanArbiterHandle::release`].
+    ///
+    /// Admission fills this mailbox with the replay cache synchronously, so without the gate the
+    /// worker can put a `ScanResult` on the wire before the reply that accepts the scan.
+    parked: bool,
 }
 
 #[derive(Default)]
@@ -529,6 +534,12 @@ impl ScanArbiter {
                             let Some(mailbox) = state.mailboxes.get_mut(&token) else {
                                 continue;
                             };
+                            // Not yet cleared for delivery: its `scan.start` reply has not been
+                            // written. Keep its turn so ordering is preserved once released.
+                            if mailbox.parked {
+                                state.order.push_back(token);
+                                continue;
+                            }
                             match mailbox.rx.try_recv() {
                                 Ok(advertisement) => {
                                     events.push(AgentEvent::ScanResult {
@@ -566,7 +577,27 @@ impl ScanArbiter {
         }
     }
 
+    /// Registers a mailbox that delivers as soon as the worker sees it.
+    ///
+    /// Test-only: the `scan.start` path always parks, because the wire contract requires the reply
+    /// to precede delivery. Kept for the arbiter's own tests, which exercise fairness and
+    /// backpressure and have no reply to order against.
+    #[cfg(test)]
     pub fn register(&self, scan_id: i64) -> (ScanDelivery, ScanArbiterHandle) {
+        self.register_with(scan_id, false)
+    }
+
+    /// Registers a mailbox held back until [`ScanArbiterHandle::release`].
+    ///
+    /// Used by the `scan.start` path so admission can fill the mailbox with the replay cache while
+    /// nothing reaches the wire until the reply is queued. Opt-in rather than the default: the
+    /// arbiter on its own has no notion of a reply, and a caller that never releases would simply
+    /// never deliver.
+    pub fn register_parked(&self, scan_id: i64) -> (ScanDelivery, ScanArbiterHandle) {
+        self.register_with(scan_id, true)
+    }
+
+    fn register_with(&self, scan_id: i64, parked: bool) -> (ScanDelivery, ScanArbiterHandle) {
         // Sized for a full replay burst (up to REPLAY_CAP entries, sent synchronously at
         // admission before this mailbox is necessarily being drained) plus steady-state
         // headroom. Bounded either way; this only widens the constant so a late joiner's
@@ -576,9 +607,14 @@ impl ScanArbiter {
             let mut state = self.state.lock();
             let token = state.next;
             state.next = state.next.wrapping_add(1);
-            state
-                .mailboxes
-                .insert(token, ArbiterMailbox { scan_id, rx });
+            state.mailboxes.insert(
+                token,
+                ArbiterMailbox {
+                    scan_id,
+                    rx,
+                    parked,
+                },
+            );
             state.order.push_back(token);
             token
         };
@@ -604,6 +640,23 @@ impl ScanArbiter {
 }
 
 impl ScanArbiterHandle {
+    /// Clears this scan for delivery, once its `scan.start` reply is on the wire.
+    ///
+    /// Admission fills the mailbox with the replay cache synchronously, so a mailbox that drained
+    /// immediately could put a `ScanResult` ahead of the reply that accepts the scan. A client is
+    /// then handed results for a stream it has not been told exists, and one that reads its reply
+    /// before switching to event handling loses the first result outright. Parity with the Kotlin
+    /// agent's `BleAgent.replyThenDeliver`.
+    pub fn release(&self) {
+        {
+            let mut state = self.state.lock();
+            if let Some(mailbox) = state.mailboxes.get_mut(&self.token) {
+                mailbox.parked = false;
+            }
+        }
+        self.wake.notify_one();
+    }
+
     pub fn close(self) {
         let mut state = self.state.lock();
         state.mailboxes.remove(&self.token);
@@ -834,6 +887,38 @@ mod tests {
         assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
         first_handle.close();
         second_handle.close();
+    }
+
+    #[tokio::test]
+    async fn a_parked_mailbox_delivers_nothing_until_it_is_released() {
+        // The wire guarantee's Rust half: `scan.start` fills this mailbox with the replay cache at
+        // admission, and nothing may reach the transport until the reply is queued. Parity with the
+        // Kotlin agent's `BleAgent.replyThenDeliver`.
+        let (events, mut event_rx) = mpsc::channel(8);
+        let arbiter = ScanArbiter::new(events);
+        let (delivery, handle) = arbiter.register_parked(1);
+
+        delivery.try_send(advertisement("replayed")).unwrap();
+        // Give the worker every chance to drain it; a parked mailbox must decline its turn.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a parked mailbox must not deliver before its scan.start reply is written",
+        );
+
+        handle.release();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("release must let the retained entry through")
+            .expect("event channel closed");
+        match delivered {
+            AgentEvent::ScanResult { advertisement, .. } => {
+                assert_eq!(advertisement.device.value, "replayed");
+            }
+            other => panic!("expected the replayed scan result, got {other:?}"),
+        }
+        handle.close();
     }
 
     #[tokio::test]

@@ -431,18 +431,14 @@ class BleAgent(
                     backend.setConnParams(op.device, op.profile, op.hint)
                     reply(cmd.cid, OpResult.Ok())
                 }
-                is Op.ScanStart -> {
-                    startScan(op.scanId, op)
-                    reply(cmd.cid, OpResult.Ok())
-                }
+                is Op.ScanStart -> replyThenDeliver(cmd.cid) { startScan(op.scanId, op) }
                 is Op.ScanStop -> {
                     stopScan(op.scanId)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.ObserveStart -> {
                     authorizeConnected(op.device)
-                    startObserve(op.subId, op.device, op)
-                    reply(cmd.cid, OpResult.Ok())
+                    replyThenDeliver(cmd.cid) { startObserve(op.subId, op.device, op) }
                 }
                 is Op.ObserveStop -> {
                     stopObserve(op.subId)
@@ -584,13 +580,22 @@ class BleAgent(
         return result.fold(onSuccess = { OpResult.Ok() }, onFailure = { throw it })
     }
 
-    private suspend fun startScan(scanId: Long, op: Op.ScanStart) {
+    /**
+     * Admits the scan and returns its **unstarted** delivery collector.
+     *
+     * The caller must start the returned job only after `scan.start`'s reply has been written — see
+     * [replyThenDeliver]. Admission has to happen inside the command (it carries the ordering and
+     * fencing guarantees the coordinator depends on) but *delivery* must not: a guaranteed-mode
+     * admission enqueues the replay cache synchronously, so a collector started here can put a
+     * `ScanResult` on the socket before the handler returns and the reply is written.
+     */
+    private suspend fun startScan(scanId: Long, op: Op.ScanStart): Job {
         val coordinator = scanCoordinator
         if (coordinator != null && coordinator.mode != ScanConcurrencyMode.UNCONTROLLED) {
             // Once physical replacement begins, this command must commit its local binding before
             // connection teardown can detach the generation. Otherwise cancellation between the
             // old collector's stop and the new collector's launch strands surviving logical scans.
-            withContext(NonCancellable) {
+            val deliver = withContext(NonCancellable) {
                 when (val admission = try {
                     coordinator.startOrReplace(LogicalScanKey(clientKey, scanId), clientId, op.filters)
                 } catch (limit: ScanLimitExceeded) {
@@ -622,7 +627,7 @@ class BleAgent(
                             scanJobs.put(scanId, ManagedScan(job, admission.registration, sink))
                         }
                         previous?.job?.cancel()
-                        job.start()
+                        job
                     }
                 }
             }
@@ -634,7 +639,7 @@ class BleAgent(
             Logger.debug(LogTags.ENGINE) {
                 "scan started [c=$clientId scanId=$scanId batched=$batchedLog mode=${coordinator.mode.name.lowercase()}]"
             }
-            return
+            return deliver
         }
         val batched = Capabilities.SCAN_BATCH in negotiated
         val coalesce = advertisementCoalescer()
@@ -650,9 +655,9 @@ class BleAgent(
             scanJobs.put(scanId, ManagedScan(job, registration = null))
         }
         previous?.job?.cancel()
-        job.start()
         observer.onClientLog(clientId, "scan started (#$scanId${if (batched) ", batched" else ""})")
         Logger.debug(LogTags.ENGINE) { "scan started [c=$clientId scanId=$scanId batched=$batched]" }
+        return job
     }
 
     private suspend fun runPerResultScan(
@@ -824,7 +829,14 @@ class BleAgent(
         }
     }
 
-    private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart) {
+    /**
+     * Registers the subscription and returns its **unstarted** notification collector.
+     *
+     * Started only after `observe.start`'s reply — see [replyThenDeliver]. A characteristic that
+     * notifies immediately on subscribe would otherwise land a `Notification` on the socket before
+     * the client has been told the subscription exists.
+     */
+    private suspend fun startObserve(subId: Long, device: DeviceHandle, op: Op.ObserveStart): Job {
         val job = scope.launch(start = CoroutineStart.LAZY) {
             backend.observe(device, op.char)
                 .onEach { value ->
@@ -862,7 +874,7 @@ class BleAgent(
             observeJobs.put(subId, job)
         }
         previous?.cancel()
-        job.start()
+        return job
     }
 
     private suspend fun stopObserve(subId: Long) {
@@ -974,6 +986,27 @@ class BleAgent(
     }
 
     private suspend fun reply(cid: Long, result: OpResult) = outgoing(codec.encode(Reply(cid, result)))
+
+    /**
+     * Enforces the wire guarantee that a stream's `Ok` precedes any event it produces.
+     *
+     * [admit] does the registration and returns an **unstarted** collector; the reply goes out, and
+     * only then does delivery begin. Without this a client can be handed results for a stream it has
+     * not yet been told was accepted — and a client that reads the reply before switching to event
+     * handling loses the first result outright, which is precisely how the `scanConc03` flake
+     * presented: a replayed advertisement overtook its own `scan.start` reply on a loaded runner.
+     *
+     * The start is in a `finally` so a failed reply write cannot strand the collector unstarted,
+     * holding its arbiter sink and coordinator mailbox until the connection scope unwinds.
+     */
+    private suspend fun replyThenDeliver(cid: Long, admit: suspend () -> Job) {
+        val deliver = admit()
+        try {
+            reply(cid, OpResult.Ok())
+        } finally {
+            deliver.start()
+        }
+    }
 
     // Forward-translate any real handle the event carries into the client's declared format before
     // it goes on the wire (identity when translation isn't active).

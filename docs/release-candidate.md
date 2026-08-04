@@ -8,6 +8,78 @@ tag before any release workflow dispatch:
 bash scripts/check-release-version.sh v0.10.0
 ```
 
+## Release evidence — published 2026-08-04
+
+**0.10.0 shipped.** Tag `v0.10.0` is annotated object `c0f8657`, on commit `bd921fe`, cut after all
+four workflows passed on that commit. It is the first tag this repository has ever pushed. The
+sections below this one are the checklist that governed the release; this section is what it
+produced. Every hash here is the published artifact's own, read back from the release rather than
+from a local build.
+
+### GitHub Release assets
+
+Attached by [`agent-artifacts.yml`](../.github/workflows/agent-artifacts.yml) (run `30912683997`),
+each with a SHA-256 sidecar:
+
+| Asset | SHA-256 |
+|---|---|
+| `remoteble-agent-0.10.0-all.jar` | `f0b6bda65da119c8634bdf8ecbd2492758dd073d627c5d0fae3e08c5b48eb907` |
+| `remoteble-agent-rs-linux-x86_64` | `d3394c71b2e63f263889263cebe1a2e4f74011b0ee2043cc2aafd1ff5b36067d` |
+| `remoteble-agent-rs-linux-aarch64` | `533532e8557e3a80940c870052407a2b8707df21b8feed2f07734ef6740477e0` |
+| `remoteble-agent-rs-windows-x86_64.exe` | `82f8309457fb4eadfd5adb820081a162afb5561f620d2975fe27a705b84c01c3` |
+
+### Rust OCI image
+
+`ghcr.io/yahia-mohammad/remoteble-agent-rs`, tags `0.10.0`, `0.10`, `0`, `latest`, `sha-bd921fe`:
+
+| | Digest |
+|---|---|
+| **Manifest list (OCI index)** | `sha256:039d9beb4d459c237a242ef52507422dc6f650e9d6371c52d4906993f10ec8a9` |
+| `linux/amd64` | `sha256:f473e9804313ca4508e2ecda3559a8a464309fc7746b163f4a6b459de3178bec` |
+| `linux/arm64` | `sha256:5457bab7a7faac503bfb2e989ed3b42cdc708f99506a65985ad6e0949fd983ab` |
+
+Plus two attestation manifests (Buildx SBOM and provenance). This closes item 4's last residual: the
+multi-arch manifest is now exercised, and item 2's digest record and Rig D's evidence refer to the
+same published artifact.
+
+The push took three attempts. The first two were rejected by GHCR with a 403 *"secondary rate
+limit"* after the image had already built; the third, ~90 minutes later, succeeded unchanged. The
+build was never at fault. Worth knowing for the next release: buildx exports its cache only on
+success, so each failed push discarded a ~23-minute emulated arm64 rebuild.
+
+### Maven Central
+
+Published and released by [`release.yml`](../.github/workflows/release.yml) (run `30943065249`) —
+its first-ever execution. All 15 coordinates under `dev.warsha.remoteble` at `0.10.0`, each with a
+detached signature, resolvable from `repo1.maven.org` ~12 minutes after the run completed:
+
+```
+protocol      protocol-jvm      protocol-android      protocol-iosarm64      protocol-iossimulatorarm64
+log           log-jvm           log-android           log-iosarm64           log-iossimulatorarm64
+client-sdk    client-sdk-jvm    client-sdk-android    client-sdk-iosarm64    client-sdk-iossimulatorarm64
+```
+
+Because that first execution would otherwise have been both the debut and the irreversible step,
+[`release-preflight.yml`](../.github/workflows/release-preflight.yml) (run `30942658201`) verified
+beforehand, on the same runner image, that the signing key and passphrase were correct (84 detached
+signatures produced), that all 15 coordinates build there, and that the Portal token was accepted.
+
+### Post-publish consumer resolution
+
+Item 3's replacement check, run 2026-08-04 against the **released** coordinates — all three pass:
+
+| Fixture | Task | Resolved |
+|---|---|---|
+| `consumer-tests/jvm` | `check` | `client-sdk-jvm` jar/pom/module |
+| `consumer-tests/android` | `compileDebugKotlin` | `client-sdk-android.aar` + `log-android`, `protocol-android` |
+| `consumer-tests/kmp` | `compileKotlinIosArm64`, `…SimulatorArm64` | `client-sdk-iosarm64.klib`, `…iossimulatorarm64.klib` |
+
+**These fixtures list `mavenLocal()` first, and `0.10.0` was present in the operator's `~/.m2`.** Run
+as CI runs them, all three would have resolved locally and passed while proving nothing. They were
+run with `-Dmaven.repo.local` pointed at an empty directory and `--refresh-dependencies`; every
+artifact came from `repo.maven.apache.org` and the logs contain zero local-`.m2` references. Anyone
+repeating this check must neutralize `mavenLocal()` the same way or the result is meaningless.
+
 ## Artifact inventory
 
 | Artifact | Build/publish path | Required evidence |
@@ -46,6 +118,11 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    artifacts rather than before — and it is accepted deliberately rather than overlooked. Closing it
    properly means publishing to a resolvable staging repository (GitHub Packages) first; that is
    0.10.1 work.
+
+   **The post-publish re-run was done 2026-08-04 and all three fixtures pass** — see [Post-publish
+   consumer resolution](#post-publish-consumer-resolution). That discharges the check for this
+   release, but *not* the underlying gap: the assurance is still after-the-fact, and the staging
+   repository remains 0.10.1 work.
 4. ~~Complete the real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.~~ **All four rigs are run
    (25/25) as of 2026-08-03** — see [validation-plan.md](validation-plan.md). Rig D passed
    6/6 on **one amd64 Linux host** under the option-1 relaxation, *not* on the Ubuntu and Pi hosts
@@ -57,8 +134,11 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    macOS (2026-08-04)**: connect, discover and read all pass through the cached peripheral handle on
    CoreBluetooth, evidence in
    [rig-d-evidence.md](rig-d-evidence.md#run-2026-08-04--pass-and-the-recipe-above-is-wrong-in-two-ways).
-   The remaining residual is the multi-arch manifest, unexercised because no `v*` tag exists yet, so
-   item 2's digest record and this evidence cannot yet refer to the same published artifact.
+   ~~The remaining residual is the multi-arch manifest, unexercised because no `v*` tag exists yet,
+   so item 2's digest record and this evidence cannot yet refer to the same published artifact.~~
+   **Closed 2026-08-04** — the manifest is published and its digests are recorded under [Rust OCI
+   image](#rust-oci-image). The acceptance above still stands unchanged: arm64 is *built* and
+   published, but it is still not *validated* on arm64 hardware.
 5. ~~Complete the scan-concurrency hardware run~~ — **DONE 2026-08-03**, evidence in
    [scan-concurrency-validation.md](scan-concurrency-validation.md). Passed on the iOS agent, the
    Kotlin JVM agent and `agent-rs`, all three in agreement, no `INCONCLUSIVE` verdicts. One case
@@ -67,8 +147,15 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    stands unchanged. **The published capability strings and the `SCAN_UNAVAILABLE` `ErrorKind` this
    introduced are now hardware-backed** — which is what made it a separate blocker from item 4,
    since Central cannot unpublish them.
-6. Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.
+6. ~~Confirm Central quota and signing credentials, then create `v0.10.0` on the approved commit.~~
+   **Done 2026-08-04.** The credentials had to be recreated: the repository was deleted and
+   recreated during an earlier history reorganization, which discarded its Actions secrets, and
+   `release.yml` had never run — so the CI publish path was unproven rather than merely unused.
+   `release-preflight.yml` exists because of that and should be run before any future Central
+   publish.
 
-The tag and publication are PR9 actions. This document is an inventory and approval checklist, not
-evidence that publication or hardware validation has happened. Release assets must include a
-SHA-256 sidecar or a release-evidence record that names the exact asset and its hash.
+This document began as an inventory and approval checklist, and the checklist above is preserved as
+it stood at approval — including the reservations, which were accepted rather than resolved. What
+publication produced is recorded in [Release evidence](#release-evidence--published-2026-08-04).
+Release assets must include a SHA-256 sidecar or a release-evidence record that names the exact
+asset and its hash.

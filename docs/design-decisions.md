@@ -102,7 +102,7 @@ The design keeps them separate end to end: `TransportState` lives on the session
 The reconnection policy (below) is built so that the transport layer can recover
 transparently *without* fabricating BLE-state changes.
 
-**One refinement, added 0.10.0 after Rig B case 5.** Keeping the two separate is right while the
+**One refinement, added 0.10.0 after a hardware finding.** Keeping the two separate is right while the
 transport might still recover; it stops being right once it definitively cannot. A killed agent
 sends no `ConnectionState` event — it cannot — so a peripheral that only ever moves on wire events
 sat at `Connected` indefinitely while every operation failed `TRANSPORT_LOST`, and a Kable consumer
@@ -383,9 +383,9 @@ What follows from it:
   while doing nothing on two of three targets, and would silently change behaviour on both if Kable
   ever wired it up.
 
-  **Scope, measured on hardware (2026-07-30, item 18).** This affects reads issued against a
+  **Scope, measured on hardware (2026-07-30).** This affects reads issued against a
   **`DiscoveredCharacteristic`** taken from `Peripheral.services` — a platform-backed object, which
-  is what `EngineBleBackend.findCharacteristic` uses and what Rig B's finding 5 was measured on. It
+  is what `EngineBleBackend.findCharacteristic` uses and what the hardware measurement below covers. It
   does **not** affect a lazy `characteristicOf(serviceUuid, characteristicUuid)`, which Kable can
   only resolve by UUID, so reference identity never enters the matching. Both reads were run against
   the same connection with the option off: the discovered read timed out at 15.008 s while the lazy

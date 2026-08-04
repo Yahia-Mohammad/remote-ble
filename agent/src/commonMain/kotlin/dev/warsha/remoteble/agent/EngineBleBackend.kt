@@ -413,7 +413,7 @@ class EngineBleBackend(
      * Only applies to [withResponse] writes. The degraded state protects against a
      * write-with-response completion that never arrives ([markWriteDegraded]'s doc);
      * WriteWithoutResponse has no ATT response to await in the first place (resumes on local
-     * hand-off, see docs/phase7-bringup.md), so it can't be affected by that wedge and must not be
+     * hand-off, see docs/bringup.md), so it can't be affected by that wedge and must not be
      * short-circuited by it — doing so broke the documented "WWR still returns Ok" guarantee on
      * real hardware (Rig A, 2026-07-28).
      */

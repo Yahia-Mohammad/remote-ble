@@ -91,8 +91,8 @@ Reusing Rig B, whose full setup is in [pr8-rig-b-evidence.md](pr8-rig-b-evidence
 
 | | |
 |---|---|
-| iOS agent host | iPhone 14, UDID `00008110-001C55882611401E`, LAN `192.168.178.85`, needs a **manual Start tap** |
-| JVM/`agent-rs` agent host | the Mac (`192.168.178.78`), `agent/run-agent.sh` |
+| iOS agent host | iPhone 14, UDID `<redacted-udid>`, LAN `<iphone-lan-ip>`, needs a **manual Start tap** |
+| JVM/`agent-rs` agent host | the Mac (`<mac-lan-ip>`), `agent/run-agent.sh` |
 | Client | `:e2e-runner` on the Mac — no radio of its own |
 | Filtered peripheral | Pixel 8, `com.warsha.ble.peripheral.sample`, service `a1b2c3d4-0000-4000-8000-000000000001`, Start at `adb shell input tap 540 314` |
 | Token | `REMOTE_BLE_TOKEN=secret` |
@@ -119,8 +119,8 @@ Three prerequisites specific to *this* plan:
 
 | ID | What | Command | Pass |
 |---|---|---|---|
-| `SC-HW-00` | Discriminating device present | `:e2e-runner:scanRun --args "ws://192.168.178.85:8080/agent 30"` | listing contains ≥1 device without the filtered service |
-| `SC-HW-01` | A lone 60 s scan does not end on its own | `:e2e-runner:scanRun --args "ws://192.168.178.85:8080/agent 60"` | advertisements arriving throughout, including the final seconds |
+| `SC-HW-00` | Discriminating device present | `:e2e-runner:scanRun --args "ws://<iphone-lan-ip>:8080/agent 30"` | listing contains ≥1 device without the filtered service |
+| `SC-HW-01` | A lone 60 s scan does not end on its own | `:e2e-runner:scanRun --args "ws://<iphone-lan-ip>:8080/agent 60"` | advertisements arriving throughout, including the final seconds |
 
 `SC-HW-01` is not a formality. Without it, scan A going quiet later is unattributable — it could be
 interference, or the rig.
@@ -129,7 +129,7 @@ interference, or the rig.
 
 | ID | Topology | Command |
 |---|---|---|
-| `SC-HW-02` | two clients | `:e2e-runner:scanConcurrencyRun --args "ws://192.168.178.85:8080/agent a1b2c3d4-0000-4000-8000-000000000001 two-clients 60 15 10"` |
+| `SC-HW-02` | two clients | `:e2e-runner:scanConcurrencyRun --args "ws://<iphone-lan-ip>:8080/agent a1b2c3d4-0000-4000-8000-000000000001 two-clients 60 15 10"` |
 | `SC-HW-03` | one client, two scanners | `… a1b2c3d4-0000-4000-8000-000000000001 same-client 60 15 10"` |
 
 **Pass:** `stop direction` PASS, `start direction` PASS, `B filter correctness` PASS, negotiated mode
@@ -198,10 +198,10 @@ Stated up front so the write-up is not negotiated after the fact.
 ## Evidence — 2026-08-03 run
 
 Commit `09f2f49` on `codex/scan-concurrency-modes`. Hosts: iPhone 14 (UDID
-`00008110-001C55882611401E` / CoreDevice `FA1C1ED8-2257-5E22-8CF7-8F1302DB37BB`) running the
+`<redacted-udid>` / CoreDevice `<redacted-coredevice-id>`) running the
 `ios-agent` debug build (release XCFramework link still OOMs per gap 11, so this run used the
 established debug-vehicle fallback — production Kotlin/Swift source is identical either way); the
-Mac (`192.168.178.78`) running both the Kotlin JVM agent (`agent/run-agent.sh`) and `agent-rs`
+Mac (`<mac-lan-ip>`) running both the Kotlin JVM agent (`agent/run-agent.sh`) and `agent-rs`
 (`agent-rs/run-agent-rs.sh`), never concurrently; the Pixel 8 running `sample-peripheral`
 (`RBTestPeripheral`, service `a1b2c3d4-0000-4000-8000-000000000001`) as the filtered peripheral
 throughout.

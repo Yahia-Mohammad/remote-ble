@@ -15,37 +15,44 @@ maintainer-internal and are not part of the published docs.
 
 ## Documents
 
+Grouped by who they're for. If you're evaluating or building against this SDK, the first two
+sections are everything you need — the rest exists for people extending the protocol itself or
+auditing how the release was verified.
+
+### For app developers
+
 | Document | Covers |
 |---|---|
 | [getting-started.md](getting-started.md) | **Start here if you're building an app.** Run an agent, connect a client, the local↔remote swap, lifecycle & errors |
 | [scanning.md](scanning.md) | **Discovery, for app developers** — filters and their exact semantics, holding two scanners at once, the three agent scan-concurrency modes, replay/late-join, reconnect behaviour, limits |
 | [migrate-to-0.10.0.md](migrate-to-0.10.0.md) | Upgrade a Maven Central consumer to 0.10.0; `authToken` provider change and platform compatibility |
+| [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
+| [simulation.md](simulation.md) | Versioned radio-less JVM agent profile, CLI use, supported behaviors, and validation limits — test app logic in CI with no Bluetooth hardware |
+
+### Running an agent
+
+| Document | Covers |
+|---|---|
+| [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
+| [bringup.md](bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
+| [rust-agent-container.md](rust-agent-container.md) | The local Rust-agent Docker image, smoke checks, and the supported-host boundary |
+| [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The supported `wss://` recipe** (`TLS-PROXY-01`) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
+
+### The wire contract & internals
+
+For implementing an independent agent, client, or proxy against the protocol, or understanding how
+this one is built.
+
+| Document | Covers |
+|---|---|
 | [architecture](#architecture) (below) | The layered model, module map, the seams, glossary |
 | [agent-conformance-spec.md](agent-conformance-spec.md) | **The normative conformance spec** — what an independent agent/proxy (or client) MUST do to interoperate. The *contract*, language-agnostic; the others explain *why*. |
 | [protocol.md](protocol.md) | The wire contract: every frame/op/result/event type, the codec, serialization rules |
-| [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
-| [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
-| [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
-| [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) | 0.10.0 implementation handoff: PR0–PR7 landed, verification and remaining hardware/publication work |
-| [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
-| [simulation.md](simulation.md) | Versioned radio-less JVM agent profile, CLI use, supported behaviors, and validation limits |
-| [rust-agent-container.md](rust-agent-container.md) | PR5 local Rust-agent Docker image, smoke checks, and the supported-host boundary |
-| [release-candidate.md](release-candidate.md) | 0.10.0 version source, artifact inventory, and pre-tag approval checklist |
-| [proposals/agent-proxy.md](proposals/agent-proxy.md) | Future transparent multi-agent proxy design that preserves the existing client/Kable API |
-| [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Linux real-radio OCI image contract for `agent-rs` |
-| [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | **Not started, bar two landed precedents** (`REMOTE_BLE_WRITE_FAIL_FAST`, `REMOTE_BLE_SCAN_CONCURRENCY`) — making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host |
-| [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | **Closed 2026-08-03, hardware-validated** — the design record behind [scanning.md](scanning.md): why concurrent scans were not isolated on Apple hosts (and the Kotlin/Rust agents diverged), the three agent modes (`multiplexed`/`single`/`uncontrolled`), their wire surface, and the rejected alternatives |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
 | [build-and-testing.md](build-and-testing.md) | Modules, multiplatform targets, the Kable (Maven Central) dependency, Gradle quirks, the test suite & fakes |
-| [phase7-bringup.md](phase7-bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
-| [pr8-validation-plan.md](pr8-validation-plan.md) | The PR8 hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
-| [scan-concurrency-validation.md](scan-concurrency-validation.md) | **Closed 2026-08-03** — the hardware run that closed the concurrent-scan blocker: instruments, rig prerequisites, cases, and what each result is allowed to change |
-| [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The supported `wss://` recipe** (`TLS-PROXY-01`) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
-| [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) | **Rig A real-radio evidence** — per-case results, the two peripheral defects that had to be fixed before the rig could run, the operator prerequisites, and what remains |
 | [agent-parity-verification.md](agent-parity-verification.md) | Kotlin agent vs `agent-rs` feature parity verification (ops, capabilities, logging, dashboard, liveness, translation, registry, scan, errors, auth) |
-| [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 
 ### Proposals (design records)
 
@@ -61,6 +68,29 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
 | [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Implemented on both agents with paired conformance evidence, and [hardware-validated](scan-concurrency-validation.md) 2026-08-03** |
+| [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | Making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host | **Not started, bar two landed precedents** (`REMOTE_BLE_WRITE_FAIL_FAST`, `REMOTE_BLE_SCAN_CONCURRENCY`) |
+
+### Release process & evidence
+
+Dated engineering records — the checklists and hardware results that justified taking each release
+through its gate. Written for continuity between working sessions, not for a first read; skip this
+section unless you're auditing how a specific claim was verified or picking up the release process
+itself. Filenames below still carry internal labels from before this repository was public (`PR8`,
+`Rig A`/`B`/`D`) — kept as-is rather than renamed, since the prose inside each document uses the
+same labels throughout and refers to itself by them.
+
+| Document | Covers |
+|---|---|
+| [release-candidate.md](release-candidate.md) | 0.10.0 version source, artifact inventory, and pre-tag approval checklist |
+| [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
+| [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
+| [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) | 0.10.0 implementation handoff and working log — status, open items, and session-by-session history |
+| [pr8-validation-plan.md](pr8-validation-plan.md) | The hardware-validation checklist, grouped by rig: real-radio phones, iOS agent lifecycle, TLS reverse proxy, Ubuntu/Pi container hosts |
+| [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md) | **Rig A — real-radio evidence.** Per-case results, the two peripheral defects fixed before the rig could run, operator prerequisites, and what remains |
+| [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md) | **Rig B — iOS agent lifecycle evidence.** Backgrounding, kill/relaunch, Bluetooth-off, and the ATT-error findings that turned out to be CoreBluetooth-specific |
+| [pr8-rig-d-evidence.md](pr8-rig-d-evidence.md) | **Rig D — Linux container-host evidence.** The GATT-resolution defect it found in `agent-rs`, and the macOS re-check that followed |
+| [scan-concurrency-validation.md](scan-concurrency-validation.md) | **Closed 2026-08-03** — the hardware run that closed the concurrent-scan blocker: instruments, rig prerequisites, cases, and what each result is allowed to change |
+| [conformance/0.9.1-scenarios.md](conformance/0.9.1-scenarios.md) | Kotlin/Rust executable-conformance scenario skeleton for 0.9.1 |
 
 ---
 

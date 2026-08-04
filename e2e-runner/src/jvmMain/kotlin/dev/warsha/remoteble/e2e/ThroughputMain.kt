@@ -25,7 +25,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
-// Same TestProfile contract as Main.kt (docs/phase7-bringup.md#testprofile--the-contract),
+// Same TestProfile contract as Main.kt (docs/bringup.md#testprofile--the-contract),
 // duplicated locally so this driver runs standalone via `:e2e-runner:throughputRun`.
 private const val DEFAULT_URL = "ws://localhost:8080/agent"
 private const val ADVERTISED_NAME = "RBTestPeripheral"

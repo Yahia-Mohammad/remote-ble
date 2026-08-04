@@ -79,7 +79,7 @@ REMOTE_BLE_TOKEN=<secret> java -jar agent/build/libs/remoteble-agent-<version>-a
 ```
 
 `--simulate` never constructs `EngineBleBackend`, so no CoreBluetooth call is made and the macOS
-TCC workaround in [phase7-bringup.md](phase7-bringup.md) does not apply — a plain JVM is fine here.
+TCC workaround in [bringup.md](bringup.md) does not apply — a plain JVM is fine here.
 For the real-radio re-confirmation, drop `--simulate` and use `agent/run-agent.sh` instead.
 
 ## 4 — Cases 1–3: upgrade, bearer forwarding, CA trust

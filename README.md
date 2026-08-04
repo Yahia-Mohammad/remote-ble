@@ -123,7 +123,7 @@ the accepted security/lifecycle hardening. The future
 
 > **You'll need a test peripheral for the full connect/read/write/observe path.** Any GATT
 > peripheral works — a Heart Rate / Battery advertiser for the demo UI, or your own app with custom
-> UUIDs for the raw op-set. See [`docs/phase7-bringup.md`](docs/phase7-bringup.md) for a scripted
+> UUIDs for the raw op-set. See [`docs/bringup.md`](docs/bringup.md) for a scripted
 > live bring-up.
 
 ## Pinned versions

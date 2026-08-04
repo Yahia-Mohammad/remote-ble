@@ -9,7 +9,7 @@ e2e-runner (client SDK) ──WebSocket──▶ :agent (macOS central) ──ra
 It exercises the full op set against `TestProfile` (defined in this module) using the **Kable
 `Peripheral` API** (`RemoteScanner` → `peripheralFor(REMOTE)` → connect / discover / read / write /
 observe). A green run is therefore also proof that app logic written against Kable runs unchanged
-against a remote agent. See [`docs/phase7-bringup.md`](../docs/phase7-bringup.md) for the full
+against a remote agent. See [`docs/bringup.md`](../docs/bringup.md) for the full
 live bring-up procedure, including what a test peripheral app needs to expose.
 
 ## What it checks

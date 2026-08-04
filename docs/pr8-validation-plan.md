@@ -2,7 +2,7 @@
 
 **Purpose:** the exact, checkable test list behind [`0.10.0-scope.md`](proposals/0.10.0-scope.md)
 Workstream D and [`release-candidate.md`](release-candidate.md)'s "Complete PR8's real-radio, iOS,
-TLS-proxy, Ubuntu, and Pi evidence" line. [`phase7-bringup.md`](phase7-bringup.md) is the mechanical
+TLS-proxy, Ubuntu, and Pi evidence" line. [`bringup.md`](bringup.md) is the mechanical
 runbook for driving the real-radio rig; this document is the checklist of *what* to run on *which*
 rig, so each one can be set up once and fully exhausted before moving to the next.
 
@@ -83,7 +83,7 @@ device (a phone advertising the `TestProfile`/HRM service, e.g. the sibling `../
 apps or `nRF Connect`'s GATT server), a second phone for the two-client cases.
 
 **Setup:** either bring-up path already proven works —
-- Mac-hosted: [`phase7-bringup.md`](phase7-bringup.md) (`agent/run-agent.sh` + `:e2e-runner`), or
+- Mac-hosted: [`bringup.md`](bringup.md) (`agent/run-agent.sh` + `:e2e-runner`), or
 - mobile-hosted: the cold-start checklist in memory `0-8-1-hardware-test-rig` (Android emulator
   client → USB `adb forward` → Pixel agent → iOS peripheral).
 
@@ -100,7 +100,7 @@ suite has grown substantially — this is the first real-radio run against that 
 
    **Full `:e2e-runner` 14-step run**, both agents (Kotlin `:agent` **and** `agent-rs`) — scan,
    connect, discover, read (exact), write with/without response, negotiated MTU, notify (no
-   miss/dup), disconnect. `phase7-bringup.md` steps 0–3.
+   miss/dup), disconnect. `bringup.md` steps 0–3.
 2. ✅ **PASS** (both agents, 2026-07-28 evening) — closed only after the original stimulus was found
    to measure nothing; see the correction below.
 

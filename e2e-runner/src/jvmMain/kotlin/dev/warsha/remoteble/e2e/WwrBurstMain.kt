@@ -26,7 +26,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
-// Same TestProfile contract as Main.kt/ThroughputMain.kt (docs/phase7-bringup.md#testprofile--the-contract).
+// Same TestProfile contract as Main.kt/ThroughputMain.kt (docs/bringup.md#testprofile--the-contract).
 private const val DEFAULT_URL = "ws://localhost:8080/agent"
 private const val ADVERTISED_NAME = "RBTestPeripheral"
 private const val SERVICE = "a1b2c3d4-0000-4000-8000-000000000001"

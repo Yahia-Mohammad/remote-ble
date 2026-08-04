@@ -112,7 +112,7 @@ private val btleplugOnCoreBluetoothAgent: Boolean =
  *
  * Usage: `./gradlew :e2e-runner:jvmRun --args "<ws-url> [token]"`
  * (defaults to `$DEFAULT_URL`; token also read from `REMOTE_BLE_TOKEN`). Needs a running agent and
- * a phone running a test peripheral app with its server started (see docs/phase7-bringup.md).
+ * a phone running a test peripheral app with its server started (see docs/bringup.md).
  */
 fun main(args: Array<String>): Unit = runBlocking {
     val url = args.getOrNull(0) ?: DEFAULT_URL

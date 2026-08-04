@@ -9,6 +9,13 @@ The **wire protocol** version is tracked separately from the library version —
 is a distinct compatibility contract for agent/client implementers. Current wire
 protocol version: **1**.
 
+> This repository was private prior to 0.10.0, and its tag/GitHub Release history begins there —
+> `v0.10.0` is the first tag this repository has ever pushed. Entries below for 0.7.0 through 0.9.1
+> are retained development history, not links to a GitHub release: **0.7.0 and 0.8.0** have real,
+> independently verifiable artifacts on Maven Central (linked from their version headers); **0.8.1
+> through 0.9.1** were agent-binary-only releases with no corresponding public artifact anywhere,
+> so their version headers are plain text.
+
 ## [Unreleased]
 
 ## [0.10.0] - 2026-08-04
@@ -263,7 +270,7 @@ protocol version: **1**.
 > radio: the F read/write/notify assertions (`:e2e-runner:jvmRun`) and the C throughput number
 > (`:e2e-runner:throughputRun`, before/after the burst API) need a peripheral. Rather than hold the
 > release on limited hardware, that live pass is **deferred to the next release's batched hardware
-> round** (alongside 0.8.1/0.8.2's pending checks) — see `docs/phase7-bringup.md`. No behavior here is
+> round** (alongside 0.8.1/0.8.2's pending checks) — see `docs/bringup.md`. No behavior here is
 > unverifiable in principle; it just hasn't been exercised on a physical link yet.
 
 ### Added
@@ -292,7 +299,7 @@ protocol version: **1**.
   peripheral error, WWR still returns `Ok` on that same forced error (documents the inherent
   no-ATT-ack limit rather than treating it as a bug), and the notify stream is checked for
   no-miss/no-duplicate delivery. Interactive — pauses for phone-side debug-control toggles; see
-  `docs/phase7-bringup.md`.
+  `docs/bringup.md`.
 
 ### Fixed
 
@@ -301,7 +308,7 @@ protocol version: **1**.
   ("Prepare for open-source release"), not polling: read and write-with-response are exact (they
   resume on Kable's GATT completion callbacks); WWR and notify-delivery are best-effort **by BLE
   design** (neither has an ATT-level acknowledgement to plumb), not an implementation gap. Row
-  closed; `phase7-bringup.md`'s matching "reads poll / writes have no write-complete callback" prose
+  closed; `bringup.md`'s matching "reads poll / writes have no write-complete callback" prose
   corrected to match, and its live-run transcript updated for the new assertions above.
 - **Client-side completion contract documented** (`client-sdk.md`, `getting-started.md`): a
   delivered `Ok` is exact — the agent replies only after the real GATT completion — but a
@@ -478,8 +485,5 @@ protocol version: **1**.
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0
-[0.8.3]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.3
-[0.8.2]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.2
-[0.8.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.1
-[0.8.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.8.0
-[0.7.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.7.0
+[0.8.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.8.0
+[0.7.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.7.0

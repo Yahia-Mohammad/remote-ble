@@ -256,7 +256,7 @@ than generalising:
 
 | Situation | Android | iOS |
 |---|---|---|
-| scan started while the radio is off | succeeds, yields nothing (Rig B finding 9) | not measured |
+| scan started while the radio is off | succeeds, yields nothing (measured on hardware) | not measured |
 | radio switched off during a live scan | not measured | the scan **ends with an error** — `"scan #1 ended on error: Bluetooth disabled"`, observed on an iPhone 14 |
 
 So the blunt claim "a radio-off scan is never an error" is true of the Android case that motivated

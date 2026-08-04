@@ -27,8 +27,8 @@ Stop → Start starts cleanly.
 | Host | macOS 26.5.2 (Darwin 25.5.0), arm64, 24 GB RAM, Bluetooth on |
 | Toolchain | Xcode 26.6 (17F113), XcodeGen 2.46.0 |
 | Signing | Team `K2364Z5744`, **free** Apple developer profile (see prerequisites) |
-| iOS agent host | iPhone 14 (`iPhone14,7`), iOS 26.5.2, UDID `00008110-001C55882611401E`, developer mode enabled, LAN `192.168.178.85` |
-| Client | `:e2e-runner` on the Mac (`192.168.178.78`), no radio of its own |
+| iOS agent host | iPhone 14 (`iPhone14,7`), iOS 26.5.2, UDID `<redacted-udid>`, developer mode enabled, LAN `<iphone-lan-ip>` |
+| Client | `:e2e-runner` on the Mac (`<mac-lan-ip>`), no radio of its own |
 | Peripheral | Pixel 8, `com.warsha.ble.peripheral.sample`, `../ble-peripheral` at `5390307`, `TestProfile`, advertising `RBTestPeripheral` |
 | Repo commit | Runs made on `b0e5aee` plus the fixes below, now committed as `96b235a`, `3aa665e`, `133e940` |
 | Agent version | 0.10.0 |
@@ -52,7 +52,7 @@ Both cost real time and belong in the runbook before the next iOS session.
 
 The agent launches, listens, and is reachable from a LAN client. Ktor reports
 `Responding at http://0.0.0.0:8080` (mobile binds `0.0.0.0` by design — `MOBILE_LAN_BIND_HOST`).
-Probed from the Mac against `192.168.178.85:8080`:
+Probed from the Mac against `<iphone-lan-ip>:8080`:
 
 | Request | Result |
 |---|---|
@@ -142,7 +142,7 @@ the correct mechanism — nothing needs removing.
 > `REMOTE_BLE_E2E_AGENT_HOST`; see item 22 in
 > [0.10.0-progress-status.md](proposals/0.10.0-progress-status.md). The measurements below stand. What changes is the *knowledge*: the Apple native
 Kable backend reports `WRITE_FAILED` on an ATT error and does not poison the connection
-afterwards, which [phase7-bringup.md](phase7-bringup.md) had recorded as unverified on hardware.
+afterwards, which [bringup.md](bringup.md) had recorded as unverified on hardware.
 
 **One unreproduced anomaly, recorded rather than dropped.** The very first full run after the app
 was relaunched reported `FAIL: expected WRITE_FAILED, got AgentException (TIMEOUT)` at that step.
@@ -893,7 +893,7 @@ Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md
     verify platform A actually does it** — the reference implementation is a hypothesis too, and one
     grep would have settled it.
 17. **When the transport under test is not the transport being measured, move the probe.** The
-    Android re-verification stalled immediately: probing `http://192.168.178.83:8080` from the Mac
+    Android re-verification stalled immediately: probing `http://<android-lan-ip>:8080` from the Mac
     timed out, even though the app showed `Running`. The reflex reading was "the fix does not work
     on Android" — the LAN path was simply blocked (the SYN went unanswered; an earlier probe to the
     same address had been *refused*, so delivery had worked minutes before). Two on-device controls

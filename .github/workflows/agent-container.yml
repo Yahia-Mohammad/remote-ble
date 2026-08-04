@@ -98,7 +98,29 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.revision.outputs.sha }}
-      - name: Build and publish amd64/arm64 manifest
+      # Build and push are deliberately separate.
+      #
+      # Buildx exports its cache as part of a successful build+push, so when the two are one step a
+      # failed push discards the layers too. The arm64 leg compiles the whole Rust dependency tree
+      # under QEMU — around 23 minutes — and GHCR rejected the v0.10.0 push twice with a transient
+      # 403, meaning each retry paid that cost again to reach the same failing push.
+      #
+      # Building to `type=cacheonly` first exports the cache on its own. If the push below then
+      # fails, the expensive work survives and a retry is a cache hit plus an upload.
+      - name: Build amd64/arm64 and export the layer cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent-rs/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=cacheonly
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Resolves entirely from the cache above, so this step is an export and an upload rather than
+      # a rebuild. No cache-to: the cache is already exported, and re-exporting on success only
+      # duplicates work. Attestations are generated here because they are produced at export time.
+      - name: Publish amd64/arm64 manifest
         id: push
         uses: docker/build-push-action@v6
         with:
@@ -111,7 +133,6 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha
-          cache-to: type=gha,mode=max
       - name: Record published digest
         run: echo "${{ steps.push.outputs.digest }}" > image-digest.txt
       - name: Archive image digest

@@ -214,47 +214,82 @@ class ScanConcurrencyWebSocketTest {
         socket.send(WsFrame.Binary(true, codec.encode(Command(cid, op))))
     }
 
-    private suspend fun receiveReply(socket: DefaultClientWebSocketSession, cid: Long): OpResult =
-        bounded("receive the reply to cid=$cid") {
-            while (true) {
-                when (val frame = receiveFrame(socket)) {
-                    is Reply -> if (frame.cid == cid) return@bounded frame.result
-                    else -> Unit
-                }
-            }
-            @Suppress("UNREACHABLE_CODE") error("unreachable")
+    /**
+     * Frames read off a socket while waiting for a different one.
+     *
+     * **This is what the scanConc03 flake was.** These helpers used to drop any frame that was not
+     * the one being waited for (`else -> Unit`), and the agent can legitimately write a scan's first
+     * `ScanResult` *before* the `ScanStart` reply: admission enqueues the replay and
+     * `BleAgent.startScan` starts the collector, both inside the command handler, so the collector
+     * can reach the socket before the handler returns and the reply is written. When the event won
+     * that race, `receiveReply` swallowed the replayed advertisement and the following
+     * `receiveAdvertisement` then waited for one that was never coming again.
+     *
+     * That is a coin flip on scheduling — measured at 12/30 on a two-core CI runner and never once
+     * in 150 in-JVM iterations on Apple silicon, which is exactly why it looked like infrastructure.
+     * A real client demultiplexes frames by type and cid rather than assuming an order; so does this
+     * now.
+     */
+    private val buffered = mutableMapOf<DefaultClientWebSocketSession, ArrayDeque<Frame>>()
+
+    /**
+     * Reads until a frame matching [predicate] arrives, keeping everything else for a later caller.
+     *
+     * Checks already-buffered frames first, so a frame that arrived early is still found rather than
+     * waited for a second time.
+     */
+    private suspend fun awaitFrame(
+        socket: DefaultClientWebSocketSession,
+        what: String,
+        predicate: (Frame) -> Boolean,
+    ): Frame = bounded(what) {
+        val queue = buffered.getOrPut(socket) { ArrayDeque() }
+        val alreadyHere = queue.indexOfFirst(predicate)
+        if (alreadyHere >= 0) return@bounded queue.removeAt(alreadyHere)
+        while (true) {
+            val frame = receiveFrame(socket)
+            if (predicate(frame)) return@bounded frame
+            queue += frame
+            // Direct evidence of the ordering this buffer exists for, rather than an inference from
+            // "the test stopped failing once we buffered".
+            if (frame is Event) println("NOTE: an Event arrived while waiting to $what — buffered, not dropped")
         }
+        @Suppress("UNREACHABLE_CODE") error("unreachable")
+    }
+
+    private suspend fun receiveReply(socket: DefaultClientWebSocketSession, cid: Long): OpResult =
+        (awaitFrame(socket, "receive the reply to cid=$cid") { it is Reply && it.cid == cid } as Reply).result
 
     private suspend fun receiveReplies(
         socket: DefaultClientWebSocketSession,
         expected: Set<Long>,
-    ): Map<Long, OpResult> = bounded("receive replies to cids=$expected") {
+    ): Map<Long, OpResult> {
         val replies = mutableMapOf<Long, OpResult>()
         while (replies.keys != expected) {
-            when (val frame = receiveFrame(socket)) {
-                is Reply -> if (frame.cid in expected) replies[frame.cid] = frame.result
-                else -> Unit
-            }
+            val reply = awaitFrame(socket, "receive replies to cids=$expected") {
+                it is Reply && it.cid in expected && it.cid !in replies
+            } as Reply
+            replies[reply.cid] = reply.result
         }
-        replies
+        return replies
     }
 
     private suspend fun receiveAdvertisement(
         socket: DefaultClientWebSocketSession,
         scanId: Long,
-    ): AdvertisementDto = bounded("receive an advertisement for scanId=$scanId") {
-        while (true) {
-            when (val frame = receiveFrame(socket)) {
-                is Event -> when (val event = frame.event) {
-                    is AgentEvent.ScanResult if event.scanId == scanId -> return@bounded event.advertisement
-                    is AgentEvent.ScanResultBatch if event.scanId == scanId ->
-                        return@bounded event.advertisements.first()
-                    else -> Unit
-                }
-                else -> Unit
+    ): AdvertisementDto {
+        val frame = awaitFrame(socket, "receive an advertisement for scanId=$scanId") {
+            it is Event && when (val event = it.event) {
+                is AgentEvent.ScanResult -> event.scanId == scanId
+                is AgentEvent.ScanResultBatch -> event.scanId == scanId
+                else -> false
             }
         }
-        @Suppress("UNREACHABLE_CODE") error("unreachable")
+        return when (val event = (frame as Event).event) {
+            is AgentEvent.ScanResult -> event.advertisement
+            is AgentEvent.ScanResultBatch -> event.advertisements.first()
+            else -> error("unreachable — the predicate above admits only scan results")
+        }
     }
 
     /**

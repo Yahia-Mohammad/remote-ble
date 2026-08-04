@@ -1,0 +1,82 @@
+name: Scan flake stress
+
+# Temporary diagnostic for gap item 23 (scanConc03 late-join replay). Delete once that item closes.
+#
+# Why this exists: the flake fails ~50% of the time on a hosted runner and has never reproduced
+# locally (40 Gradle runs plus 150 iterations of the scenario inside one JVM, on Apple silicon).
+# Every ordinary CI run yields exactly ONE execution of the test, so "is it fixed?" cannot be
+# answered by watching main go green — three passes is what a coin flip looks like. This runs the
+# class many times on the hardware where it actually reproduces, turning a weeks-long wait into one
+# dispatch.
+#
+# Manual only. It is deliberately not on push/PR: it is an experiment, not a gate.
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "How many times to run ScanConcurrencyWebSocketTest"
+        required: true
+        default: "30"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: Repeat the scan-concurrency suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-stress-gradle-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
+
+      # Runs the whole class rather than the single test: the CI failures happened with the full
+      # suite in flight, and the class shares one HttpClient and churns ephemeral ports, so the
+      # single test in isolation is a different experiment from the one that fails.
+      - name: Stress the scan-concurrency suite
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set +e
+          mkdir -p stress-reports
+          fails=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            ./gradlew :client-sdk:jvmTest --tests '*ScanConcurrencyWebSocketTest*' --rerun -q \
+              > "stress-reports/iter-$i.log" 2>&1
+            if [ $? -eq 0 ]; then
+              echo "iter $i: pass"
+            else
+              fails=$((fails + 1))
+              echo "iter $i: FAIL"
+              # The bounded() helper names the wait it died on; that string is the whole point.
+              grep -ho 'timed out after [^"<]*' client-sdk/build/test-results/jvmTest/*.xml 2>/dev/null | sort -u
+              cp -r client-sdk/build/test-results/jvmTest "stress-reports/results-iter-$i" 2>/dev/null || true
+            fi
+          done
+          echo "==============================================="
+          echo "STRESS RESULT: $fails failures out of $ITERATIONS"
+          echo "==============================================="
+          # A non-zero count is the informative outcome, so surface it as a failed job.
+          [ "$fails" -eq 0 ]
+
+      - name: Archive stress logs and any failing reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scan-flake-stress-reports
+          path: stress-reports/
+          if-no-files-found: ignore

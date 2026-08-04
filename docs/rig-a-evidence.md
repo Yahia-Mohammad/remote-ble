@@ -1,6 +1,6 @@
-# PR8 · Rig A — real-radio evidence
+# Rig A — real-radio evidence
 
-Evidence record for [pr8-validation-plan.md](pr8-validation-plan.md) Rig A, per that document's
+Evidence record for [validation-plan.md](validation-plan.md) Rig A, per that document's
 evidence rule (host/device details, agent version, exact command, redacted result per case).
 
 **Sessions:** 2026-07-27, 2026-07-28 (afternoon), 2026-07-28 (evening) ·
@@ -414,7 +414,7 @@ session resumes and replayed ops route correctly" without user-visible rescannin
 **Agent restart (the documented residual):** killed and restarted the Kotlin agent process
 entirely. The app showed the same stale-data banner, then — once the new agent process came back —
 resumed automatically again, with **no rescan required**. This does not match the residual as
-written in [pr8-validation-plan.md](pr8-validation-plan.md) ("the client rescans rather than
+written in [validation-plan.md](validation-plan.md) ("the client rescans rather than
 resuming"), and investigating why is the useful part of this result:
 
 **Why: this rig cannot exercise real identifier rewriting at all, on any client.**
@@ -432,7 +432,7 @@ kept working: there was never a synthetic handle for the restart to invalidate.
 Genuine rewriting needs an agent whose *native* format is `MAC_ADDRESS` (Windows) or `BLUEZ_JSON`
 (Linux) paired with a `UUID`- or `MAC_ADDRESS`-declaring client — i.e. **Rig D or a Windows host**,
 not reachable from Rig A's macOS agent with any client this repo ships (JVM, Android, or iOS). This
-is a scope correction worth carrying into `pr8-validation-plan.md` itself: as written, case 5 reads
+is a scope correction worth carrying into `validation-plan.md` itself: as written, case 5 reads
 as achievable on Rig A, but it structurally is not, on any current or planned real-radio host.
 
 **What is confirmed:** reconcile/resume works live, end-to-end, through an actually-negotiated

@@ -153,7 +153,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         // UUID plus the name overflows a 31-byte legacy PDU), so this peripheral arrives nameless
         // via the Kotlin agent while `agent-rs` reports it by name off the same radio. The service
         // UUID is the actual TestProfile contract and is present in the primary PDU on every path.
-        // See docs/pr8-rig-b-evidence.md.
+        // See docs/rig-b-evidence.md.
         val advertisement = report.capture("Scan finds the peripheral") {
             withTimeout(30.seconds) {
                 RemoteScanner(session).advertisements.first { adv ->

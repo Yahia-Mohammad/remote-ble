@@ -15,7 +15,7 @@
   through one agent interfere on Apple hosts
 - **Relates to:** [agent-conformance-spec.md](../agent-conformance-spec.md) §5.3, §7, §9;
   [agent-tunable-configuration.md](agent-tunable-configuration.md) (category A);
-  [pr8-validation-plan.md](../pr8-validation-plan.md) Rig A case 3, Rig B
+  [validation-plan.md](../validation-plan.md) Rig A case 3, Rig B
 
 ---
 

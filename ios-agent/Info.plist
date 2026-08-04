@@ -24,7 +24,7 @@
          the "central" background mode applies.
 
          It does more than keep existing links alive. Measured on hardware (Rig B case 3,
-         docs/pr8-rig-b-evidence.md): while the app holds an active CoreBluetooth connection this
+         docs/rig-b-evidence.md): while the app holds an active CoreBluetooth connection this
          mode keeps the *process* scheduled, so its Ktor accept loop keeps running and new inbound
          WebSocket connections are still accepted — 38/38 across 91 s backgrounded. A control run
          with no BLE link was suspended ~8 s after backgrounding. This comment previously claimed

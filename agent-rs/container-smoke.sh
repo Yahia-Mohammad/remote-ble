@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# Minimal local PR5 smoke test. Requires Docker and an image built from agent-rs/Dockerfile.
-# The real-radio D-Bus scan/connect/read evidence remains a PR8 hardware gate.
+# Minimal local smoke test. Requires Docker and an image built from agent-rs/Dockerfile.
+# The real-radio D-Bus scan/connect/read evidence is a separate hardware gate — see
+# docs/validation-plan.md Rig D.
 set -eu
 
 image="${1:-remoteble-agent-rs:local}"

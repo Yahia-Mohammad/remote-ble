@@ -33,7 +33,7 @@ private const val SERVICE = "a1b2c3d4-0000-4000-8000-000000000001"
 private const val WRITABLE = "a1b2c3d4-0000-4000-8000-000000000003"
 
 /**
- * Rig A case 6, burst/ordering half (pr8-validation-plan.md): drives
+ * Rig A case 6, burst/ordering half (validation-plan.md): drives
  * [RemotePeripheral.writeWithoutResponseBurst] (`window > 1`) against the `TestProfile` peripheral
  * and compares it to a serial baseline (`window` effectively 1, i.e. today's plain
  * [Peripheral.write] loop — the same thing [ThroughputMain] measures standalone).

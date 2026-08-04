@@ -28,7 +28,8 @@ the JVM/Gradle dependency graph; Cargo has the additional advisory and license p
   [release-candidate.md](release-candidate.md); PR9 attaches the resulting evidence to the tag.
 - Kover reports JVM execution only; its upstream support does not collect Kotlin/Native or Android
   device-test coverage. Tarpaulin measures Rust on the Linux CI host. The reports are measured
-  evidence, not a substitute for PR8's platform and hardware validation.
+  evidence, not a substitute for the platform and hardware validation in
+  [validation-plan.md](validation-plan.md).
 - The three `consumer-tests/*` fixtures are intentionally independent Gradle builds. They prove the
   POMs and Gradle metadata resolve from Maven local without composite-build or project-dependency
   leakage. One per published variant, because `jvm`, `android` (`.aar`) and Apple (klib) select
@@ -43,7 +44,8 @@ the JVM/Gradle dependency graph; Cargo has the additional advisory and license p
   requirement, not a fixture quirk — see
   [build-and-testing.md](build-and-testing.md) for the consumer-side fix.
 - No workflow substitutes for `TLS-PROXY-01`, live-radio, iOS lifecycle, or Ubuntu/Pi BlueZ container
-  evidence. Those stay in PR8's hardware-validation bundle.
+  evidence. Those stay in the hardware-validation bundle
+  ([validation-plan.md](validation-plan.md) and its per-rig evidence docs).
 - `cargo deny` allows only the explicit permissive license set in its checked-in policy. Any future
   exception must name the crate/version and explain the release decision in that file; do not bypass
   the gate in workflow YAML.

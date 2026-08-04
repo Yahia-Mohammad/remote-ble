@@ -17,7 +17,7 @@ its automated evidence were complete beforehand; what remained was real-radio co
 platform the defect actually lives on, plus a decision about one sentence of Apple wording that only
 hardware can settle.
 
-**Evidence rule** (same as [pr8-validation-plan.md](pr8-validation-plan.md)): for every case record
+**Evidence rule** (same as [validation-plan.md](validation-plan.md)): for every case record
 host/device details, agent version **and commit SHA**, **configured mode**, **negotiated mode**, the
 exact command, and a redacted log. Archive with the release commit before tag approval.
 
@@ -87,7 +87,7 @@ check that passed* — so it is built into the instrument rather than left to th
 
 ## Rig prerequisites
 
-Reusing Rig B, whose full setup is in [pr8-rig-b-evidence.md](pr8-rig-b-evidence.md).
+Reusing Rig B, whose full setup is in [rig-b-evidence.md](rig-b-evidence.md).
 
 | | |
 |---|---|
@@ -186,7 +186,7 @@ Stated up front so the write-up is not negotiated after the fact.
 
 | Result | Permitted consequence |
 |---|---|
-| Phases 1–3 all PASS | Close the release blocker in `scan-concurrency-modes.md`, `0.10.0-progress-status.md` gap 21, `pr8-validation-plan.md` item 3, and `docs/README.md`'s status column |
+| Phases 1–3 all PASS | Close the release blocker in `scan-concurrency-modes.md`, `0.10.0-progress-status.md` gap 21, `validation-plan.md` item 3, and `docs/README.md`'s status column |
 | Phase 4 confirms the residual | Keep [scanning.md](scanning.md)'s Apple wording verbatim; record the evidence beside it |
 | Phase 4 disproves the residual | **Narrow** the wording to what was measured. Do not delete the limitation — absence of the effect on one peripheral is not its absence on the platform |
 | Any Phase 2 case FAILs | The blocker stays open. The design is wrong on hardware, not the test; file it against the proposal |

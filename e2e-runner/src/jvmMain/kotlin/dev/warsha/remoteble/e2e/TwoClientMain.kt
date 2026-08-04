@@ -40,7 +40,7 @@ private const val SIG_BASE_SUFFIX = "-0000-1000-8000-00805f9b34fb"
 private fun String.isSigAssigned(): Boolean = endsWith(SIG_BASE_SUFFIX, ignoreCase = true)
 
 /**
- * Rig A case 3 (pr8-validation-plan.md): two-client authorization on a real radio. Client A leases a
+ * Rig A case 3 (validation-plan.md): two-client authorization on a real radio. Client A leases a
  * peripheral; client B must still be able to *scan* and see it, but every device-bearing operation
  * must be refused — `read`/`write`/`observe`/`configure`/`disconnect`, and `connect` itself.
  *

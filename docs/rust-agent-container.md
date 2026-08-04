@@ -24,8 +24,8 @@ docker run --rm --name remoteble-agent -p 8080:8080 \
 
 Do not add `--privileged`, host networking, HCI mounts, or a credential-bearing health check. The
 image’s `--version` and fail-closed startup checks are covered by `container-smoke.sh`; D-Bus access,
-read-only filesystem operation, SIGTERM, and real BLE scan/connect/read must still be recorded on a
-Linux host in the PR8 hardware-validation bundle (Rig D — **not yet run**).
+read-only filesystem operation, SIGTERM, and real BLE scan/connect/read are recorded on a Linux host
+in the hardware-validation bundle ([rig-d-evidence.md](rig-d-evidence.md) — **6/6, one amd64 host**).
 
 > **The host list changed and this line used to overstate it.** The original criteria named Ubuntu
 > amd64 *and* Raspberry Pi arm64. The accepted Rig D scope is now **option 1**: validate the one

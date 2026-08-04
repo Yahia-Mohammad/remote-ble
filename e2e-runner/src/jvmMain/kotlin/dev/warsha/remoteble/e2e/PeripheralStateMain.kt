@@ -49,9 +49,9 @@ private val STABILITY_HOLD = 8.seconds
 private val DEFAULT_OBSERVE_WINDOW = 60.seconds
 
 /**
- * Rig A case 2, client half (pr8-validation-plan.md): watches [Peripheral.state] across an
+ * Rig A case 2, client half (validation-plan.md): watches [Peripheral.state] across an
  * unsolicited BLE-level drop. The agent half (a real `DeviceDisconnected` event on "Force
- * disconnect all") is already confirmed (pr8-rig-a-evidence.md case 2); what's unverified is
+ * disconnect all") is already confirmed (rig-a-evidence.md case 2); what's unverified is
  * whether that propagates all the way to the client reaching [State.Disconnected] — the available
  * runners before this one only watched *transport* (WebSocket) state, which a BLE-level drop
  * correctly leaves untouched.
@@ -85,7 +85,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val url = args.getOrNull(0) ?: DEFAULT_URL
     val token = args.getOrNull(1)?.ifBlank { null } ?: System.getenv("REMOTE_BLE_TOKEN")
     // Override for when macOS's advertisement-name cache is showing a stale name for this
-    // peripheral identity (see docs/pr8-rig-a-evidence.md's operational notes) — connect by
+    // peripheral identity (see docs/rig-a-evidence.md's operational notes) — connect by
     // whatever name the scan actually reports, independent of which app is really running.
     val advertisedName = args.getOrNull(2)?.ifBlank { null } ?: DEFAULT_ADVERTISED_NAME
     val observeWindow = args.getOrNull(3)?.toIntOrNull()?.seconds ?: DEFAULT_OBSERVE_WINDOW

@@ -1,6 +1,6 @@
-# PR8 · Rig B — iOS agent lifecycle evidence
+# Rig B — iOS agent lifecycle evidence
 
-Evidence record for [pr8-validation-plan.md](pr8-validation-plan.md) Rig B, per that document's
+Evidence record for [validation-plan.md](validation-plan.md) Rig B, per that document's
 evidence rule (host/device details, agent version, exact command, redacted result per case).
 
 **Sessions:** 2026-07-29 (night), 2026-07-29 (day) ·
@@ -748,7 +748,7 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
     unrecoverable transport is not a blip.
 13. **The background-caveat strings** (case 3) — **fixed in four places**, one more than first
     counted: the `ios-agent/Info.plist` comment, `IosAgentEntry`'s `keepScreenOnNotice`, Rig B
-    case 3 in [pr8-validation-plan.md](pr8-validation-plan.md), and `ios-agent/README.md`'s
+    case 3 in [validation-plan.md](validation-plan.md), and `ios-agent/README.md`'s
     "screen-lock caveat" section. All four asserted a restriction the hardware does not impose
     while a BLE link is held.
 14. **Measure how long iOS holds a dead app's BLE link** (case 5). Observed ≥90 s on two
@@ -797,7 +797,7 @@ The macOS control passed the same read throughout, on the same peripheral, at ev
 
 ## Method notes worth keeping
 
-Continuing the practice started in [pr8-rig-a-evidence.md](pr8-rig-a-evidence.md#method-notes-worth-keeping).
+Continuing the practice started in [rig-a-evidence.md](rig-a-evidence.md#method-notes-worth-keeping).
 
 1. **The A/B across three implementations is what prevented a wrong bug report.** The peripheral
    was invisible through the iOS agent, and the obvious conclusion — an iOS/Kable defect — was

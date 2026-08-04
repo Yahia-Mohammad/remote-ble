@@ -3,7 +3,7 @@
 The agent speaks plain WebSocket. To expose it over `wss://`, put a TLS-terminating reverse proxy
 in front of a loopback-bound agent. This is the recipe that
 [`0.9.1-scenarios.md`](conformance/0.9.1-scenarios.md)'s `TLS-PROXY-01` requires, and the concrete
-procedure behind [pr8-validation-plan.md](pr8-validation-plan.md)'s Rig C.
+procedure behind [validation-plan.md](validation-plan.md)'s Rig C.
 
 **Two rules that make or break the evidence:**
 

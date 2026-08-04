@@ -55,7 +55,7 @@ internal interface AgentRunnerGraph {
      * declares none, and [AgentWebSocketServer] is not `AutoCloseable`, so nothing would ever call
      * its `stop()`. Leaving it running kept the agent listening *and authenticating* after the user
      * tapped Stop, and made the next Start abort the process on `EADDRINUSE` — see Rig B case 4
-     * (`docs/pr8-rig-b-evidence.md`, findings 8 and 10). `Main.kt` never had this bug because the
+     * (`docs/rig-b-evidence.md`, findings 8 and 10). `Main.kt` never had this bug because the
      * desktop shutdown hook calls `server.stop()` explicitly; this is the mobile equivalent.
      */
     fun stopServer()

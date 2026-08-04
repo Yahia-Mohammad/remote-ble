@@ -46,7 +46,7 @@ Keep the app foregrounded. `IosAgentSession` disables the idle timer while the a
 the screen can't auto-lock, and `AgentApp` shows a matching on-screen reminder.
 
 **The caveat is narrower than it used to read here.** Measured on hardware (Rig B case 3 —
-[`docs/pr8-rig-b-evidence.md`](../docs/pr8-rig-b-evidence.md)), where this section previously
+[`docs/rig-b-evidence.md`](../docs/rig-b-evidence.md)), where this section previously
 asserted that new inbound connections "cannot be accepted" while backgrounded:
 
 | Backgrounded 91 s with… | New inbound WebSocket connections |

@@ -52,7 +52,7 @@ private val GATT_PROBE_INTERVAL = 2.seconds
 private val INBOUND_PROBE_INTERVAL = 5.seconds
 
 /**
- * Rig B cases 3, 4 and 5 (pr8-validation-plan.md), client half: holds a fully established session —
+ * Rig B cases 3, 4 and 5 (validation-plan.md), client half: holds a fully established session —
  * transport connected, peripheral connected, services discovered — and then narrates, on a single
  * timeline, everything an already-connected client can observe while the operator changes the iOS
  * agent app's lifecycle state.

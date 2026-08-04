@@ -1,0 +1,164 @@
+name: Release preflight
+
+# Everything release.yml does EXCEPT contacting Maven Central, so the credentials, the signing key
+# and the published artifact set can all be exercised before the one step that cannot be undone.
+#
+# Why this exists: release.yml has never run. Its first execution would be an irreversible
+# publish-and-release, with the signing key, the Portal token and the host's ability to build every
+# published target all unverified at once. This workflow verifies them separately and safely —
+# it publishes to the runner's Maven local repository and nothing leaves the machine.
+#
+# Deliberately runs on the SAME runner as release.yml. That is the point: if release.yml cannot
+# build the Apple targets on its host, this fails here instead of on Central.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to verify (e.g. v0.10.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Verify release credentials and artifacts
+    runs-on: ubuntu-latest # must match release.yml
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Verify tag matches VERSION_NAME
+        run: bash scripts/check-release-version.sh "${{ inputs.ref }}"
+
+      # Presence only. Never echo a secret: a length is enough to tell "set" from "empty", and an
+      # empty secret is indistinguishable from an unset one at the point of use.
+      - name: Check all four secrets are present
+        env:
+          CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          CENTRAL_PORTAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in CENTRAL_PORTAL_USERNAME CENTRAL_PORTAL_PASSWORD SIGNING_KEY SIGNING_KEY_PASSWORD; do
+            eval "value=\${$name}"
+            if [ -z "$value" ]; then
+              echo "MISSING: $name"
+              missing=1
+            else
+              echo "present: $name (${#value} chars)"
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "::error::One or more release secrets are unset"; exit 1; }
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-preflight-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml') }}
+
+      # The real test of SIGNING_KEY and SIGNING_KEY_PASSWORD. Signing is a cryptographic operation:
+      # a wrong key or passphrase fails the task, it cannot pass by accident. Publishes to the
+      # runner's ~/.m2 only — nothing is uploaded anywhere.
+      - name: Publish to Maven local with signing enabled
+        env:
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew publishToMavenLocal --no-configuration-cache --stacktrace
+
+      # Guards against the failure mode that matters most: a target the runner cannot build is
+      # skipped rather than failed, and Central ends up with a metadata module advertising variants
+      # whose artifacts were never uploaded. Irreversible if it reaches Central.
+      - name: Verify every published coordinate is present
+        run: |
+          repo="$HOME/.m2/repository/dev/warsha/remoteble"
+          version="$(grep '^VERSION_NAME=' gradle.properties | cut -d= -f2)"
+          echo "Verifying version $version under $repo"
+          missing=0
+          for artifact in \
+            protocol protocol-jvm protocol-android protocol-iosarm64 protocol-iossimulatorarm64 \
+            log log-jvm log-android log-iosarm64 log-iossimulatorarm64 \
+            client-sdk client-sdk-jvm client-sdk-android client-sdk-iosarm64 client-sdk-iossimulatorarm64
+          do
+            dir="$repo/$artifact/$version"
+            if [ -d "$dir" ]; then
+              echo "  ok       $artifact"
+            else
+              echo "  MISSING  $artifact"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Published set is incomplete on this runner. Publishing from here would" \
+                 "put a broken closure on Maven Central, which cannot be undone."
+            exit 1
+          fi
+
+      # Central requires a signature beside every artifact. Signing silently disabled would only
+      # surface as a Central-side validation failure mid-publish.
+      - name: Verify signatures were produced
+        run: |
+          repo="$HOME/.m2/repository/dev/warsha/remoteble"
+          count="$(find "$repo" -name '*.asc' | wc -l | tr -d ' ')"
+          echo "found $count detached signatures"
+          [ "$count" -gt 0 ] || { echo "::error::No .asc signatures produced — signing did not run"; exit 1; }
+          for pom in $(find "$repo" -name '*.pom'); do
+            [ -f "$pom.asc" ] || { echo "::error::unsigned POM: $pom"; exit 1; }
+          done
+          echo "every POM has a detached signature"
+
+      # Read-only credential check. Distinguishes a rejected credential from an endpoint this
+      # workflow simply cannot reach, and only fails on the former — an inconclusive result must not
+      # masquerade as a pass, nor block the release on its own.
+      - name: Check Central Portal credentials
+        env:
+          USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          PASSWORD: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+        run: |
+          version="$(grep '^VERSION_NAME=' gradle.properties | cut -d= -f2)"
+          token="$(printf '%s:%s' "$USERNAME" "$PASSWORD" | base64 -w0)"
+          url="https://central.sonatype.com/api/v1/publisher/published?namespace=dev.warsha.remoteble&name=protocol&version=$version"
+          code="$(curl -s -o /tmp/portal-body -w '%{http_code}' -H "Authorization: Bearer $token" "$url" || echo 000)"
+          echo "HTTP $code"
+          case "$code" in
+            200)
+              echo "Portal credentials accepted."
+              echo "response: $(cat /tmp/portal-body)"
+              ;;
+            401|403)
+              echo "::error::Portal rejected these credentials (HTTP $code). Regenerate the user" \
+                   "token at central.sonatype.com and update CENTRAL_PORTAL_USERNAME/PASSWORD."
+              exit 1
+              ;;
+            *)
+              echo "::warning::Inconclusive (HTTP $code) — could not verify the Portal token here." \
+                   "Signing and the artifact set above are still verified. A bad token fails at" \
+                   "upload authentication, before anything is published."
+              ;;
+          esac
+
+      - name: Summary
+        run: |
+          echo "### Release preflight passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- all four secrets present" >> "$GITHUB_STEP_SUMMARY"
+          echo "- signing key and passphrase verified by real signing" >> "$GITHUB_STEP_SUMMARY"
+          echo "- every published coordinate built on this runner" >> "$GITHUB_STEP_SUMMARY"
+          echo "- every POM has a detached signature" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Nothing was uploaded. Maven Central was not contacted for publication." >> "$GITHUB_STEP_SUMMARY"

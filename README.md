@@ -309,11 +309,15 @@ unchanged against a `RemotePeripheral` talking to an agent over WebSocket — co
 read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
 complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
 
-Two things remain before the tag: **on-hardware validation** (real-radio, iOS lifecycle,
-TLS-proxy, and Ubuntu/Raspberry-Pi container evidence) and **publication** (GitHub release + GHCR
-image + Maven Central). Until then, treat 0.10.0 as a release candidate rather than a shipped
-version. The exact remaining-work boundary is tracked in the
-[release handoff](docs/proposals/0.10.0-progress-status.md) and the
+**On-hardware validation is complete** — four rigs, 25 of 25 cases: real radio, iOS lifecycle, a
+TLS reverse proxy, and a Linux container host. Per-case results, including the defects the rigs
+found, are in [`docs/`](docs/). One boundary is worth stating plainly rather than leaving to the
+detail: the container was validated on **one amd64 Linux host**, so arm64, AppArmor,
+SELinux-enforcing and rootless Podman are *not* covered, and the image is labelled accordingly.
+
+What remains is **publication** (GitHub release + GHCR image + Maven Central). Until that happens,
+treat 0.10.0 as a release candidate rather than a shipped version. The exact remaining-work boundary
+is tracked in the [release handoff](docs/proposals/0.10.0-progress-status.md) and the
 [release-candidate inventory](docs/release-candidate.md).
 
 The reference apps show both sides: an Android client (`:android-client`) and an iOS launcher
@@ -326,6 +330,23 @@ The reference apps show both sides: an Android client (`:android-client`) and an
 > can't run the agent backgrounded, and `pairing`/`conn.priority` are engine-gated — `btleplug`
 > supports neither, so the reference agent advertises neither. See
 > [`docs/agent.md`](docs/agent.md#android--ios-a-phone-as-the-agent) for the platform caveats.
+
+## Development
+
+This project is built with heavy use of AI coding assistants, including Claude Code — for
+implementation, review, documentation and test design alike. Often several tools and models
+contribute to a single change, which is why no individual commit attributes authorship to any of
+them: a per-commit credit would name one participant and imply a precision that does not exist.
+
+That assistance does not stand in for verification. Behaviour claims here are backed by evidence
+kept under [`docs/`](docs/): a cross-agent conformance suite that runs in CI against two independent
+agent implementations, four hardware validation rigs recorded case by case, and tests that are
+mutation-checked — deliberately broken to confirm they can fail — before being trusted. Where
+something is unverified, or was verified only on one host or one backend, the docs say so rather
+than rounding up. Every change is reviewed by a human before it lands.
+
+None of which is a warranty: the software is provided "as is", without warranties or conditions of
+any kind, under the terms below.
 
 ## License
 

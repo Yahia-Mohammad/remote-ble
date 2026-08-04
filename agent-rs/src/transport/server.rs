@@ -186,6 +186,7 @@ struct ExecuteContext<'a> {
     scan_mode: ScanConcurrencyMode,
     scan_arbiter: &'a ScanArbiter,
     scan_bindings: &'a ScanBindings,
+    scan_gates: &'a ScanGates,
     negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
 }
 
@@ -206,6 +207,57 @@ struct ScanBinding {
 #[derive(Default)]
 struct ScanBindings {
     scans: tokio::sync::Mutex<HashMap<i64, ScanBinding>>,
+}
+
+/// Acknowledge-before-deliver for scans that bypass the arbiter.
+///
+/// The guaranteed modes park an arbiter mailbox, but `uncontrolled` streams straight from the
+/// backend into the connection's event channel, so it needs its own gate to honour the same wire
+/// rule: `scan.start`'s reply is written before any result it produces. A forwarding task holds the
+/// backend's events until [`ScanGates::release`], which the command loop calls once the reply is
+/// queued.
+#[derive(Default)]
+struct ScanGates {
+    gates: tokio::sync::Mutex<HashMap<i64, tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl ScanGates {
+    /// Returns a sender to hand the backend, whose events are withheld until release.
+    async fn gated(
+        &self,
+        scan_id: i64,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> mpsc::Sender<AgentEvent> {
+        let (gated_tx, mut gated_rx) = mpsc::channel(EVENT_CHANNEL_CAP);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            // Dropped rather than released — the connection went away before the reply was
+            // written. Deliver nothing and unwind.
+            if release_rx.await.is_err() {
+                return;
+            }
+            while let Some(event) = gated_rx.recv().await {
+                if event_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        // A same-id restart drops the previous gate, retiring the collector it was feeding.
+        self.gates.lock().await.insert(scan_id, release_tx);
+        gated_tx
+    }
+
+    /// Lets a gated scan deliver. A no-op for any scan that has no gate, so the command loop can
+    /// call it unconditionally alongside the arbiter's release.
+    async fn release(&self, scan_id: i64) {
+        if let Some(release) = self.gates.lock().await.remove(&scan_id) {
+            let _ = release.send(());
+        }
+    }
+
+    async fn discard(&self, scan_id: i64) {
+        self.gates.lock().await.remove(&scan_id);
+    }
 }
 
 impl ScanBindings {
@@ -807,6 +859,7 @@ impl AgentServer {
         let stream_connection = NEXT_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed);
         let streams = Arc::new(StreamReservations::default());
         let scan_bindings = Arc::new(ScanBindings::default());
+        let scan_gates = Arc::new(ScanGates::default());
         // Reserved in the sequential receive loop, rather than inside tasks, to preserve command
         // receive order for writes to the same physical device while other work stays concurrent.
         let write_tails = Arc::new(parking_lot::Mutex::new(HashMap::new()));
@@ -1020,6 +1073,7 @@ impl AgentServer {
                                 let scan_coordinator = scan_coordinator.clone();
                                 let scan_arbiter = scan_arbiter.clone();
                                 let scan_bindings = scan_bindings.clone();
+                                let scan_gates = scan_gates.clone();
                                 let negotiated_capabilities = negotiated_capabilities.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
@@ -1073,6 +1127,7 @@ impl AgentServer {
                                                 scan_mode,
                                                 scan_arbiter: &scan_arbiter,
                                                 scan_bindings: &scan_bindings,
+                                                scan_gates: &scan_gates,
                                                 negotiated_capabilities: &negotiated_capabilities,
                                             },
                                         )
@@ -1094,7 +1149,10 @@ impl AgentServer {
                                         // share this one FIFO, so anything the mailbox now emits
                                         // lands behind it on the wire.
                                         if let Some(scan_id) = admitted_scan {
+                                            // One of these owns the scan depending on mode; the
+                                            // other is a no-op.
                                             scan_bindings.release(scan_id).await;
+                                            scan_gates.release(scan_id).await;
                                         }
                                     }
                                     .in_current_span(),
@@ -1171,6 +1229,7 @@ impl AgentServer {
             scan_mode,
             scan_arbiter,
             scan_bindings,
+            scan_gates,
             negotiated_capabilities,
         } = context;
         match op {
@@ -1272,9 +1331,17 @@ impl AgentServer {
                     Ok(inserted) => inserted,
                     Err(error) => return OpResult::err(error),
                 };
-                let result = backend.start_scan(stream, filters, event_tx).await;
-                if result.is_err() && inserted {
-                    streams.release_scan(stream);
+                // The backend streams results as soon as it has them, so hand it a gated sender:
+                // nothing reaches the connection's event channel until the command loop releases
+                // it, immediately after this op's reply is queued.
+                let gated = scan_gates.gated(scan_id, event_tx).await;
+                let result = backend.start_scan(stream, filters, gated).await;
+                if result.is_err() {
+                    // Never released, so the forwarder retires without delivering.
+                    scan_gates.discard(scan_id).await;
+                    if inserted {
+                        streams.release_scan(stream);
+                    }
                 }
                 OpResult::from_unit(result)
             }
@@ -1865,6 +1932,63 @@ mod tests {
             service_uuids: service.into_iter().map(str::to_string).collect(),
             manufacturer_data: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn an_uncontrolled_scan_gate_withholds_results_until_the_reply_is_queued() {
+        // Uncontrolled scans bypass the arbiter and stream straight from the backend, so they carry
+        // the acknowledge-before-deliver guarantee here instead of in a parked mailbox. Parity with
+        // the guaranteed modes and with the Kotlin agent, which defers delivery in every mode.
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let gates = ScanGates::default();
+        let gated = gates.gated(7, event_tx).await;
+
+        gated
+            .send(AgentEvent::ScanResult {
+                scan_id: 7,
+                advertisement: test_advertisement("dev", None, None, -50),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a gated scan must not deliver before its scan.start reply is written",
+        );
+
+        gates.release(7).await;
+        let delivered = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("release must let the withheld result through")
+            .expect("event channel closed");
+        match delivered {
+            AgentEvent::ScanResult { scan_id, .. } => assert_eq!(scan_id, 7),
+            other => panic!("expected the withheld scan result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_discarded_scan_gate_never_delivers() {
+        // The failure path: start_scan errored, so the reply is an Err and nothing this scan
+        // produced may reach the client.
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let gates = ScanGates::default();
+        let gated = gates.gated(7, event_tx).await;
+        gated
+            .send(AgentEvent::ScanResult {
+                scan_id: 7,
+                advertisement: test_advertisement("dev", None, None, -50),
+            })
+            .await
+            .unwrap();
+
+        gates.discard(7).await;
+        gates.release(7).await; // the command loop releases unconditionally; must stay a no-op
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a discarded gate must never deliver",
+        );
     }
 
     #[tokio::test]
@@ -3078,6 +3202,7 @@ mod tests {
         )));
         let scan_arbiter = Box::leak(Box::new(ScanArbiter::new(event_tx.clone())));
         let scan_bindings = Box::leak(Box::new(ScanBindings::default()));
+        let scan_gates = Box::leak(Box::new(ScanGates::default()));
         let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
             std::collections::BTreeSet::new(),
         )));
@@ -3094,6 +3219,7 @@ mod tests {
             scan_mode: ScanConcurrencyMode::Multiplexed,
             scan_arbiter,
             scan_bindings,
+            scan_gates,
             negotiated_capabilities,
         }
     }

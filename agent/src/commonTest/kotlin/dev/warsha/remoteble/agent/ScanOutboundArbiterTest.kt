@@ -59,4 +59,55 @@ class ScanOutboundArbiterTest {
         arbiter.unregister(sink)
         arbiter.close()
     }
+
+    @Test
+    fun aFailingEmitLosesOneEventRatherThanTheWholeDeliveryMechanism() = runTest {
+        // The worker is the only path scan events take to the socket. An unguarded throw out of
+        // `emit` ends it for good, and the connection then silently never receives another
+        // advertisement — while replies keep working, because they bypass the arbiter. That reads
+        // as "scanning stopped" with nothing logged and no error on the wire, so it is worth a test
+        // of its own rather than being left to inspection.
+        val delivered = mutableListOf<String>()
+        var failNext = true
+        val arbiter = ScanOutboundArbiter(this, { event ->
+            if (failNext) {
+                failNext = false
+                error("transport write blew up")
+            }
+            delivered += (event as AgentEvent.ScanResult).advertisement.device.value
+        })
+        val sink = arbiter.register(1)
+
+        sink.events.send(AgentEvent.ScanResult(1, AdvertisementDto(DeviceHandle("doomed"), null, -50)))
+        arbiter.signal()
+        runCurrent()
+
+        sink.events.send(AgentEvent.ScanResult(1, AdvertisementDto(DeviceHandle("after"), null, -50)))
+        arbiter.signal()
+        runCurrent()
+
+        assertEquals(listOf("after"), delivered, "delivery must resume after a failed emit")
+        arbiter.unregister(sink)
+        arbiter.close()
+    }
+
+    @Test
+    fun oneScansFailingEmitDoesNotCostAnotherScanItsTurnInTheSameRound() = runTest {
+        val delivered = mutableListOf<Long>()
+        val arbiter = ScanOutboundArbiter(this, { event ->
+            val scanId = (event as AgentEvent.ScanResult).scanId
+            if (scanId == 1L) error("scan 1's transport is broken")
+            delivered += scanId
+        })
+        val broken = arbiter.register(1)
+        val healthy = arbiter.register(2)
+
+        broken.events.send(AgentEvent.ScanResult(1, AdvertisementDto(DeviceHandle("a"), null, -50)))
+        healthy.events.send(AgentEvent.ScanResult(2, AdvertisementDto(DeviceHandle("b"), null, -50)))
+        arbiter.signal()
+        runCurrent()
+
+        assertEquals(listOf(2L), delivered, "the healthy scan is served in the same round the broken one fails")
+        arbiter.close()
+    }
 }

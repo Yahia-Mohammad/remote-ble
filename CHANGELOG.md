@@ -123,6 +123,15 @@ protocol version: **1**.
 
 ### Fixed
 
+- **A stream's reply now precedes every event it produces.** Both agents could write a scan's first
+  `scan.result` *before* the `scan.start` reply that accepts it — admission enqueues the retained
+  replay and starts the collector while the command is still being handled. A client was handed
+  results for a stream it had not yet been told existed, and one that reads its reply before
+  switching to event handling lost the first result outright. Now normative for `scan.start` and
+  `observe.start` in **every** scan-concurrency mode
+  ([`docs/agent-conformance-spec.md`](docs/agent-conformance-spec.md) §7), and enforced in the Kotlin
+  agent and `agent-rs` alike. Clients that already demultiplex by frame type are unaffected.
+
 - **`agent-rs` on Linux could discover a peripheral and then fail every operation on it.** Each GATT
   op resolved its own fresh `Peripheral` through `Adapter::peripherals()`, but on BlueZ only the
   instance that ran `discover_services()` reports a populated characteristic table — so read, write,

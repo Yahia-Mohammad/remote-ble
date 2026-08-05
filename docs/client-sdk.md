@@ -2,8 +2,11 @@
 
 [← back to index](README.md)
 
-The client SDK turns "I have a URL to an agent" into "I have a Kable `Peripheral`."
-It is multiplatform (JVM for tests, Android, iOS) and depends on `:protocol`,
+The client SDK is the bundled Kotlin client implementation of the RemoteBLE protocol. It turns
+"I have a URL to an agent" into "I have a Kable `Peripheral` or `Scanner`," while also exposing
+the lower protocol-typed GATT and scan layers directly.
+
+The SDK is multiplatform (JVM for tests, Android, iOS) and depends on `:protocol`,
 kotlinx-coroutines, the Ktor client, and Kable.
 
 The module is organized as the four layers described in

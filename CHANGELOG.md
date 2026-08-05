@@ -21,8 +21,8 @@ protocol version: **1**.
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
 > running one command per process. Nothing here changes the wire protocol: no new op, no new event,
 > no new capability string, and no change to any `@SerialName` discriminator. `agent-rs` does begin
-> advertising and emitting two that already existed (`slots`, `AgentEvent::SlotState`), which
-> reaches only clients that negotiate them.
+> advertising and emitting capabilities and events that already existed (`slots`, `scan.batch`, and
+> their `SlotState` / `ScanResultBatch` events), which reach only clients that negotiate them.
 
 ### Added
 
@@ -55,9 +55,15 @@ protocol version: **1**.
   so a radio-independent capability had no way to reach a client. It now applies
   `capabilities::AGENT_CAPABILITIES` in `Negotiation::on_hello`, where no backend answer can narrow
   it, and streams `SlotState` from a registry `watch` — current value at handshake, then every
-  change, spanning every client's leases exactly as the Kotlin agent does. `scan.batch` remains
-  unadvertised there, because the emitter does not exist yet and advertising it would be worse than
-  the gap.
+  change, spanning every client's leases exactly as the Kotlin agent does.
+- **`agent-rs` batches scan results** under capability `scan.batch`, completing the agent-level set
+  on both agents. Same observable contract as the Kotlin agent — flush every 100 ms or early at 16
+  results, never an empty batch, arrival order preserved — but implemented once, in the connection's
+  event pump where the coordinator and uncontrolled scan paths converge, rather than in each scan
+  job. The capability is read live, so a scan already running when a late hello negotiates it starts
+  batching. `RustAgentInteropTest` now pins a Kotlin client's decode of the batch CBOR the Rust
+  agent emits; that direction had no coverage while `agent-rs` could only decode batches, never send
+  them.
 - **The default connection-slot cap is 8 on both agents** (`BleAgent.DEFAULT_MAX_CONNECTIONS`, was
   4). The two agents had always differed here, but it was unobservable while only one of them
   reported a number; now that both answer the same question over `slots`, the same client on the

@@ -69,7 +69,7 @@ JVM Kotlin agent does not advertise either.
 |---|---|---|---|---|---|
 | `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — agent-global and lease-aware in both |
 | `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
-| `scan.batch` | agent | ✅ | ✅ | ❌ | Rust does not yet coalesce into `ScanResultBatch`; the one remaining agent-level gap |
+| `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same 100 ms window and 16-result cap |
 | `descriptors` | backend | ✅ | ✅ | ❌ | **Implementable, not implemented** — btleplug has the API; see §1 |
 | `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
@@ -215,11 +215,22 @@ the client-facing behavior.
 | Feature | Kotlin | Rust |
 |---|---|---|
 | Per-advertisement `ScanResult` | ✅ | ✅ |
-| Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ❌ |
+| Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ✅ (100ms / 16) |
+| Where batching lives | per scan job | the connection's event pump, where both scan paths converge |
 | Name/UUID coalescing | ✅ coordinator-owned, before matching | ✅ coordinator-owned in guaranteed modes; bounded legacy backend coalescer in `uncontrolled` |
 | Concurrent-scan handling | ✅ configured coordinator, explicit uncontrolled escape hatch | ✅ configured coordinator, explicit uncontrolled escape hatch |
 
-**Pre-existing:** Yes. Rust never implemented scan batching.
+**Closed 2026-08-05.** Rust batches in its per-connection event pump rather than inside each scan
+job: the coordinator's arbiter and the uncontrolled backend path both feed that one channel, so a
+single implementation covers both instead of the two the Kotlin agent carries. The observable
+contract is the same — flush every 100 ms or early at 16 results, never an empty batch, arrival
+order preserved within a batch — and the capability is read live, so a scan already running when a
+late hello negotiates `scan.batch` starts batching, matching §5.3's rule for handle translation on
+an in-flight stream.
+
+The wire form is now covered in the direction that can fail: `agent-rs` could always decode a batch
+but never sent one, so `RustAgentInteropTest.eventScanResultBatch` pins a Kotlin client's decode of
+the definite-length CBOR the Rust agent actually emits.
 
 **Gap 21 — closed 2026-08-03, parity confirmed on hardware.** Both reference agents route guaranteed
 modes through an agent-lifetime coordinator keyed by stable client key and scan ID, with
@@ -282,8 +293,8 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - Native unsolicited-drop detection
 - Wire protocol codec (CBOR byte-parity verified by interop tests)
 - **Logging levels and taxonomy** (0.9.0 scope — both emit the same story at the same levels)
-- **Agent-level capability set** (0.10.1 — `slots` and `identifier.translate` advertised
-  unconditionally by both; `scan.batch` is the one still outstanding)
+- **Agent-level capability set** (0.10.1 — `slots`, `identifier.translate`, and `scan.batch`
+  advertised unconditionally by both, and complete: every agent-level capability now matches)
 - **`slots` accounting and delivery** (0.10.1 — global, lease-aware, delivered at handshake and on
   every occupancy change in both agents)
 - **Lease-denial disclosure** (0.10.1 — one policy, and now one *bound*: both cap the rendered
@@ -295,8 +306,6 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - 2 ops Unsupported in Rust that are **not** blocked: `desc.read`, `desc.write`. Recorded as a
   btleplug limitation until 2026-08-05; btleplug has the API — see §1
 - No HTTP dashboard in Rust (architecture — raw `tokio-tungstenite`, no HTTP framework)
-- No scan batching in Rust — the last agent-level capability gap, so unlike the ops above this one
-  is plumbing rather than a radio limitation
 - No cheap 1s `isConnected` poll in Rust
 - `descriptors` advertised by Kotlin on JVM but not by Rust, on the same btleplug stack — the one
   same-host divergence, and by §5.3 a defect rather than a platform difference; see §1 and §2

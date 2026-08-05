@@ -50,6 +50,30 @@ internal object LeaseDisclosure {
         }
     }
 
+    /**
+     * A holder label for an `agent.status` lease row, addressed to [requesterKey].
+     *
+     * The same policy [busyMessage] applies, with one addition: [operatorScope] — the caller
+     * presented the agent's operator credential on the upgrade, which is the management plane the
+     * dashboard already discloses holders on. Nothing here is reachable with a client bearer token
+     * alone, because the agent requires the operator secret to be distinct from every client
+     * credential.
+     *
+     *  - **Own or same-principal lease** — `principal/clientId`.
+     *  - **Another principal, operator scope** — `principal/clientId`.
+     *  - **Another principal, no operator scope** — `principal` alone.
+     *
+     * Sanitized identically to [busyMessage]: both halves are text the *holder* chose, and this
+     * lands in a terminal, a log, or a coding agent's context just the same.
+     */
+    fun holderLabel(ownerKey: String, requesterKey: String, operatorScope: Boolean): String {
+        val (ownerPrincipal, ownerClientId) = split(ownerKey)
+        val (requesterPrincipal, _) = split(requesterKey)
+        val principal = sanitize(ownerPrincipal)
+        val maySeeClientId = ownerClientId != null && (operatorScope || ownerPrincipal == requesterPrincipal)
+        return if (maySeeClientId) "$principal/${sanitize(ownerClientId!!)}" else principal
+    }
+
     private fun split(key: String): Pair<String, String?> {
         val separator = key.indexOf(SESSION_KEY_SEPARATOR)
         return if (separator < 0) key to null else key.substring(0, separator) to key.substring(separator + 1)

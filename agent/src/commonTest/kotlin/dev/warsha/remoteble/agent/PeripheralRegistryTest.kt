@@ -8,12 +8,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.testTimeSource
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PeripheralRegistryTest {
@@ -62,6 +64,46 @@ class PeripheralRegistryTest {
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // freed after it elapses
         assertEquals(listOf(p), released)
+    }
+
+    @Test
+    fun snapshotReportsRemainingGraceAndClearsItOnResume() = runTest {
+        // testTimeSource advances with the scheduler, so "how much grace is left" is measured
+        // against the same virtual clock the release timer sleeps on.
+        val registry = PeripheralRegistry(
+            backgroundScope,
+            transportGrace = 10.seconds,
+            timeSource = testTimeSource,
+        )
+        registry.acquire(p, a)
+        registry.onConnected(p, a)
+
+        // No timer running: in-grace is false and there is no deadline to report.
+        registry.snapshot().single().let {
+            assertFalse(it.inGrace)
+            assertNull(it.remainingGraceMs)
+        }
+
+        registry.onTransportDropped(a)
+        runCurrent()
+        assertEquals(10_000, registry.snapshot().single().remainingGraceMs)
+
+        // It counts down rather than merely existing — the number a process-per-command client
+        // uses to decide whether its next invocation will resume or reconnect.
+        advanceTimeBy(6.seconds)
+        runCurrent()
+        registry.snapshot().single().let {
+            assertTrue(it.inGrace)
+            assertEquals(4_000, it.remainingGraceMs)
+        }
+
+        // Resuming cancels the timer, so the deadline must go with it: a stale one would report
+        // a release that is no longer coming.
+        assertIs<Acquisition.Granted>(registry.acquire(p, a))
+        registry.snapshot().single().let {
+            assertFalse(it.inGrace)
+            assertNull(it.remainingGraceMs)
+        }
     }
 
     @Test

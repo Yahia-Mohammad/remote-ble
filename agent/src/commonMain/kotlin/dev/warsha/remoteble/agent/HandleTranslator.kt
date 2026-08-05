@@ -52,8 +52,15 @@ internal class HandleTranslator(
     private fun translating(): Boolean =
         capabilityNegotiated && !strict() && clientFormat != null && needsRewrite(clientFormat, agentFormat)
 
-    /** Real radio handle → the handle the client sees. Records the reverse mapping for routing. */
-    private suspend fun toClient(real: String): String {
+    /**
+     * Real radio handle → the handle the client sees. Records the reverse mapping for routing.
+     *
+     * Public within the module because handles now leave by two doors: inside an [AgentEvent] (see
+     * [outgoing]) and inside an `agent.status` reply's lease rows. Both must mint the client-facing
+     * form, and both must register the reverse mapping — a handle a client reads from a status reply
+     * has to be usable in its next op.
+     */
+    suspend fun toClient(real: String): String {
         if (!translating()) return real
         val client = synthesize(clientFormat!!, real)
         if (client != real) {

@@ -2,6 +2,7 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.CborProtocolCodec
@@ -18,6 +19,8 @@ import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
 import dev.warsha.remoteble.protocol.ServiceNode
+import dev.warsha.remoteble.protocol.StatusSettingsDto
+import dev.warsha.remoteble.protocol.StatusSlotsDto
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
@@ -112,6 +115,28 @@ class FakeAgent(
             }
             is Op.RequestConnectionPriority -> reply(cmd.cid, OpResult.Ok())
             is Op.SetConnParams -> reply(cmd.cid, OpResult.Ok())
+            // Canned, like every other answer here: the fake owns no registry, so there is nothing
+            // real to report. Enough for a client to exercise the decode path.
+            Op.AgentStatus -> reply(
+                cmd.cid,
+                OpResult.Ok(
+                    ResultPayload.Status(
+                        AgentStatusDto(
+                            agentInfo = "RemoteBle-FakeAgent",
+                            uptimeMs = 0,
+                            settings = StatusSettingsDto(
+                                leaseGraceMs = 0,
+                                transportGraceMs = 0,
+                                exclusiveByDefault = true,
+                                scanConcurrency = "uncontrolled",
+                                strictIdentifiers = false,
+                            ),
+                            slots = StatusSlotsDto(free = 1, total = 1),
+                            connectedClients = 1,
+                        ),
+                    ),
+                ),
+            )
             is Op.ScanStart -> {
                 reply(cmd.cid, OpResult.Ok())
                 startScan(op.scanId)

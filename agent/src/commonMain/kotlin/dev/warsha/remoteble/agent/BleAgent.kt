@@ -5,6 +5,7 @@ import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.AgentException
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.BleRadioState
@@ -16,6 +17,7 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
 import dev.warsha.remoteble.protocol.IdentifierFormat
+import dev.warsha.remoteble.protocol.LeaseStatusDto
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.mapDevice
@@ -25,6 +27,8 @@ import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
+import dev.warsha.remoteble.protocol.StatusSettingsDto
+import dev.warsha.remoteble.protocol.StatusSlotsDto
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.coroutineContext
@@ -105,6 +109,13 @@ class BleAgent(
     // Shared by every socket only in the guaranteed modes. Null preserves the standalone/test
     // agent's historical connection-local scan behaviour.
     private val scanCoordinator: ScanCoordinator? = null,
+    // Agent-wide observations `agent.status` reports but no single connection owns: uptime, the
+    // cross-client connection count, and last-seen advertised names. Null in a standalone/test agent
+    // that runs no monitor, which narrows the status reply rather than failing it.
+    private val monitor: AgentMonitor? = null,
+    // Whether this connection presented a valid operator credential on the upgrade (OPERATOR_HEADER).
+    // Widens `agent.status` disclosure to every lease and its holder; nothing else consults it.
+    private val operatorScope: Boolean = false,
 ) {
     init {
         require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
@@ -443,6 +454,9 @@ class BleAgent(
                     stopObserve(op.subId)
                     reply(cmd.cid, OpResult.Ok())
                 }
+                // Names no device, so there is nothing to authorize against a lease: what a caller
+                // may see is decided inside, by who it is.
+                Op.AgentStatus -> reply(cmd.cid, OpResult.Ok(ResultPayload.Status(agentStatus())))
             }
         } catch (e: CancellationException) {
             throw e
@@ -454,6 +468,61 @@ class BleAgent(
             Logger.error(LogTags.ENGINE, e) { "op ${cmd.op::class.simpleName} failed unexpectedly [c=$clientId cid=${cmd.cid}]" }
             reply(cmd.cid, OpResult.Err(AgentError(ErrorKind.GATT_ERROR, message = "internal error")))
         }
+    }
+
+    /**
+     * Builds this caller's view of the agent for [Op.AgentStatus].
+     *
+     * Disclosure is decided here rather than at the client, because only the agent knows who is
+     * asking: an ordinary caller sees the leases its own session key holds, and everything else
+     * becomes `otherLeases` plus the aggregate slot count — enough to answer "can I connect?"
+     * without naming another tenant. A caller that presented operator scope sees every lease and its
+     * holder, the same plane the dashboard serves over HTTP.
+     *
+     * Lease handles go out through [translator], so a handle read here is routable in the caller's
+     * next op without a scan first — the whole point of U6.
+     */
+    private suspend fun agentStatus(): AgentStatusDto {
+        val settings = registry.settings()
+        val leases = registry.snapshot()
+        val visible = if (operatorScope) leases else leases.filter { it.owner == clientKey }
+        return AgentStatusDto(
+            agentInfo = agentInfo,
+            uptimeMs = monitor?.uptimeMs() ?: 0L,
+            settings = StatusSettingsDto(
+                leaseGraceMs = settings.leaseGraceMs,
+                transportGraceMs = settings.transportGraceMs,
+                exclusiveByDefault = settings.defaultExclusive,
+                // The mode is already pinned by the single `scan.concurrency.*` capability this
+                // agent advertises, so it is read back from there rather than threading the config
+                // through a second path that could disagree with what the handshake said.
+                scanConcurrency = ScanConcurrencyMode.entries
+                    .firstOrNull { it.capability in capabilities }
+                    ?.name?.lowercase()
+                    ?: ScanConcurrencyMode.UNCONTROLLED.name.lowercase(),
+                strictIdentifiers = strictMode.enabled,
+            ),
+            slots = StatusSlotsDto(
+                free = (registry.totalSlots - registry.occupiedSlots.value).coerceAtLeast(0),
+                total = registry.totalSlots,
+            ),
+            // With no monitor there is no cross-client view; this connection is the one client the
+            // agent can account for, and reporting it is honest where reporting zero would not be.
+            connectedClients = monitor?.connectedClients() ?: 1,
+            leases = visible.map { lease ->
+                LeaseStatusDto(
+                    handle = translator.toClient(lease.handle),
+                    name = monitor?.nameOf(lease.handle),
+                    holder = LeaseDisclosure.holderLabel(lease.owner, clientKey, operatorScope),
+                    mine = lease.owner == clientKey,
+                    connected = lease.connected,
+                    inGrace = lease.inGrace,
+                    remainingGraceMs = lease.remainingGraceMs,
+                )
+            },
+            otherLeases = leases.size - visible.size,
+            operatorScope = operatorScope,
+        )
     }
 
     /** Rejects every device-bearing operation unless this connection owns a live lease. */
@@ -1089,7 +1158,11 @@ class BleAgent(
          * (the backend contributes its own — descriptors, pairing). Unioned into the
          * advertised set by [BleAgentBackend].
          */
-        val AGENT_CAPABILITIES: Set<String> =
-            setOf(Capabilities.CONNECTION_SLOTS, Capabilities.SCAN_BATCH, Capabilities.IDENTIFIER_TRANSLATION)
+        val AGENT_CAPABILITIES: Set<String> = setOf(
+            Capabilities.CONNECTION_SLOTS,
+            Capabilities.SCAN_BATCH,
+            Capabilities.IDENTIFIER_TRANSLATION,
+            Capabilities.AGENT_STATUS,
+        )
     }
 }

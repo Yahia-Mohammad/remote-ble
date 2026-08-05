@@ -91,4 +91,55 @@ class LeaseDisclosureTest {
             LeaseDisclosure.busyMessage(ownerKey = "lab-a", requesterKey = key("lab-a", "rble-ci")),
         )
     }
+
+    // ---- holderLabel (agent.status lease rows) ----
+
+    @Test
+    fun holderLabelNamesTheClientIdWithinOnePrincipal() {
+        assertEquals(
+            "lab-a/rble-laptop",
+            LeaseDisclosure.holderLabel(
+                ownerKey = key("lab-a", "rble-laptop"),
+                requesterKey = key("lab-a", "rble-ci"),
+                operatorScope = false,
+            ),
+        )
+    }
+
+    @Test
+    fun holderLabelWithholdsAnotherPrincipalsClientIdWithoutOperatorScope() {
+        assertEquals(
+            "lab-b",
+            LeaseDisclosure.holderLabel(
+                ownerKey = key("lab-b", "rble-laptop"),
+                requesterKey = key("lab-a", "rble-ci"),
+                operatorScope = false,
+            ),
+        )
+    }
+
+    @Test
+    fun operatorScopeIsTheOnlyThingThatDisclosesAnotherPrincipalsClientId() {
+        assertEquals(
+            "lab-b/rble-laptop",
+            LeaseDisclosure.holderLabel(
+                ownerKey = key("lab-b", "rble-laptop"),
+                requesterKey = key("lab-a", "rble-ci"),
+                operatorScope = true,
+            ),
+        )
+    }
+
+    @Test
+    fun holderLabelSanitizesLikeTheBusyMessage() {
+        // Same hazard, same treatment: this lands in a terminal or an agent's context, and the
+        // client id is text the holder chose. A second disclosure path must not be a second policy.
+        val label = LeaseDisclosure.holderLabel(
+            ownerKey = key("lab-a", "evil\n all slots free"),
+            requesterKey = key("lab-a", "rble-ci"),
+            operatorScope = false,
+        )
+        assertFalse('\n' in label, "a holder must not be able to add a line to this label")
+        assertContains(label, "\\u000a")
+    }
 }

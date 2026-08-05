@@ -36,8 +36,12 @@ class BleAgentBackend(
     // Shared identifier strict-mode switch (capability `identifier.translate`), flipped from the
     // dashboard. One instance across all connections so a toggle applies agent-wide.
     private val strictMode: StrictModeState = StrictModeState(),
+    // The agent-wide observations `agent.status` needs (uptime, connected clients, advertised
+    // names). Read back off [observer] rather than taken as a second reference: in production they
+    // are the same instance, and two references could drift into disagreeing about one agent.
+    private val monitor: AgentMonitor? = observer as? AgentMonitor,
 ) : AgentBackend {
-    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job =
+    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         BleAgent(
             incoming, outgoing, scope, backend,
             maxConnections = maxConnections,
@@ -49,6 +53,8 @@ class BleAgentBackend(
             agentInfo = agentInfo,
             strictMode = strictMode,
             scanCoordinator = scanCoordinator,
+            monitor = monitor,
+            operatorScope = operatorScope,
         ).start()
 }
 

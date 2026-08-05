@@ -5,6 +5,7 @@ import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
+import dev.warsha.remoteble.protocol.OPERATOR_HEADER
 import dev.warsha.remoteble.protocol.ProtocolVersionSelection
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import io.ktor.http.HttpHeaders
@@ -193,6 +194,26 @@ class AgentWebSocketServer(
                             return@webSocket
                         }
                     val clientKey = ClientCredentials.sessionKey(principal, stableClientId)
+                    // Optional second credential, widening only what `agent.status` discloses.
+                    // A missing or wrong value is NOT a rejection: the session proceeds at normal
+                    // scope and says so in its status reply, so a client that asked for
+                    // operator-only fields without the secret can tell that apart from an
+                    // unreachable agent or one too old to know the capability. A *wrong* value is
+                    // still a guess at the operator secret, so it is rate-limited like any other.
+                    val operatorScope = call.request.headers[OPERATOR_HEADER]
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { offered ->
+                            val accepted = operatorCredentials?.authenticate(offered) != null
+                            if (!accepted) {
+                                val decision = operatorAuthLimiter.recordFailure(call.request.origin.remoteHost)
+                                if (decision.shouldLog) {
+                                    Logger.warn(LogTags.SERVER) {
+                                        "operator scope refused on upgrade [c=$clientId]: bad credential"
+                                    }
+                                }
+                            }
+                            accepted
+                        } ?: false
                     if (!liveSessions.tryAcquire(clientKey, clientId)) {
                         Logger.warn(LogTags.SERVER) { "client rejected: duplicate live session [c=$clientId]" }
                         close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, DUPLICATE_SESSION_CLOSE_REASON))
@@ -235,7 +256,7 @@ class AgentWebSocketServer(
                             }
                         // Keep the session open until the backend's main job finishes
                         // (which happens when the client disconnects and incoming closes).
-                        backend.serve(incomingFrames, outgoing, this, clientId, clientKey).join()
+                        backend.serve(incomingFrames, outgoing, this, clientId, clientKey, operatorScope).join()
                     } finally {
                         // Only the connection that acquired this identity may release it. This
                         // makes cleanup generation-bound even if a future policy supersedes a
@@ -416,17 +437,23 @@ fun interface AgentBackend {
         scope: CoroutineScope,
         connectionId: Long,
         clientKey: String,
+        /**
+         * Whether this connection presented a valid operator credential on the upgrade
+         * (`OPERATOR_HEADER`). Decided at the transport, where the credential arrives, and carried
+         * here because it widens what `agent.status` may disclose. It authorizes nothing else.
+         */
+        operatorScope: Boolean,
     ): Job
 }
 
 /** Hosts the canned [FakeAgent] (Phases 3) — replaced by a real BLE backend in Phase 4. */
 class FakeAgentBackend(private val config: FakeAgent.Config = FakeAgent.Config()) : AgentBackend {
-    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job =
+    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         FakeAgent(incoming, outgoing, scope, config).start()
 }
 
 /** Accepts the connection but never replies — for exercising client-side request timeouts. */
 class BlackholeBackend : AgentBackend {
-    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job =
+    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         scope.launch { incoming.collect { /* swallow, never reply */ } }
 }

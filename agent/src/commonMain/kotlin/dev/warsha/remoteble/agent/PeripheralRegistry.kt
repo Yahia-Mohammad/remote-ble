@@ -4,6 +4,8 @@ import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentError
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -57,6 +59,12 @@ class PeripheralRegistry(
      */
     private val maxSlots: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     private val onRelease: suspend (handle: String) -> Unit = {},
+    /**
+     * Where "how much grace is left" is measured from. Separate from [scope]'s scheduler only so a
+     * test can advance it in step with virtual time (`TestScope.testTimeSource`); production always
+     * takes the monotonic default, which no clock adjustment can move backwards.
+     */
+    private val timeSource: TimeSource = TimeSource.Monotonic,
 ) {
     init {
         require(defaultExclusive) {
@@ -97,7 +105,18 @@ class PeripheralRegistry(
     private val clientNotifiers =
         mutableMapOf<String, suspend (handle: String, reason: AgentError?) -> Unit>()
 
-    private class Lease(val owner: String, var connected: Boolean, var graceJob: Job?)
+    private class Lease(
+        val owner: String,
+        var connected: Boolean,
+        var graceJob: Job?,
+        /**
+         * When [graceJob] will fire. Tracked alongside the job because "a release is pending" and
+         * "the release is 4 seconds away" are different answers: a process-per-command client
+         * deciding whether its next invocation will resume needs the second one, and the job alone
+         * cannot give it.
+         */
+        var graceDeadline: TimeMark? = null,
+    )
 
     sealed interface Acquisition {
         /**
@@ -139,13 +158,15 @@ class PeripheralRegistry(
         data object NotConnected : Authorization
     }
 
-    /** A consistent view of one peripheral's ownership, for the status dashboard. */
+    /** A consistent view of one peripheral's ownership, for the status dashboard and `agent.status`. */
     data class LeaseInfo(
         val handle: String,
         val owner: String,
         val connected: Boolean,
         val inGrace: Boolean,
         val exclusive: Boolean,
+        /** Milliseconds until the release timer fires; null when none is running. Never negative. */
+        val remainingGraceMs: Long? = null,
     )
 
     /** Process-level configuration, surfaced read-only on the dashboard. */
@@ -331,12 +352,18 @@ class PeripheralRegistry(
     /** A consistent snapshot of all current leases, for status/monitoring. */
     suspend fun snapshot(): List<LeaseInfo> = mutex.withLock {
         leases.map { (handle, lease) ->
+            val inGrace = lease.graceJob?.isActive == true
             LeaseInfo(
                 handle = handle,
                 owner = lease.owner,
                 connected = lease.connected,
-                inGrace = lease.graceJob?.isActive == true,
+                inGrace = inGrace,
                 exclusive = true,
+                // Clamped at zero: the timer can be past due but not yet resumed on this dispatcher,
+                // and a negative "time remaining" is a number no caller can do anything sensible with.
+                remainingGraceMs = lease.graceDeadline
+                    ?.takeIf { inGrace }
+                    ?.let { maxOf(0L, -it.elapsedNow().inWholeMilliseconds) },
             )
         }
     }
@@ -344,6 +371,7 @@ class PeripheralRegistry(
     // Caller must hold [mutex]. Schedules a one-shot release unless one is already pending.
     private fun scheduleRelease(handle: String, lease: Lease, after: Duration) {
         if (lease.graceJob?.isActive == true) return
+        lease.graceDeadline = timeSource.markNow() + after
         lease.graceJob = scope.launch {
             delay(after)
             val released = mutex.withLock {
@@ -368,5 +396,6 @@ class PeripheralRegistry(
     private fun Lease.cancelGrace() {
         graceJob?.cancel()
         graceJob = null
+        graceDeadline = null
     }
 }

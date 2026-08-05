@@ -2,6 +2,7 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.BleRadioState
@@ -27,6 +28,7 @@ import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -77,6 +79,11 @@ class BleAgentTest {
         // Default to a format that differs from the clients tests declare, so translation engages.
         agentFormat: IdentifierFormat = IdentifierFormat.BLUEZ_JSON,
         observer: AgentObserver = AgentObserver.None,
+        // Ownership identity. Defaults to the connection id, as it does in production for a client
+        // that sends no stable id; `agent.status` disclosure tests set it to a real session key.
+        clientKey: String = clientId.toString(),
+        monitor: AgentMonitor? = null,
+        operatorScope: Boolean = false,
     ) {
         private val codec = CborProtocolCodec()
         private val toAgent = Channel<ByteArray>(Channel.UNLIMITED)
@@ -128,6 +135,9 @@ class BleAgentTest {
                 strictMode = strictMode,
                 agentFormat = agentFormat,
                 observer = observer,
+                clientKey = clientKey,
+                monitor = monitor,
+                operatorScope = operatorScope,
             )
             agent.start()
         }
@@ -1209,5 +1219,89 @@ class BleAgentTest {
                 .filterIsInstance<AgentEvent.RadioState>().first()
         }
         assertNull(radio)
+    }
+
+    // ---- agent.status (U3) ----
+
+    private suspend fun SharedFlow<Frame>.status(cid: Long): AgentStatusDto =
+        assertIs<ResultPayload.Status>(assertIs<OpResult.Ok>(reply(cid)).payload).status
+
+    private val alpha = ClientCredentials.sessionKey("lab-a", "shell-1")
+    private val beta = ClientCredentials.sessionKey("lab-b", "ci-runner")
+
+    @Test
+    fun agentStatusShowsACallerItsOwnLeasesAndOnlyACountOfOthers() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 4)
+        val other = DeviceHandle("FA:KE:0B")
+        // A lease held by a different principal entirely.
+        registry.acquire(other.value, beta)
+        registry.onConnected(other.value, beta)
+
+        val h = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientKey = alpha)
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val status = h.frames.status(2)
+        assertEquals(1, status.leases.size)
+        assertTrue(status.leases.single().mine)
+        assertEquals("lab-a/shell-1", status.leases.single().holder)
+        // The other tenant is a number, not a name: enough to explain the capacity, nothing more.
+        assertEquals(1, status.otherLeases)
+        assertEquals(2, status.slots.free)
+        assertEquals(4, status.slots.total)
+        assertFalse(status.operatorScope)
+    }
+
+    @Test
+    fun agentStatusUnderOperatorScopeNamesEveryHolder() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 4)
+        val other = DeviceHandle("FA:KE:0B")
+        registry.acquire(other.value, beta)
+        registry.onConnected(other.value, beta)
+
+        val h = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            registry = registry,
+            clientKey = alpha,
+            operatorScope = true,
+        )
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val status = h.frames.status(2)
+        assertTrue(status.operatorScope)
+        assertEquals(2, status.leases.size)
+        // Nothing is left over once every lease is listed.
+        assertEquals(0, status.otherLeases)
+        // The other principal's client id is disclosed here and nowhere else.
+        assertEquals(
+            setOf("lab-a/shell-1", "lab-b/ci-runner"),
+            status.leases.mapNotNull { it.holder }.toSet(),
+        )
+    }
+
+    @Test
+    fun agentStatusReportsLeaseHandlesInTheCallersOwnFormat() = runTest {
+        // A client whose identifier format differs from the agent's, so translation engages: a
+        // handle read from a status reply has to be usable in the caller's next op, exactly like
+        // one read from a scan result.
+        val h = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            clientKey = alpha,
+        )
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        h.frames.filterIsInstance<ServerHello>().first()
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val reported = h.frames.status(2).leases.single().handle
+        assertNotEquals(device.value, reported, "a translating client must not see the radio handle")
+
+        // And it routes: addressing the peripheral by the handle status just returned works.
+        h.send(3, Op.Read(DeviceHandle(reported), char))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
     }
 }

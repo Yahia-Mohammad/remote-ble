@@ -211,7 +211,7 @@ class BleAgent(
     scope: CoroutineScope,
     backend: BleBackend,
     codec: ProtocolCodec = CborProtocolCodec(),
-    maxConnections: Int = DEFAULT_MAX_CONNECTIONS,   // 4
+    maxConnections: Int = DEFAULT_MAX_CONNECTIONS,   // 8, agent-wide
     clientId: Long = 0L,                             // for monitor attribution
     observer: AgentObserver = AgentObserver.None,    // device/scan/activity hooks
 ) {
@@ -262,7 +262,7 @@ private val observeJobs = mutableMapOf<Long, Job>()
   under the mutex *before* the (slow) `backend.connect()` so the cap is honored despite
   concurrency; on success it marks the lease connected and emits a
   `ConnectionState(CONNECTED)` event. Connecting an already-connected device is an
-  **idempotent success** (no re-emit). If the slot cap (`maxConnections`, default 4)
+  **idempotent success** (no re-emit). If the slot cap (`maxConnections`, default 8)
   is hit, it replies `Err(NO_CONNECTION_SLOT)`. A failed connect **releases the
   reserved slot and the lease**. The cap is enforced by the registry and is therefore
   **agent-wide**: the constraint is the host controller's, so two clients holding four

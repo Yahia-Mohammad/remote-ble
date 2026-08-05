@@ -164,6 +164,26 @@ Properties:
 - The `hello` exchange carries **no auth credential or ownership id** — those stay on the
   upgrade headers (§4).
 
+#### Agent-level versus backend-level capabilities
+
+Every capability is one or the other, and the distinction decides what a client may assume when it
+points the same command at a different agent.
+
+- **Agent-level** capabilities are radio-independent: the agent implements them itself, over
+  bookkeeping it already keeps. A conforming agent MUST advertise **all** of them, unconditionally
+  — the backend has no say, and no host, platform, or radio library may narrow the set. Today these
+  are `slots`, `scan.batch`, and `identifier.translate`.
+- **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
+  differ between an Android phone and a Linux box. But two agents on the **same host** MUST
+  advertise the same backend-level set: a divergence there is a defect in one of them, not a
+  platform difference. `descriptors`, `rssi`, `conn.priority`, `conn.params`, and `pairing` are
+  backend-level.
+
+Both rules are subordinate to rule 3 above: an agent that cannot honour an agent-level capability
+MUST NOT advertise it, and MUST be treated as non-conforming until it can. Advertising a capability
+one would answer `UNSUPPORTED` is worse than the gap it papers over, because a client cannot
+discover the difference until the op fails.
+
 Capability strings are defined where their feature is specified (this spec defines
 `identifier.translate`, §6.1); the reference registry is
 [`Capabilities.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
@@ -344,6 +364,14 @@ When a client's **transport** (WebSocket) drops, the agent:
 - MUST allow a client that **reconnects with the same `X-RemoteBle-Client` id within the window**
   to **resume** — re-acquiring its own leases (its replayed `connect`s succeed as the owner, with
   no re-pair/rediscovery), which cancels the pending release.
+- MUST NOT re-drive the radio for a resumed lease whose link is still up. A replayed `connect` on
+  such a lease is an **idempotent success**: the agent replies `Ok` and emits
+  `ConnectionState(CONNECTED)` without calling its backend's connect. "Keep the link warm" is the
+  whole point of the window, and an agent that reconnected anyway would satisfy the letter of the
+  two clauses above while charging every resuming client a full physical reconnect and
+  rediscovery — the exact cost the window exists to avoid, and invisible to the client, which sees
+  a slow `Ok` either way. Note that per-connection state cannot decide this, because a resuming
+  client is by definition a new connection; the lease is what knows.
 - MUST release (and tear down the warm link) if no matching client returns before expiry.
 
 Resume therefore **requires** the client identity of §4.2. A client that sends no identity

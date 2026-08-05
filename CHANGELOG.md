@@ -20,7 +20,9 @@ protocol version: **1**.
 
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
 > running one command per process. Nothing here changes the wire protocol: no new op, no new event,
-> no new capability string, and no change to any `@SerialName` discriminator.
+> no new capability string, and no change to any `@SerialName` discriminator. `agent-rs` does begin
+> advertising and emitting two that already existed (`slots`, `AgentEvent::SlotState`), which
+> reaches only clients that negotiate them.
 
 ### Added
 
@@ -47,14 +49,62 @@ protocol version: **1**.
   the host controller's, not one session's — and a lease counts as occupied until release,
   including inside its grace window. A client that negotiates `slots` now receives the current
   state at handshake instead of waiting for a connection count to move.
+- **`agent-rs` now supports `slots`, and agent-level capabilities are unconditional in both
+  agents.** The Rust agent computed slot occupancy but advertised nothing and emitted no
+  `SlotState`: its only capability source was the *backend*, which reports what the radio can do,
+  so a radio-independent capability had no way to reach a client. It now applies
+  `capabilities::AGENT_CAPABILITIES` in `Negotiation::on_hello`, where no backend answer can narrow
+  it, and streams `SlotState` from a registry `watch` — current value at handshake, then every
+  change, spanning every client's leases exactly as the Kotlin agent does. `scan.batch` remains
+  unadvertised there, because the emitter does not exist yet and advertising it would be worse than
+  the gap.
+- **The default connection-slot cap is 8 on both agents** (`BleAgent.DEFAULT_MAX_CONNECTIONS`, was
+  4). The two agents had always differed here, but it was unobservable while only one of them
+  reported a number; now that both answer the same question over `slots`, the same client on the
+  same host would have got two different capacities. Kotlin moved because 8 is the more permissive:
+  aligning downward would have tightened `agent-rs` for its existing users, and would have left the
+  per-session→agent-wide change above at its most restrictive — turning an effective 4×clients into
+  4 in total. Operators who need a real policy should set the cap explicitly rather than rely on a
+  default that no agent can derive, since neither Kable nor btleplug exposes the controller's own
+  limit.
 
 ### Fixed
+
+- **Resuming a warm lease no longer reconnects the radio.** Both agents replayed `connect` straight
+  through to the backend, because the "already connected?" check read per-connection state — and a
+  resuming client is by definition a new connection, so that state was always empty. Every
+  invocation of a process-per-command client therefore paid a physical reconnect and rediscovery,
+  which is precisely the cost `transportGrace` exists to avoid: the window kept the lease while
+  silently discarding its benefit, and the client could not tell, because a slow `Ok` looks like a
+  fast one. The lease itself knows whether the link is up, so acquisition now reports it and
+  `connect` returns an idempotent `Ok` with `ConnectionState(CONNECTED)`. A lease whose radio link
+  *did* drop still reconnects. Written into the conformance spec at §10.4.
 
 - **`PERIPHERAL_BUSY` names the holder.** Both agents apply one disclosure policy: the principal
   always, the client id only when the caller shares that principal. The identity is escaped and
   length-bounded at the point of disclosure, since half of it is text the holder chose and the
   message is rendered in someone else's terminal, log, or model context. This also stops `agent-rs`
   interpolating the raw session key, which leaked a foreign client id and the NUL separator.
+- **The two agents bound a disclosed identity the same way.** `agent-rs` capped the *characters
+  consumed* while the Kotlin agent capped the *rendered length*, so an identity of control
+  characters — each escaping to six — produced roughly 48 characters from one agent and 288 from
+  the other, for the same holder under the same policy. Both now bound the rendered message.
+
+### Documentation
+
+- **The conformance spec distinguishes agent-level from backend-level capabilities**
+  ([§5.3](docs/agent-conformance-spec.md)). Agent-level capabilities are radio-independent and MUST
+  be advertised unconditionally by every conforming agent; backend-level ones may differ across
+  hosts, but two agents on the **same** host MUST advertise the same set. The second rule is the
+  one the parity record was missing — it is why a same-host divergence sat filed under "btleplug
+  limitation" beside genuine ones.
+- **Corrected: descriptors are not blocked by btleplug.** The parity record attributed seven
+  `UNSUPPORTED` ops in `agent-rs` to library limitations. Five are real; `desc.read` and
+  `desc.write` are not. btleplug 0.11.8 declares `read_descriptor`/`write_descriptor`, and Kable's
+  JVM backend — btleplug as well — binds both, which is what the Kotlin agent truthfully advertises
+  `descriptors` on. The Rust agent simply has not implemented them, so two agents on one Linux host
+  answer a client differently. The wrong root cause is the part worth flagging: it had moved a
+  buildable feature into the "cannot be built" column, where nothing would revisit it.
 
 ## [0.10.0] - 2026-08-04
 

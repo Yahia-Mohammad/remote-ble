@@ -20,10 +20,36 @@ one long-lived session, so none of them exercises the seams a short-lived proces
 | Lease denial | holder named under a disclosure policy | `LeaseDisclosure.kt`, `lease_disclosure.rs` |
 | Slot accounting | agent-wide, lease-aware, reported at handshake | `PeripheralRegistry.kt`, `BleAgent.kt` |
 | Identifier format | client may declare its own | `AgentSession.kt` |
+| Agent-level capabilities | unconditional in `agent-rs`; `slots` advertised and emitted | `frame.rs`, `negotiation.rs`, `server.rs`, `peripheral_lease.rs` |
+| Capability levels | agent-level vs backend-level written into the spec | `agent-conformance-spec.md` §5.3 |
+| Slot cap default | aligned at 8, both agents | `BleAgent.kt`, `peripheral_lease.rs` |
+| Warm-resume | replayed `connect` no longer re-drives a live radio link | `BleAgent.kt`, `server.rs`, both registries |
 
-Verified at the last commit: `./gradlew build` green, `cargo test` 121 passed, `cargo clippy
---all-targets` clean. No wire-protocol change — no new op, event, or capability string, and no
-`@SerialName` touched — so the cross-language CBOR interop gates were never in play.
+Verified: `./gradlew build` green, `cargo test` 133 passed, `cargo clippy --all-targets` and
+`cargo fmt --check` clean. Both warm-resume regressions were confirmed to fail with the fix
+disabled, rather than assumed to be meaningful. No wire-protocol change — no new op, event, or
+capability string, and no `@SerialName` touched — so the cross-language CBOR interop gates were
+never in play. `agent-rs` does start advertising and emitting `slots` / `SlotState`, both of which
+already existed in the vocabulary, and only to clients that negotiate them.
+
+Two things found while doing this, both now fixed and worth knowing about: `cargo fmt --check` was
+already failing before any of this work, so the Rust diff includes a few reformatted lines nobody
+here wrote; and the two agents bounded a disclosed identity differently — Rust capped input
+characters, Kotlin capped rendered length — which for an all-escaped identity meant ~288 characters
+from one agent and ~48 from the other, under a policy whose whole point was that they agree.
+
+## Still open on the Rust agent
+
+- **`scan.batch`** is agent-level by nature but stays unadvertised: `agent-rs` has no
+  `ScanResultBatch` emitter, and the coalescing window and max-size semantics have to match
+  Kotlin's or the gap just becomes invisible instead of absent. Its own change, and the last
+  agent-level gap.
+- **`descriptors`** is advertised by the Kotlin agent on JVM and not by Rust — and the recorded
+  reason ("btleplug has no descriptor API") turned out to be false. btleplug 0.11.8 declares
+  `read_descriptor`/`write_descriptor`, and Kable's JVM backend binds both, so the Kotlin agent is
+  truthful and Rust simply has not implemented them. Backend work in `btleplug_impl.rs`; see
+  `agent-parity-verification.md` §1. The wrong root cause is the lesson: it had parked a buildable
+  feature in the "cannot be built" column where nothing would revisit it.
 
 ## Deliberately not in scope
 

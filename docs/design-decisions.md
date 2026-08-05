@@ -160,14 +160,21 @@ self-heals once the agent appears, rather than the first attempt being one-shot.
   coroutine so it can't block the state watcher. Pending-slot cleanup uses
   `NonCancellable` so a cancelled caller still tidies up.
 - **Agent.** One coroutine per command (`scope.launch { handle(cmd) }`) so a slow read
-  can't head-of-line-block an `observe.stop`. All per-session maps/sets (connected slots,
-  scan jobs, observe jobs) are guarded by one `Mutex`. A connection slot is reserved
+  can't head-of-line-block an `observe.stop`. All per-session maps/sets (connected
+  devices, scan jobs, observe jobs) are guarded by one `Mutex`. The slot is taken
   *before* the slow native connect so the cap holds under concurrency, and released on
   failure.
 - **Cross-client ownership.** The per-session `BleAgent`s share one `PeripheralRegistry`
-  (the radio is shared, so ownership must be too). `connect` acquires the lease *before*
-  the per-session slot, so a peripheral another client owns is rejected with
-  `PERIPHERAL_BUSY` (see *Peripheral ownership*).
+  (the radio is shared, so ownership must be too). `connect` acquires the lease there, and
+  a peripheral another client owns is rejected with `PERIPHERAL_BUSY` (see *Peripheral
+  ownership*).
+- **The slot cap is agent-wide, not per session.** It lives in the registry, alongside the
+  leases, because the constraint it models is the host controller's: two clients holding
+  four peripherals each exhaust the same radio as one client holding eight. Acquiring a
+  lease *is* taking the slot — there is no second, per-session capacity rule to disagree
+  with it — so a lease inside its grace window keeps occupying capacity, which is the
+  honest answer for anyone asking whether the next `connect` will succeed. It was per
+  session through 0.10.0, which meant a client's `slots` reading described only itself.
 - **Streams.** Both sides express scans/subscriptions as cold `Flow`s opened on
   collect and torn down on cancel (`channelFlow` + `awaitClose`), so lifecycle is tied
   to collection — no manual bookkeeping leaks.

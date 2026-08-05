@@ -734,9 +734,17 @@ fn report_unsolicited_disconnect(
 #[async_trait]
 impl BleBackend for BtleplugBackend {
     fn capabilities(&self) -> Vec<String> {
-        // Baseline v1 only. Advertise a capability *here* once it is actually
-        // implemented end-to-end (descriptors, pairing, conn.priority, scan.batch,
-        // slots) so a client never negotiates something we'd answer UNSUPPORTED.
+        // **Backend-level** capabilities only — what this radio can do. The agent-level ones
+        // (`slots`, `identifier.translate`, and eventually `scan.batch`) are radio-independent and
+        // are applied in `Negotiation::on_hello`; returning them here would be the wrong seam.
+        //
+        // Baseline v1: advertise one *here* once it is implemented end-to-end, so a client never
+        // negotiates something we would answer UNSUPPORTED. Outstanding:
+        //  - `descriptors` — implementable. btleplug declares `read_descriptor`/`write_descriptor`
+        //    and Kable's JVM backend binds both, so the Kotlin agent advertises this on the same
+        //    stack. Until it lands, one Linux host answers differently depending on which agent
+        //    runs, which the conformance spec (§5.3) calls a defect.
+        //  - `pairing`, `conn.priority`, `rssi`, `conn.params` — genuinely unavailable in btleplug.
         vec![]
     }
 

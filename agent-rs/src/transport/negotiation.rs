@@ -57,8 +57,8 @@ impl Negotiation {
     ///
     /// On the **first** hello: negotiates `clientWanted ∩ agentSupported` — [supported] is what
     /// the backend actually implements, so a client never negotiates a capability the agent
-    /// would then answer `UNSUPPORTED`, plus the agent-level `identifier.translate`
-    /// (radio-independent) — then configures [translator] **exactly once** and primes it with
+    /// would then answer `UNSUPPORTED`, plus [capabilities::AGENT_CAPABILITIES], which are
+    /// radio-independent and so unconditional — then configures [translator] **exactly once** and primes it with
     /// the client's still-warm lease handles so a reconciling client's replayed translated
     /// handles route (see the identifier-translation proposal §"Reconnect & reconcile"). The
     /// [supported] and [warm_leases] providers are invoked only on this path.
@@ -75,7 +75,14 @@ impl Negotiation {
     ) -> BTreeSet<String> {
         if self.negotiated.is_none() {
             let mut agent_supported: BTreeSet<String> = supported().into_iter().collect();
-            agent_supported.insert(capabilities::IDENTIFIER_TRANSLATION.to_string());
+            // Agent-level capabilities are radio-independent, so they are added here rather than
+            // asked of the backend: [supported] describes what this host's radio can do, and no
+            // answer it could give should be able to withhold one of these.
+            agent_supported.extend(
+                capabilities::AGENT_CAPABILITIES
+                    .iter()
+                    .map(|capability| capability.to_string()),
+            );
             let caps: BTreeSet<String> = hello
                 .wanted
                 .intersection(&agent_supported)
@@ -258,6 +265,23 @@ mod tests {
         );
         assert_eq!(second, first);
         assert!(translation_active(&t), "translator was reconfigured");
+    }
+
+    #[test]
+    fn agent_level_capabilities_are_offered_whatever_the_backend_reports() {
+        let t = translator();
+        let mut neg = Negotiation::new();
+        let wanted: Vec<&str> = capabilities::AGENT_CAPABILITIES.to_vec();
+        let negotiated = neg.on_hello(
+            hello(&wanted, Some(IdentifierFormat::Uuid)),
+            &t,
+            // A backend that implements nothing. Agent-level capabilities are radio-independent,
+            // so this must not narrow them by even one — the rule that keeps two agents on the
+            // same host from answering a client differently.
+            Vec::new,
+            Vec::new,
+        );
+        assert_eq!(negotiated, caps(&wanted));
     }
 
     #[test]

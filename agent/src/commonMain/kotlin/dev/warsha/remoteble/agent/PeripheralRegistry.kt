@@ -100,8 +100,16 @@ class PeripheralRegistry(
     private class Lease(val owner: String, var connected: Boolean, var graceJob: Job?)
 
     sealed interface Acquisition {
-        /** This client now owns (or already owned) the peripheral. */
-        data object Granted : Acquisition
+        /**
+         * This client now owns (or already owned) the peripheral.
+         *
+         * [linkAlreadyLive] distinguishes a *resume* from a fresh reservation: the lease was still
+         * marked physically connected, so the radio link never went down and a `connect()` on the
+         * backend would be redundant. This is the normal state for a client whose transport
+         * dropped inside its grace window — including every invocation of a process-per-command
+         * client after the first.
+         */
+        data class Granted(val linkAlreadyLive: Boolean) : Acquisition
 
         /** The peripheral is exclusively owned by [owner] (a stable client id). */
         data class Denied(val owner: String) : Acquisition
@@ -170,12 +178,16 @@ class PeripheralRegistry(
                 leases[handle] = Lease(clientKey, connected = false, graceJob = null)
                 publishOccupancy()
                 Logger.info(LogTags.REGISTRY) { "lease acquired [dev=$handle owner=$clientKey]" }
-                Acquisition.Granted
+                Acquisition.Granted(linkAlreadyLive = false)
             }
             lease.owner == clientKey -> {
                 lease.cancelGrace()
-                Logger.info(LogTags.REGISTRY) { "lease resumed [dev=$handle owner=$clientKey]" }
-                Acquisition.Granted
+                Logger.info(LogTags.REGISTRY) {
+                    "lease resumed [dev=$handle owner=$clientKey live=${lease.connected}]"
+                }
+                // Read under the same lock that cancelled the grace, so the answer cannot be
+                // invalidated between here and the caller's decision to skip the backend.
+                Acquisition.Granted(linkAlreadyLive = lease.connected)
             }
             else -> Acquisition.Denied(lease.owner)
         }

@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,18 @@ impl Default for LeaseConfig {
             max_slots: 8,
         }
     }
+}
+
+/// Outcome of a granted lease acquisition. Mirrors `PeripheralRegistry.Acquisition.Granted` in the
+/// Kotlin agent, whose `linkAlreadyLive` flag this replaces with a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAcquisition {
+    /// A new reservation. The radio link still has to be established.
+    Reserved,
+    /// The owner resumed a lease whose radio link never went down — the state a client's transport
+    /// dropping leaves behind, and therefore the state every invocation of a process-per-command
+    /// client finds after its first. Connecting the backend again would re-drive a live link.
+    ResumedWarmLink,
 }
 
 /// Tears the warm radio link down when a lease's grace window expires. Wired by the
@@ -61,6 +74,10 @@ struct Inner {
     config: LeaseConfig,
     state: Mutex<HashMap<String, PeripheralState>>,
     teardown: OnceLock<TeardownFn>,
+    /// Current occupancy, republished after every change to [Inner::state]. A `watch` rather than
+    /// a broadcast so a newly negotiating client can be handed the current value without waiting
+    /// for something to change — the Rust counterpart of the Kotlin registry's `StateFlow`.
+    occupancy: watch::Sender<usize>,
 }
 
 /// Authoritative, cross-client ownership of peripherals, shared (cheap `Arc` clone) by every
@@ -83,6 +100,7 @@ impl PeripheralRegistry {
                 config,
                 state: Mutex::new(HashMap::new()),
                 teardown: OnceLock::new(),
+                occupancy: watch::channel(0).0,
             }),
         }
     }
@@ -98,7 +116,11 @@ impl PeripheralRegistry {
         let _ = self.inner.teardown.set(boxed);
     }
 
-    pub fn acquire_lease(&self, device_handle: &str, client_id: &str) -> Result<(), AgentError> {
+    pub fn acquire_lease(
+        &self,
+        device_handle: &str,
+        client_id: &str,
+    ) -> Result<LeaseAcquisition, AgentError> {
         let mut map = self.inner.state.lock();
 
         if let Some(state) = map.get_mut(device_handle) {
@@ -106,7 +128,13 @@ impl PeripheralRegistry {
             // keeps its peripheral): cancel any pending release and proceed.
             if state.owner_client_id == client_id {
                 state.cancel_grace();
-                return Ok(());
+                // Read under the same lock that cancelled the grace, so it cannot be invalidated
+                // between here and the caller's decision to skip the backend.
+                return Ok(if state.connected {
+                    LeaseAcquisition::ResumedWarmLink
+                } else {
+                    LeaseAcquisition::Reserved
+                });
             }
             // A different client. The 0.9.0 surface is exclusive-only; a participant-based
             // shared model is deferred rather than granting an untracked guest. The holder is
@@ -137,8 +165,27 @@ impl PeripheralRegistry {
                 epoch: 0,
             },
         );
+        self.publish_occupancy(&map);
 
-        Ok(())
+        Ok(LeaseAcquisition::Reserved)
+    }
+
+    /// Republishes occupancy. Call with the state lock held, after any change to the lease map —
+    /// a re-acquire by the owner is not one, since it consumes no additional slot.
+    fn publish_occupancy(&self, map: &HashMap<String, PeripheralState>) {
+        self.inner.occupancy.send_replace(map.len());
+    }
+
+    /// How many of [PeripheralRegistry::total_slots] are taken, across **every** client — the
+    /// number `AgentEvent::SlotState` reports — starting with the current value.
+    ///
+    /// A lease occupies its slot from acquisition until release, which deliberately includes a
+    /// lease inside its grace window: that peripheral is unavailable to anyone else, and on the
+    /// transport-grace path its radio link is still up. Counting only *live* connections would
+    /// report capacity as free when the next `connect` would be refused — and would hide from a
+    /// process-per-command client the peripheral it is itself holding between invocations.
+    pub fn occupancy(&self) -> watch::Receiver<usize> {
+        self.inner.occupancy.subscribe()
     }
 
     /// Authorize a device-bearing operation that requires an active BLE connection.
@@ -191,6 +238,7 @@ impl PeripheralRegistry {
         {
             state.cancel_grace();
             map.remove(device_handle);
+            self.publish_occupancy(&map);
             return true;
         }
         false
@@ -264,6 +312,7 @@ impl PeripheralRegistry {
                     // Only release if the owner never returned (epoch unchanged).
                     Some(s) if s.epoch == epoch => {
                         map.remove(&handle_owned);
+                        reg.publish_occupancy(&map);
                         true
                     }
                     _ => false,
@@ -276,15 +325,16 @@ impl PeripheralRegistry {
         state.grace_task = Some(task);
     }
 
-    /// Free/total connection slots. Intended to feed `AgentEvent::SlotState`
-    /// once the `slots` capability is advertised; exercised by the unit tests.
+    /// Free connection slots, sampled once. The `SlotState` feed uses [Self::occupancy] instead —
+    /// it needs to observe changes, not poll — so this stays as a point query for tests and any
+    /// future synchronous caller.
     #[allow(dead_code)]
     pub fn free_slots(&self) -> usize {
         let map = self.inner.state.lock();
         self.inner.config.max_slots.saturating_sub(map.len())
     }
 
-    #[allow(dead_code)]
+    /// Slot capacity of this agent host.
     pub fn total_slots(&self) -> usize {
         self.inner.config.max_slots
     }
@@ -426,5 +476,77 @@ mod tests {
             0,
             "teardown must not fire"
         );
+    }
+
+    #[tokio::test]
+    async fn occupancy_starts_at_the_current_value_for_a_late_subscriber() {
+        let reg = PeripheralRegistry::new(LeaseConfig::default());
+        reg.acquire_lease("dev1", "clientA").unwrap();
+
+        // Subscribing *after* the lease exists still yields the current count, without waiting
+        // for a change — this is what lets a freshly negotiated client be told the truth
+        // immediately instead of blocking until someone else connects.
+        let mut occupancy = reg.occupancy();
+        assert_eq!(*occupancy.borrow_and_update(), 1);
+    }
+
+    #[tokio::test]
+    async fn occupancy_reports_every_clients_leases_against_one_capacity() {
+        let reg = PeripheralRegistry::new(LeaseConfig::default());
+        let mut occupancy = reg.occupancy();
+        assert_eq!(*occupancy.borrow_and_update(), 0);
+
+        reg.acquire_lease("dev1", "clientA").unwrap();
+        occupancy.changed().await.unwrap();
+        assert_eq!(*occupancy.borrow_and_update(), 1);
+
+        // A different client's lease moves the same number: the capacity is the host radio's.
+        reg.acquire_lease("dev2", "clientB").unwrap();
+        occupancy.changed().await.unwrap();
+        assert_eq!(*occupancy.borrow_and_update(), 2);
+
+        reg.release_lease("dev1", "clientA");
+        occupancy.changed().await.unwrap();
+        assert_eq!(*occupancy.borrow_and_update(), 1);
+    }
+
+    #[tokio::test]
+    async fn re_acquiring_an_owned_lease_does_not_republish_occupancy() {
+        let reg = PeripheralRegistry::new(LeaseConfig::default());
+        reg.acquire_lease("dev1", "clientA").unwrap();
+        let mut occupancy = reg.occupancy();
+        occupancy.borrow_and_update();
+
+        reg.acquire_lease("dev1", "clientA").unwrap(); // the resume path, not a new lease
+
+        assert!(
+            !occupancy.has_changed().unwrap(),
+            "a resume consumes no slot, so it must not look like an occupancy change"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn occupancy_counts_a_lease_until_its_grace_expires() {
+        let reg = PeripheralRegistry::new(LeaseConfig {
+            transport_grace: Duration::from_secs(5),
+            ..Default::default()
+        });
+        reg.acquire_lease("dev1", "clientA").unwrap();
+        let mut occupancy = reg.occupancy();
+        assert_eq!(*occupancy.borrow_and_update(), 1);
+
+        reg.on_transport_drop("clientA");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        // The client is gone but its link is warm and the peripheral is nobody else's: reporting
+        // this slot as free is what would mislead a client whose next process is about to resume.
+        assert!(!occupancy.has_changed().unwrap());
+        assert_eq!(*occupancy.borrow_and_update(), 1);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        occupancy.changed().await.unwrap();
+        assert_eq!(*occupancy.borrow_and_update(), 0);
     }
 }

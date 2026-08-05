@@ -1005,7 +1005,69 @@ class BleAgentTest {
         h2.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
         h2.send(1, Op.Connect(DeviceHandle(clientHandle)))
         assertEquals(OpResult.Ok(), h2.frames.reply(1))
-        assertEquals(listOf(realHandle, realHandle), backend.connectCalls)
+        // One physical connect for both invocations: the radio link never went down, so the resume
+        // must not re-drive it. See [warmLeaseResumeDoesNotReconnectTheRadio].
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun warmLeaseResumeDoesNotReconnectTheRadio() = runTest {
+        // The property a process-per-command client depends on: each invocation opens a transport,
+        // issues `connect`, and expects to be talking to the peripheral its predecessor left
+        // connected. If that `connect` re-drove the radio, every command would pay a physical
+        // reconnect (and rediscovery), which is the cost the transport-grace window exists to
+        // avoid — the window would keep the *lease* while silently dropping its whole benefit.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+
+        val first = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        first.sendHello(emptySet())
+        first.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+        assertEquals(listOf(device), backend.connectCalls)
+
+        // Two more invocations, each a fresh connection. The client id is what keys ownership, so
+        // it stays the same — that is precisely what makes these the *same* client resuming rather
+        // than a second one contending.
+        repeat(2) {
+            val next = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+            next.sendHello(emptySet())
+            next.send(1, Op.Connect(device))
+            assertIs<OpResult.Ok>(next.frames.reply(1))
+            // Still reported as connected, so the client can proceed straight to its GATT op.
+            assertEquals(
+                AgentEvent.ConnectionState(device, BleConnState.CONNECTED),
+                next.frames.filterIsInstance<Event>().map { it.event }
+                    .filterIsInstance<AgentEvent.ConnectionState>().first(),
+            )
+            next.close()
+        }
+
+        assertEquals(listOf(device), backend.connectCalls, "the radio was re-driven on resume")
+        assertEquals(emptyList(), backend.disconnectCalls)
+    }
+
+    @Test
+    fun aLeaseWhoseRadioLinkDroppedStillReconnects() = runTest {
+        // The complement, so the skip above cannot silently swallow a genuine reconnect: after an
+        // unsolicited BLE disconnect the lease survives its own grace window, but the link is down
+        // and the next connect must actually reach the radio.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+
+        val first = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        first.sendHello(emptySet())
+        first.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+
+        registry.onDisconnected(device.value, "1") // radio dropped, lease still held
+        first.close()
+
+        val second = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        second.sendHello(emptySet())
+        second.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(second.frames.reply(1))
+        assertEquals(listOf(device, device), backend.connectCalls)
     }
 
     @Test

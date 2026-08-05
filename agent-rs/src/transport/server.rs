@@ -18,12 +18,12 @@ use crate::ble::backend::{BleBackend, StreamKey};
 use crate::protocol::{
     codec::{decode_cbor, encode_cbor},
     errors::{AgentError, ErrorKind},
-    events::AgentEvent,
-    frame::Frame,
+    events::{AgentEvent, BleConnState},
+    frame::{Frame, capabilities},
     op::Op,
     results::OpResult,
 };
-use crate::registry::peripheral_lease::PeripheralRegistry;
+use crate::registry::peripheral_lease::{LeaseAcquisition, PeripheralRegistry};
 use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
@@ -383,6 +383,10 @@ fn session_key(principal: &str, client_id: &str) -> String {
     format!("{principal}\0{client_id}")
 }
 
+/// What this host's **radio** can do. Agent-level capabilities are not asked of the backend and
+/// are not added here — [crate::transport::negotiation::Negotiation::on_hello] applies
+/// [crate::protocol::frame::capabilities::AGENT_CAPABILITIES] unconditionally, so that nothing a
+/// backend reports can withhold one.
 fn supported_capabilities(
     mut backend_capabilities: Vec<String>,
     scan_mode: ScanConcurrencyMode,
@@ -949,6 +953,8 @@ impl AgentServer {
 
         // Per-connection handshake state — first hello wins; see [Negotiation].
         let mut negotiation = Negotiation::new();
+        // Runs only for a client that negotiated `slots`; aborted with the other pumps on retire.
+        let mut slot_feed: Option<tokio::task::JoinHandle<()>> = None;
         let negotiated_capabilities =
             Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
         let mut closing_for_protocol = false;
@@ -1045,6 +1051,20 @@ impl AgentServer {
                                 };
                                 *negotiated_capabilities.lock() = caps.clone();
                                 let _ = frame_tx.send(Outbound::Frame(reply_frame)).await;
+
+                                // Start the slot feed from the handshake, for the same reason the
+                                // Kotlin agent does: the negotiated set is only known once the
+                                // hello lands. Guarded on the task rather than on "first hello" so
+                                // a repeated hello — answered idempotently by [Negotiation] — never
+                                // starts a second feed.
+                                if slot_feed.is_none()
+                                    && caps.contains(capabilities::CONNECTION_SLOTS)
+                                {
+                                    slot_feed = Some(Self::spawn_slot_state_feed(
+                                        registry.clone(),
+                                        event_tx.clone(),
+                                    ));
+                                }
                             }
                             Frame::Command { cid, op } => {
                                 // Execute each command on its own task so a slow op (e.g. a
@@ -1199,6 +1219,15 @@ impl AgentServer {
         // Stop and join every connection-owned pump before scheduling grace. Otherwise an old
         // writer/event task can outlive cleanup and send or mutate state after a new generation
         // reconnects under the same stable identity.
+        //
+        // The slot feed goes first: it holds a clone of [event_tx], so the drop below cannot close
+        // the event channel while it is still alive. It also outlives its client by nature — the
+        // registry it watches is process-wide — which is exactly why it must be aborted here
+        // rather than left to notice the socket is gone.
+        if let Some(feed) = slot_feed.take() {
+            feed.abort();
+            let _ = feed.await;
+        }
         drop(event_tx);
         drop(frame_tx);
         send_task.abort();
@@ -1213,6 +1242,43 @@ impl AgentServer {
         // claimed through lease cleanup ensures a reconnect cannot race an older socket's drop.
         live_sessions.release(&client_id, session_generation);
         tracing::info!("Client disconnected");
+    }
+
+    /// Streams `AgentEvent::SlotState` to a client that negotiated `slots`, starting with the
+    /// current value.
+    ///
+    /// Two things this deliberately is not. It is not per session: the count comes from the
+    /// process-wide registry, so it spans every client's leases against the host's capacity, and a
+    /// client learns that a peripheral is unavailable because *someone* holds it — including
+    /// itself, between two invocations of a process-per-command tool. And it is not driven from
+    /// the connect/disconnect paths: a `watch` hands its current value to a new receiver, so a
+    /// client that negotiates `slots` and asks nothing else still gets an answer instead of
+    /// waiting for a connection count to move.
+    ///
+    /// Events go through [event_tx] rather than straight to the frame channel so they inherit the
+    /// same shed-on-overflow policy as every other event: slot state is refreshable by nature, and
+    /// a slow client must never be able to block the radio.
+    fn spawn_slot_state_feed(
+        registry: PeripheralRegistry,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut occupancy = registry.occupancy();
+            let total = registry.total_slots();
+            loop {
+                let occupied = *occupancy.borrow_and_update();
+                let event = AgentEvent::SlotState {
+                    free: total.saturating_sub(occupied) as i32,
+                    total: total as i32,
+                };
+                if event_tx.send(event).await.is_err() {
+                    break; // the connection's event pump is gone
+                }
+                if occupancy.changed().await.is_err() {
+                    break; // the registry outlives every connection, so this is shutdown
+                }
+            }
+        })
     }
 
     async fn execute_op(op: Op, context: ExecuteContext<'_>) -> OpResult {
@@ -1364,8 +1430,29 @@ impl AgentServer {
                 OpResult::from_unit(result)
             }
             Op::Connect { device } => {
-                if let Err(e) = registry.acquire_lease(&device.value, client_id) {
-                    return OpResult::err(e);
+                let acquisition = match registry.acquire_lease(&device.value, client_id) {
+                    Ok(acquisition) => acquisition,
+                    Err(e) => return OpResult::err(e),
+                };
+                // Resuming a lease whose radio link never dropped: the peripheral is already
+                // connected, so driving the backend again would re-connect a live link. The
+                // per-connection state cannot answer this — a resuming client is by definition a
+                // new connection — only the registry, which outlives the transport, can.
+                if acquisition == LeaseAcquisition::ResumedWarmLink {
+                    tracing::info!(
+                        "warm lease resumed, skipping connect [dev={}]",
+                        device.value
+                    );
+                    // The backend emits this on a real connect; on the skip path it is ours to
+                    // send, so a resuming client sees the same thing either way.
+                    let _ = event_tx
+                        .send(AgentEvent::ConnectionState {
+                            device: device.clone(),
+                            state: BleConnState::Connected,
+                            reason: None,
+                        })
+                        .await;
+                    return OpResult::ok(None);
                 }
                 match backend.connect(&device, event_tx).await {
                     Ok(_) => {
@@ -1767,6 +1854,21 @@ mod tests {
         loop {
             if let Frame::Reply { result, .. } = recv_frame(ws).await {
                 return result;
+            }
+        }
+    }
+
+    /// The next `SlotState` event as `(free, total)`.
+    async fn recv_slot_state<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> (i32, i32)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            if let Frame::Event {
+                event: AgentEvent::SlotState { free, total },
+            } = recv_frame(ws).await
+            {
+                return (free, total);
             }
         }
     }
@@ -2444,6 +2546,198 @@ mod tests {
                 &[crate::protocol::frame::capabilities::SCAN_CONCURRENCY_SINGLE],
             )
             .await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slots_is_negotiable_though_the_backend_advertises_nothing() {
+        // `slots` is agent-level: the fake backend reports no capabilities at all, and that must
+        // not be able to withhold it. The assertion lives in `client()`, which compares the
+        // ServerHello set exactly.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let client = harness
+            .client(
+                "slots-a",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slot_state_arrives_at_handshake_without_connecting_anything() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "slots-a",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+
+        // A client that negotiates `slots` and asks nothing else still learns the occupancy,
+        // instead of waiting for a connection count to move on an agent that may be idle.
+        assert_eq!(recv_slot_state(&mut client.ws).await, (8, 8));
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slot_state_counts_another_clients_lease() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut holder = harness.client("slots-holder", &[], &[]).await;
+        send_command(
+            &mut holder.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut holder.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        // A second client's very first slot report must already account for the peripheral the
+        // first client holds — the per-session count this replaced would have said "8 free".
+        let mut watcher = harness
+            .client(
+                "slots-watcher",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+        assert_eq!(recv_slot_state(&mut watcher.ws).await, (7, 8));
+
+        watcher.close().await;
+        holder.close().await;
+    }
+
+    #[tokio::test]
+    async fn warm_lease_resume_does_not_reconnect_the_radio() {
+        // The property a process-per-command client depends on: each invocation opens a transport,
+        // issues `connect`, and expects to be talking to the peripheral its predecessor left
+        // connected. If that `connect` re-drove the radio, every command would pay a physical
+        // reconnect, which is the cost the transport-grace window exists to avoid — the window
+        // would keep the *lease* while silently dropping its whole benefit.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(30));
+        let device = DeviceHandle {
+            value: "dev-1".into(),
+        };
+
+        let mut first = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert_eq!(harness.fake.connects.load(Ordering::Relaxed), 1);
+        first.close().await;
+
+        // Two more invocations under the same client id — which is what keys ownership, so this is
+        // the same client resuming rather than a second one contending.
+        for _ in 0..2 {
+            let mut next = harness.client("rble", &[], &[]).await;
+            send_command(
+                &mut next.ws,
+                1,
+                Op::Connect {
+                    device: device.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut next.ws).await,
+                OpResult::Ok { .. }
+            ));
+            next.close().await;
+        }
+
+        assert_eq!(
+            harness.fake.connects.load(Ordering::Relaxed),
+            1,
+            "the radio was re-driven on resume"
+        );
+        assert_eq!(harness.fake.disconnects.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lease_whose_radio_link_dropped_still_reconnects() {
+        // The complement, so the skip above cannot silently swallow a genuine reconnect: after the
+        // radio drops, the lease survives its own grace window but the link is down, and the next
+        // connect must actually reach the backend.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(30));
+        let device = DeviceHandle {
+            value: "dev-1".into(),
+        };
+
+        let mut first = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.registry.on_ble_disconnected(&device.value);
+        first.close().await;
+
+        let mut second = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut second.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut second.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert_eq!(harness.fake.connects.load(Ordering::Relaxed), 2);
+        second.close().await;
+    }
+
+    #[tokio::test]
+    async fn no_slot_state_without_the_capability() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness.client("slots-none", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        // An un-negotiated event type could break a client's decode loop, so occupancy changing
+        // under its feet must still produce nothing.
+        let slot =
+            tokio::time::timeout(Duration::from_millis(200), recv_slot_state(&mut client.ws)).await;
+        assert!(slot.is_err(), "unexpected slot state: {slot:?}");
         client.close().await;
     }
 

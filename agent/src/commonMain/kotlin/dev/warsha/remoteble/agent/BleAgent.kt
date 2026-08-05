@@ -521,7 +521,7 @@ class BleAgent(
         if (state.withLock { device.value in connected }) return OpResult.Ok()
 
         // Cross-client ownership gate: another client holds an exclusive peripheral.
-        when (val acquisition = registry.acquire(device.value, clientKey)) {
+        val resumedWarmLink = when (val acquisition = registry.acquire(device.value, clientKey)) {
             is PeripheralRegistry.Acquisition.Denied ->
                 return OpResult.Err(
                     AgentError(
@@ -531,13 +531,25 @@ class BleAgent(
                 )
             PeripheralRegistry.Acquisition.NoSlot ->
                 return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
-            PeripheralRegistry.Acquisition.Granted -> Unit
+            is PeripheralRegistry.Acquisition.Granted -> acquisition.linkAlreadyLive
         }
 
         // The slot was taken by the acquisition above — the cap is the host radio's, so it is the
         // registry's to enforce. This set stays for *this* connection's bookkeeping (idempotent
         // connect, teardown), not as a second, per-session capacity rule.
         state.withLock { connected += device.value } // reserve before the (slow) connect
+
+        // Resuming a lease whose radio link never dropped: the peripheral is already connected, so
+        // calling the backend again would be a second physical connect for a link that is up.
+        // `connected` above is per *connection*, and a resuming client is by definition a new one,
+        // so it cannot answer this — only the registry, which outlives the transport, can. This is
+        // the path every invocation of a process-per-command client takes after its first.
+        if (resumedWarmLink) {
+            observer.onClientLog(clientId, "resumed warm link ${device.value}")
+            Logger.info(LogTags.ENGINE) { "warm lease resumed, skipping connect [c=$clientId dev=${device.value}]" }
+            emit(AgentEvent.ConnectionState(device, BleConnState.CONNECTED))
+            return OpResult.Ok()
+        }
 
         try {
             backend.connect(device)
@@ -1046,7 +1058,21 @@ class BleAgent(
     private class NotificationOverflowException : Exception()
 
     companion object {
-        const val DEFAULT_MAX_CONNECTIONS: Int = 4
+        /**
+         * Peripherals this agent host will hold at once, across **every** client. Enforced by
+         * `PeripheralRegistry`, because the constraint it models is the host controller's.
+         *
+         * Eight, matching `agent-rs`. Neither Kable nor btleplug exposes the controller's real
+         * limit, so any fixed number is a guess, and the useful property of a guess here is that it
+         * not be the binding constraint on a healthy host: a cap below the radio's own ceiling
+         * silently wastes capacity, while one above it merely means a refusal arrives from the
+         * radio instead of from us. An operator running a shared rig sets a real policy explicitly.
+         *
+         * It was 4, and per session rather than agent-wide, which made it *effectively* 4×clients.
+         * Making it agent-wide without raising it would have tightened every existing multi-client
+         * deployment; a client that needs a hard reservation should be leasing, not counting slots.
+         */
+        const val DEFAULT_MAX_CONNECTIONS: Int = 8
         const val DEFAULT_MAX_INFLIGHT_COMMANDS: Int = 64
         const val MAX_SCAN_FILTERS: Int = 64
         const val MAX_ACTIVE_SCANS: Int = 16

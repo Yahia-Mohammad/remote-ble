@@ -44,6 +44,10 @@ sealed interface ResultPayload {
     /** Pair result — the resulting bond state. */
     @Serializable @SerialName("bond")
     data class Bond(val state: BleBondState) : ResultPayload
+
+    /** AgentStatus result — the caller-scoped agent snapshot (capability `agent.status`). */
+    @Serializable @SerialName("status")
+    data class Status(val status: AgentStatusDto) : ResultPayload
 }
 
 @Serializable

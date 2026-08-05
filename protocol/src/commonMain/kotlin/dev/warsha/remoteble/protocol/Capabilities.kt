@@ -83,6 +83,17 @@ object Capabilities {
      */
     const val RADIO_STATE: String = "radio.state"
 
+    /**
+     * The `agent.status` op ([Op.AgentStatus] → [ResultPayload.Status]): a caller-scoped snapshot of
+     * the agent's identity, uptime, effective ownership settings, slot occupancy and leases.
+     * Agent-level (radio-independent): every field comes from bookkeeping the agent already keeps.
+     *
+     * Disclosure is scoped to the caller — see [AgentStatusDto]. A caller that presented operator
+     * scope on the upgrade (`OPERATOR_HEADER`) sees every lease and its holder; every other caller
+     * sees its own leases plus aggregate counts.
+     */
+    const val AGENT_STATUS: String = "agent.status"
+
     /** The agent multiplexes all logical scans through one physical scan. */
     const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"
 

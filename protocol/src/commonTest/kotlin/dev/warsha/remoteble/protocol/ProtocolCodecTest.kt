@@ -177,6 +177,67 @@ class ProtocolCodecTest {
         assertRoundTrips(Command(Long.MAX_VALUE, Op.Connect(dev)))
     }
 
+    @Test
+    fun agentStatus_command() = assertRoundTrips(Command(30, Op.AgentStatus))
+
+    @Test
+    fun reply_okStatus_bothDisclosureShapes() {
+        val settings = StatusSettingsDto(
+            leaseGraceMs = 10_000,
+            transportGraceMs = 120_000,
+            exclusiveByDefault = true,
+            scanConcurrency = "multiplexed",
+            strictIdentifiers = false,
+        )
+        // A normal caller: its own lease named, everything else reduced to a count.
+        assertRoundTrips(
+            Reply(
+                31,
+                OpResult.Ok(
+                    ResultPayload.Status(
+                        AgentStatusDto(
+                            agentInfo = "RemoteBle-Agent 0.10.1",
+                            uptimeMs = 42_000,
+                            settings = settings,
+                            slots = StatusSlotsDto(free = 6, total = 8),
+                            connectedClients = 2,
+                            leases = listOf(
+                                LeaseStatusDto(
+                                    handle = dev.value,
+                                    name = "HRM",
+                                    holder = "lab-a/shell-1",
+                                    mine = true,
+                                    connected = false,
+                                    inGrace = true,
+                                    remainingGraceMs = 118_500,
+                                ),
+                            ),
+                            otherLeases = 1,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        // An operator: every lease listed, nothing left over. Also the all-defaults shape, so a
+        // decoder that mishandles omitted optional fields fails here rather than at a hardware demo.
+        assertRoundTrips(
+            Reply(
+                32,
+                OpResult.Ok(
+                    ResultPayload.Status(
+                        AgentStatusDto(
+                            uptimeMs = 0,
+                            settings = settings,
+                            slots = StatusSlotsDto(free = 8, total = 8),
+                            connectedClients = 0,
+                            operatorScope = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+
     // ---- Reply / OpResult / ResultPayload variants ----
 
     @Test

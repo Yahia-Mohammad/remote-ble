@@ -21,8 +21,8 @@ The dispatch tables differ:
 | read / write | ✅ | ✅ |
 | observe.start / observe.stop | ✅ | ✅ |
 | requestMtu | ✅ | ✅ |
-| desc.read | ✅ | ❌ → `Unsupported` |
-| desc.write | ✅ | ❌ → `Unsupported` |
+| desc.read | ✅ | ✅ |
+| desc.write | ✅ | ✅ |
 | pair | ✅ | ❌ → `Unsupported` |
 | unpair | ✅ | ❌ → `Unsupported` |
 | conn.priority | ✅ | ❌ → `Unsupported` |
@@ -41,16 +41,18 @@ the JVM Kotlin agent advertises `descriptors` on — truthfully, so rule 3 is no
 
 So the split is:
 
-- **`desc.read` / `desc.write` — implementable, simply not implemented.** The Rust `BleBackend`
-  trait declares no descriptor methods and `execute_op` lets both fall into the catch-all
-  `Unsupported` arm. This is the one same-host divergence in the table and, by §5.3's second rule,
-  a defect to close rather than a platform difference.
+- **`desc.read` / `desc.write` — implemented in 0.10.1.** `BleBackend` gained the two methods,
+  `btleplug_impl` resolves a `DescRef` exactly as it resolves a `CharRef`, and `execute_op`
+  dispatches both — authorizing first, so moving them out of the catch-all arm did not reopen the
+  cross-client hole Rig A case 3 closed. Discovery now reports each characteristic's descriptor
+  UUIDs too: that list was hard-coded empty, which would have left the capability advertised but
+  unreachable, since a client discovers the tree to learn what it may address.
 - **`pair` / `unpair` / `conn.priority` / `rssi` / `conn.params` — genuinely unavailable.**
   btleplug has no pairing, connection-priority, or interval control, and its RSSI is the cached
   advertisement value rather than a connected read.
 
-All seven are CBOR-decoded correctly and answered `Unsupported` at dispatch, which stays truthful
-in the meantime.
+The remaining five are CBOR-decoded correctly and answered `Unsupported` at dispatch, which stays
+truthful.
 
 **Origin:** Pre-existing and not introduced by logging. Release handling is capability-specific;
 the 0.9.0 addendum requires truthful `UNSUPPORTED` behavior wherever Rust cannot comply.
@@ -70,7 +72,7 @@ JVM Kotlin agent does not advertise either.
 | `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — agent-global and lease-aware in both |
 | `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
 | `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same 100 ms window and 16-result cap |
-| `descriptors` | backend | ✅ | ✅ | ❌ | **Implementable, not implemented** — btleplug has the API; see §1 |
+| `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.10.1 — see §1 |
 | `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
 | `conn.params` | backend | ✅ | ❌ | ❌ | Match on JVM: no interval control |
@@ -82,14 +84,13 @@ capabilities are advertised unconditionally by both agents — in Rust via
 `capabilities::AGENT_CAPABILITIES`, applied in `Negotiation::on_hello` where no backend answer can
 narrow it; in Kotlin via `BleAgent.AGENT_CAPABILITIES`.
 
-**`descriptors` is the one live same-host divergence.** `EngineBleBackend` adds it unconditionally
-("Kable exposes descriptor read/write on every platform"), with no platform gate — unlike every
-other line in that set — and §1 establishes that this is truthful, because Kable's JVM btleplug
-binding implements both operations. `agent-rs` does not, so two agents on one Linux host answer a
-client differently. Closing it is backend work in `btleplug_impl.rs` (resolve a `DescRef` to a
-btleplug `Descriptor`, add the two `BleBackend` methods, advertise, dispatch), not a capability
-string. Note also that the simulator does not model descriptors and the real-agent descriptor tests
-are kept separate, so neither agent's descriptor path is covered by the default CI matrix.
+**No same-host divergence remains.** Every capability above either matches on a given host, or
+differs only where the host's radio genuinely differs.
+
+One caveat worth carrying: the simulator does not model descriptors and the real-agent descriptor
+tests are kept separate, so **neither** agent's descriptor path is exercised by the default CI
+matrix. The Rust implementation is covered by dispatch and authorization tests against a fake
+backend; that it works over a real radio is unproven on either agent and wants a rig run.
 
 ---
 
@@ -303,15 +304,13 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 ### Previously recorded differences
 - 5 ops Unsupported in Rust for genuine btleplug limitations: `pair`, `unpair`, `conn.priority`,
   `rssi`, `conn.params` (ROADMAP: "blocked upstream")
-- 2 ops Unsupported in Rust that are **not** blocked: `desc.read`, `desc.write`. Recorded as a
-  btleplug limitation until 2026-08-05; btleplug has the API — see §1
 - No HTTP dashboard in Rust (architecture — raw `tokio-tungstenite`, no HTTP framework)
 - No cheap 1s `isConnected` poll in Rust
-- `descriptors` advertised by Kotlin on JVM but not by Rust, on the same btleplug stack — the one
-  same-host divergence, and by §5.3 a defect rather than a platform difference; see §1 and §2
 
 ### Resolved in 0.10.1
 - Default max slots (was 4 vs 8, now 8 in both) — see §7
+- `descriptors` (`desc.read` / `desc.write`) implemented in `agent-rs`, closing the last same-host
+  divergence — see §1. Recorded as a btleplug limitation until 2026-08-05; btleplug has the API
 
 ### Runtime differences found by the 2026-07-15 review, now fixed
 

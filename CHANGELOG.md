@@ -64,6 +64,15 @@ protocol version: **1**.
   batching. `RustAgentInteropTest` now pins a Kotlin client's decode of the batch CBOR the Rust
   agent emits; that direction had no coverage while `agent-rs` could only decode batches, never send
   them.
+- **`agent-rs` implements descriptor read and write**, closing the last capability divergence
+  between two agents on the same host. `BleBackend` gained the two methods, `btleplug_impl`
+  resolves a `DescRef` the same way it resolves a `CharRef`, and both ops authorize before
+  dispatching — moving them out of the catch-all arm must not reopen the cross-client hole that arm
+  was fixed to close. Discovery also reports each characteristic's descriptor UUIDs, which it had
+  hard-coded to an empty list: without that a client could never learn what to address, and the
+  capability would have been advertised but unreachable. Neither agent's descriptor path is
+  exercised by CI (the simulator does not model descriptors), so real-radio behaviour is still
+  unproven on both.
 - **The default connection-slot cap is 8 on both agents** (`BleAgent.DEFAULT_MAX_CONNECTIONS`, was
   4). The two agents had always differed here, but it was unobservable while only one of them
   reported a number; now that both answer the same question over `slots`, the same client on the

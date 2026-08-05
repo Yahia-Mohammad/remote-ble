@@ -25,8 +25,9 @@ one long-lived session, so none of them exercises the seams a short-lived proces
 | Slot cap default | aligned at 8, both agents | `BleAgent.kt`, `peripheral_lease.rs` |
 | Warm-resume | replayed `connect` no longer re-drives a live radio link | `BleAgent.kt`, `server.rs`, both registries |
 | `scan.batch` | implemented in `agent-rs`; agent-level set now complete | `server.rs`, `frame.rs`, `RustAgentInteropTest.kt` |
+| `descriptors` | implemented in `agent-rs`; no same-host divergence left | `backend.rs`, `btleplug_impl.rs`, `server.rs` |
 
-Verified: `./gradlew build` green, `cargo test` 136 passed, `cargo clippy --all-targets` and
+Verified: `./gradlew build` green, `cargo test` 139 passed, `cargo clippy --all-targets` and
 `cargo fmt --check` clean. Both warm-resume regressions were confirmed to fail with the fix
 disabled, rather than assumed to be meaningful. No wire-protocol change — no new op, event, or
 capability string, and no `@SerialName` touched — so the cross-language CBOR interop gates were
@@ -41,12 +42,10 @@ from one agent and ~48 from the other, under a policy whose whole point was that
 
 ## Still open on the Rust agent
 
-- **`descriptors`** is advertised by the Kotlin agent on JVM and not by Rust — and the recorded
-  reason ("btleplug has no descriptor API") turned out to be false. btleplug 0.11.8 declares
-  `read_descriptor`/`write_descriptor`, and Kable's JVM backend binds both, so the Kotlin agent is
-  truthful and Rust simply has not implemented them. Backend work in `btleplug_impl.rs`; see
-  `agent-parity-verification.md` §1. The wrong root cause is the lesson: it had parked a buildable
-  feature in the "cannot be built" column where nothing would revisit it.
+- **Descriptors on real hardware.** `agent-rs` now implements `desc.read`/`desc.write`, but the
+  simulator does not model descriptors and the real-agent descriptor tests are separate, so
+  neither agent's descriptor path runs in CI. Unit coverage is dispatch and authorization against
+  a fake backend; a rig run is what would prove the radio path on either agent.
 
 ## Deliberately not in scope
 

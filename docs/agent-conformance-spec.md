@@ -172,7 +172,7 @@ points the same command at a different agent.
 - **Agent-level** capabilities are radio-independent: the agent implements them itself, over
   bookkeeping it already keeps. A conforming agent MUST advertise **all** of them, unconditionally
   — the backend has no say, and no host, platform, or radio library may narrow the set. Today these
-  are `slots`, `scan.batch`, and `identifier.translate`.
+  are `slots`, `scan.batch`, `identifier.translate`, and `agent.status` (§6.2).
 - **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
   differ between an Android phone and a Linux box. But two agents on the **same host** MUST
   advertise the same backend-level set: a divergence there is a defect in one of them, not a
@@ -225,6 +225,65 @@ platform may be unable to represent as its own local identifier. The optional, a
   there are no leases to re-seed from; a translated client must rescan — a documented limitation.)
 
 This is a backward-compatible `1.x` addition: peers that don't name the capability are unaffected.
+
+### 6.2 Agent status (capability `agent.status`)
+
+The `agent.status` op answers, over the session a client already has, what the agent is and what it
+currently holds. **Agent-level** (§5.3): every field comes from bookkeeping the agent already keeps,
+so no host or radio library may narrow it, and a conforming agent MUST advertise it.
+
+Request `agent.status` carries **no fields** — the reply is scoped by *who is asking*, which the
+authenticated session already establishes, not by anything the client could request. Its wire
+payload is an empty map (`["agent.status", {}]`).
+
+Reply payload `status` (`Ok{ status }`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `agentInfo?` | string | The same engine/platform label `server_hello` carries. |
+| `protocolVersion` | i32 = 1 | The version this agent speaks. |
+| `uptimeMs` | i64 | How long this agent process has been serving. |
+| `settings` | object | `leaseGraceMs`, `transportGraceMs`, `exclusiveByDefault`, `scanConcurrency` (the mode's lowercased name), `strictIdentifiers`, `writePolicyEnforced`. The values **in force**, not the defaults. |
+| `slots` | `{ free: i32, total: i32 }` | Host occupancy, agent-global and lease-aware — the same accounting `conn.slots` reports (§8). |
+| `connectedClients` | i32 | Live client sessions, across every principal. |
+| `leases` | `[LeaseStatus]` | The leases this caller may see in full — see disclosure below. |
+| `otherLeases` | i32 = 0 | Leases held by someone else and therefore absent from `leases`. |
+| `operatorScope` | bool = false | Whether this caller presented valid operator scope. |
+
+`LeaseStatus` = `{ handle: string, name?: string, holder?: string, mine: bool = false,
+connected: bool, inGrace: bool, remainingGraceMs?: i64 }`. `handle` MUST be minted in the caller's
+identifier format (§6.1) like any other outgoing handle, so a handle read here is routable in the
+caller's next op. `remainingGraceMs` MUST be present whenever `inGrace` is true, and MUST NOT be
+negative — a past-due timer reports `0`.
+
+#### Disclosure
+
+A lease's holder is another tenant's identity, so what a caller may see depends on who is asking —
+the same question `PERIPHERAL_BUSY` answers (§10.1), decided by the same policy.
+
+- A caller **without** operator scope MUST receive only the leases its own session key holds. Every
+  other lease MUST be reducible to `otherLeases` and the aggregate `slots` count, which together
+  answer "can I connect?" without naming anyone.
+- A caller **with** operator scope MUST receive every lease, each with `holder` named.
+- `holder` is `principal` alone, or `principal/clientId` where the caller is entitled to the client
+  id: its own principal's, or any principal's under operator scope. It MUST be length-bounded and
+  control-character escaped at the point of disclosure — both halves are text the *holder* chose and
+  the string is rendered by whatever received it.
+
+**Operator scope** is presented on the WebSocket upgrade as `X-RemoteBle-Operator: Bearer <secret>`,
+validated against a credential the agent MUST require to be **distinct from every client
+credential** — a normal bearer token must not silently gain operator reach. An absent or wrong value
+MUST NOT fail the connection: the session proceeds at normal scope and reports `operatorScope:
+false`, so a client that asked for operator-only fields without the secret can tell that apart from
+an unreachable agent, or one too old to advertise the capability at all.
+
+#### Why not HTTP
+
+An agent MAY additionally expose a versioned `GET /api/v1/status`, but MUST NOT treat it as the
+contract: the JVM agent's `/api/state` is a loopback-gated plaintext dashboard feed whose schema is
+not a compatibility surface, and `agent-rs` runs no HTTP server at all. A status surface that
+reaches one of three agent implementations, on localhost only, does not answer the question the op
+exists for. The reference agents implement the op and nothing else.
 
 ## 7. Operations (`Op`)
 

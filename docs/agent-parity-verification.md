@@ -72,6 +72,7 @@ JVM Kotlin agent does not advertise either.
 | `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — agent-global and lease-aware in both |
 | `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
 | `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same 100 ms window and 16-result cap |
+| `agent.status` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same DTO, same disclosure rules, same skipped defaults on the wire |
 | `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.10.1 — see §1 |
 | `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
@@ -294,8 +295,13 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - Native unsolicited-drop detection
 - Wire protocol codec (CBOR byte-parity verified by interop tests)
 - **Logging levels and taxonomy** (0.9.0 scope — both emit the same story at the same levels)
-- **Agent-level capability set** (0.10.1 — `slots`, `identifier.translate`, and `scan.batch`
-  advertised unconditionally by both, and complete: every agent-level capability now matches)
+- **Agent-level capability set** (0.10.1 — `slots`, `identifier.translate`, `scan.batch`, and
+  `agent.status` advertised unconditionally by both, and complete: every agent-level capability
+  now matches)
+- **`agent.status`** (0.10.1 — identical DTO from both agents, including which fields are omitted
+  when they equal their defaults, so diffing one agent's status against the other's is meaningful
+  rather than merely both-parse-fine. The Rust agent grew a bounded advertised-name cache for it,
+  since btleplug offers the name only on the scan path and nothing else retained it)
 - **`slots` accounting and delivery** (0.10.1 — global, lease-aware, delivered at handshake and on
   every occupancy change in both agents)
 - **Lease-denial disclosure** (0.10.1 — one policy, and now one *bound*: both cap the rendered
@@ -338,6 +344,7 @@ agents. These supersede the stale specifics above where they conflict.
 | Principal-scoped ownership key | ✅ | ✅ | `(principal, stable client id)`; `X-RemoteBle-Client` never crosses principals |
 | Loopback-default bind + policy | ✅ | ✅ | non-loopback needs a credential or the explicit insecure-LAN override |
 | Failed-auth rate limiting | ✅ (client + operator planes) | ✅ (client plane) | fixed-memory per-peer/global limiter, LRU eviction, `429` |
+| Operator credential | ✅ (`REMOTE_BLE_OPERATOR_TOKEN`) | ✅ (`--operator-token` / `REMOTE_BLE_OPERATOR_TOKEN`) | Must be distinct from every client credential; both fail startup otherwise. Grants the HTTP dashboard (Kotlin only — Rust serves no HTTP) and, on both, `agent.status` holder disclosure via `X-RemoteBle-Operator` |
 | Duplicate live session refused | ✅ (post-upgrade `1008`) | ✅ (handshake `409`) | `LEASE-DUPLICATE-01`; transport signal is implementation-specific |
 | 1 MiB inbound frame cap | ✅ | ✅ | framing-layer enforcement before decode |
 | Argument ceilings → `INVALID_REQUEST` | ✅ | ✅ | ≤64 filters, ≤512-byte writes/descriptors, **MTU 23–517** |

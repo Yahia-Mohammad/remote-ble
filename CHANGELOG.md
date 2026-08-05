@@ -19,12 +19,33 @@ protocol version: **1**.
 ## [Unreleased]
 
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
-> running one command per process. Nothing here changes the wire protocol: no new op, no new event,
-> no new capability string, and no change to any `@SerialName` discriminator. `agent-rs` does begin
-> advertising and emitting capabilities and events that already existed (`slots`, `scan.batch`, and
-> their `SlotState` / `ScanResultBatch` events), which reach only clients that negotiate them.
+> running one command per process. The wire protocol version is unchanged at **1** and no existing
+> `@SerialName` discriminator moved; the additions are one new op (`agent.status`) with its result
+> payload and capability string, gated so it reaches only clients that negotiate it. `agent-rs`
+> also begins advertising and emitting capabilities and events that already existed (`slots`,
+> `scan.batch`, and their `SlotState` / `ScanResultBatch` events).
 
 ### Added
+
+- **`agent.status`: a status contract that works remotely, on every reference agent.** A new
+  capability-gated op returning the agent's identity, uptime, effective ownership settings, slot
+  occupancy and leases — over the same authenticated session as every other op. The existing
+  `/api/state` could not serve this: it is loopback-gated plaintext HTTP whose JSON is a dashboard
+  feed rather than a compatibility surface, and `agent-rs` runs no HTTP server at all, so a status
+  command built on it would work against localhost on one of three agents.
+
+  Disclosure is scoped to the caller. An ordinary caller sees the leases its own session key holds
+  plus an aggregate count of everything else — enough to answer "can I connect?" without naming
+  another tenant. A caller presenting the agent's **operator** credential on the upgrade
+  (`X-RemoteBle-Operator: Bearer …`) sees every lease and its holder, under the same policy
+  `PERIPHERAL_BUSY` already uses. A missing or wrong operator credential is deliberately not a
+  connection failure — the session proceeds at normal scope and says so, so a caller can tell that
+  apart from an unreachable agent. `agent-rs` gained `--operator-token` /
+  `REMOTE_BLE_OPERATOR_TOKEN` for this; like the JVM agent's, it must be distinct from every client
+  credential, and startup fails otherwise.
+
+  `StatusSettingsDto.writePolicyEnforced` is reported from the start and is `false` on every
+  reference agent — see [`docs/proposals/agent-write-policy.md`](docs/proposals/agent-write-policy.md).
 
 - **A client can declare its identifier format.** `DefaultAgentSession` takes an optional
   `identifierFormat`, still defaulting to the host's. A consumer that never constructs a Kable

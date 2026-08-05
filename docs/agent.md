@@ -592,6 +592,15 @@ The endpoint and optional **status dashboard** share the port: `ws://<host>:8080
 clients and `http://<host>:8080/` for the dashboard. The dashboard is disabled unless the
 separate `REMOTE_BLE_OPERATOR_TOKEN` is configured; it must not reuse any client credential.
 
+That same operator credential has a second, transport-independent use: a client may present it on
+the WebSocket upgrade as `X-RemoteBle-Operator: Bearer <secret>` to widen what an `agent.status`
+reply discloses — every lease and its holder, rather than only its own. It grants nothing else, and
+an absent or wrong value is not a connection failure: the session proceeds at normal scope and says
+so in `operatorScope`. `agent-rs` accepts the same header (`--operator-token` /
+`REMOTE_BLE_OPERATOR_TOKEN`), which is what lets one status command work against every reference
+agent rather than only the one that serves HTTP. See §6.2 of the
+[conformance spec](agent-conformance-spec.md).
+
 The object graph (`AgentMonitor`, `EngineBleBackend` → `BleAgentBackend` →
 `AgentWebSocketServer`, plus `ConnectionWatcher`) is assembled by Koin in
 [`di/AgentModule.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/di/AgentModule.kt)

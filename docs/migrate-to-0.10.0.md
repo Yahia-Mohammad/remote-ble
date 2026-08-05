@@ -77,5 +77,35 @@ policy it is running rather than leaving it to the host. Read [scanning.md](scan
 relying on concurrent discovery; the one guarantee it deliberately does **not** make is Apple
 discovery completeness under mixed filter classes.
 
+## Operator change in the next release: two agent defaults move
+
+The following applies when upgrading the **agent**, not the client SDK, to the release after 0.10.0.
+Both changes are shipped defaults with no source change to make, which is exactly why they are
+called out here rather than left to a changelog line.
+
+| Setting | Was | Becomes | Override |
+|---|---|---|---|
+| `transportGrace` | 10 s | **120 s** | `REMOTE_BLE_TRANSPORT_GRACE_MS` / `--transport-grace-ms` |
+| Connection slot cap | 4, per client session | **8, agent-wide** | `AgentConfig.maxConnections` |
+
+**`transportGrace` 10 s → 120 s.** After a client's WebSocket drops, its peripherals stay leased —
+with their radio links warm — for two minutes instead of ten seconds. This is what makes a
+process-per-command client (a CLI, a script, a coding agent) resume rather than reconnect between
+invocations. The cost lands on **shared hardware**: a peripheral is unavailable to anyone else for
+up to two minutes after its holder walks away or is killed. On a shared rig, lower it explicitly.
+
+**Slot cap 4 → 8, and now agent-wide.** The number changed *and* so did what it counts. It was
+enforced per client session, so three clients could each open four links against one controller;
+it is now the host's total, enforced in `PeripheralRegistry`, and a lease inside its grace window
+counts as occupied. If you relied on the old number as a per-client budget, there is no per-client
+budget any more — the cap models the controller, which is the thing that was actually running out.
+
+Both are visible at runtime in an `agent.status` reply (`settings.transportGraceMs`, `slots.total`),
+so a deployment can confirm what it is actually running with rather than inferring it.
+
+`leaseGrace` deliberately **stays at 10 s**. Its path is an unsolicited BLE disconnect, where the
+radio link is already down; there is no warm link to preserve, so the argument for a long window
+does not carry over from the transport case.
+
 Review the [changelog](../CHANGELOG.md) for the cumulative behavior changes before upgrading a
 production deployment, especially if it skipped several GitHub-only agent releases.

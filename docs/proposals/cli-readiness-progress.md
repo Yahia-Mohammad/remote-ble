@@ -30,6 +30,9 @@ This branch is the upstream half.
 | `descriptors` | implemented in `agent-rs`; discovery reports them | `backend.rs`, `btleplug_impl.rs`, `server.rs` |
 | Slot cap default | aligned at 8, both agents | `BleAgent.kt`, `peripheral_lease.rs` |
 | Warm resume (U2 half) | replayed `connect` no longer re-drives a live radio link | `BleAgent.kt`, `server.rs`, both registries |
+| Status contract (U3) | `agent.status` op, both agents, caller-scoped disclosure | `AgentStatus.kt`, `status.rs`, `BleAgent.kt`, `server.rs` |
+| Operator scope | `X-RemoteBle-Operator` on the upgrade; `agent-rs` gained an operator token | `AgentWebSocketServer.kt`, `server.rs`, `main.rs` |
+| Grace deadlines | both registries now track *when* a release fires, not just that one is pending | `PeripheralRegistry.kt`, `peripheral_lease.rs` |
 
 **No capability now differs between two agents on the same host.** That was not the original scope
 — it grew out of the judgement that differing capability support between the reference agents is
@@ -38,26 +41,46 @@ writing a third agent.
 
 ### Verification
 
-`./gradlew build` green; `cargo test` 139 passed; `cargo clippy --all-targets` and
+`./gradlew build` green; `cargo test` 147 passed; `cargo clippy --all-targets` and
 `cargo fmt --check` clean. Note there is **no Gradle format-check task in this repo** — `formatCheck`
 belongs to the CLI repo, not this one.
 
 Tests that assert a defect is fixed were confirmed to fail with the fix disabled, rather than
-assumed meaningful: both warm-resume regressions, and the `scan.batch` coalescing test. The
+assumed meaningful: both warm-resume regressions, the `scan.batch` coalescing test, and — for U3 —
+the grace-deadline test (deadline write removed) and the disclosure tests on both agents (scope
+check forced true, which fails all three Rust status tests and the Kotlin caller-scoped one). The
 coalescing test has an inherent timing hazard (three emits could straddle a flush tick), so it was
 stressed 60× with no failures.
 
+The operator-header path is covered end to end over a real socket, not only at the unit level:
+`BleAgentOverWebSocketTest.agentStatusCarriesOperatorScopeOnlyForTheOperatorCredential` drives a
+client credential alone, a wrong operator secret, and the right one against the production server,
+and asserts the wrong secret **connects** at normal scope rather than failing the handshake.
+
 ### Wire-protocol position
 
-No new op, event, or capability string, and no `@SerialName` touched, so the cross-language CBOR
-interop gates were never in play. What did change is that `agent-rs` now advertises and emits
-things that already existed in the vocabulary — `slots`/`SlotState`, `scan.batch`/`ScanResultBatch`,
-and the two descriptor ops — reaching only clients that negotiate them.
+Through the capability-parity work: no new op, event, or capability string, and no `@SerialName`
+touched, so the cross-language CBOR gates were never in play. What changed is that `agent-rs` now
+advertises and emits things that already existed in the vocabulary — `slots`/`SlotState`,
+`scan.batch`/`ScanResultBatch`, and the two descriptor ops — reaching only clients that negotiate
+them.
 
 One consequence needed covering: `agent-rs` could always *decode* a `ScanResultBatch` but had never
 sent one, so that direction had no interop coverage while it could not fail.
 `RustAgentInteropTest.eventScanResultBatch` now pins a Kotlin client's decode of the
 definite-length CBOR the Rust agent actually emits.
+
+**U3 changed that position.** `agent.status` is the branch's first new `@SerialName` — one op, one
+result payload, one capability string — so the interop gates are now genuinely in play, and both
+directions are pinned: `RustAgentInteropTest.replyOkAgentStatus` (Kotlin decodes the exact ciborium
+bytes `agent-rs` emits) and `interop_tests::command_agent_status` (Rust decodes the exact
+kotlinx bytes for the op). The second one earned its keep immediately: Kotlin's `data object`
+encodes its payload as an **empty map**, and a serde unit type would have written null, so the only
+argument-less op in the protocol would have disagreed over one byte.
+
+The status DTOs also carry `skip_serializing_if` conditions on the Rust side that mirror Kotlin's
+`encodeDefaults = false` field by field. That is deliberate: it makes "diff the two agents' status
+replies" a real check rather than two encodings a decoder happens to tolerate.
 
 ## Findings worth carrying forward
 
@@ -76,27 +99,36 @@ definite-length CBOR the Rust agent actually emits.
 
 ## Still open
 
-### Next up: U3, a status contract
+### Next up: U7, per-principal write policy
 
-The largest remaining piece, and **design-first**: it defines a new wire surface, which makes it
-the first change here that would touch the CBOR interop gates. Agree the DTO shape and the
-disclosure rules before four agents implement them.
+The actual security boundary, and the last upstream ask other than publishing. **Designed, not
+built** — the shape is settled in
+[`agent-write-policy.md`](agent-write-policy.md) and implementation belongs on its own branch,
+because a security control deserves its own review surface and this branch's diff is already larger
+than its name suggests.
 
-Settled so far: it cannot be HTTP-only. `/api/state` is loopback-gated plaintext HTTP and
-`agent-rs` has no HTTP server at all, so the shape that reaches every reference agent is an
-additive, capability-gated op over the existing authenticated WebSocket session. Disclosure is
-scoped to the caller — a normal principal sees its own leases and aggregate counts; a caller with
-operator scope sees holders. It should carry agent identity/version, uptime, effective grace
-settings, connected-client summaries, and per-lease handle, display name, holder (as the caller is
-entitled to see it), connected/in-grace state, and remaining grace.
+The crux, and the reason it is worth reading that doc before writing any code: a new
+`ErrorKind.POLICY_DENIED` **cannot simply be sent**. An unknown enum name fails a v1 client's CBOR
+decode — the documented reason `RADIO_OFF` is capability-gated — so a denial kind must sit behind a
+`write.policy` capability, with `INVALID_REQUEST` as the ungated fallback. The one hook already
+built here is `StatusSettingsDto.writePolicyEnforced`, wired `false` on both agents.
 
-`LeaseDisclosure` is the precedent for the holder-visibility half and should be reused rather than
-re-derived.
+The CLI's own policy stays labelled advisory until this exists and is independently verified
+against a raw SDK client — not just through the CLI, which is the executable whose advisory
+property this replaces.
 
-### Then: U7, per-principal write policy
+### U3 is done — what it cost that the plan did not anticipate
 
-The actual security boundary, and a design exercise of its own. The CLI's own policy stays
-labelled advisory until this exists and is independently verified against a raw SDK client.
+Four pieces of bookkeeping neither agent kept, all of which had to exist before the reply could be
+assembled honestly:
+
+- **Grace deadlines.** Both registries recorded only *that* a release was pending, never when it
+  fires. `remainingGraceMs` is the number a process-per-command client actually needs.
+- **A Rust lease snapshot.** `agent-rs`'s registry had `free_slots`/`held_by` and no snapshot at all.
+- **Uptime.** The JVM agent had a private `startedAtMs`; `agent-rs` recorded nothing.
+- **Advertised names.** btleplug offers the name only on the scan path and nothing retained it, so
+  `name` would have been permanently null on Rust and populated on Kotlin — the same shape of
+  divergence this branch spent its first half removing. A bounded cache fixed it.
 
 ### Not in scope for this branch
 
@@ -119,13 +151,13 @@ the final blocker once everything else looks done.
 
 ## Before merging
 
-- This branch changes two shipped defaults (`transportGrace` 10 s → 120 s, slot cap 4 → 8) and the
-  meaning of a third (the slot cap became agent-wide). Defensible for a 0.10.1, but it is more
-  behavioural change than the branch name suggests, and the CHANGELOG carries the explanation
-  rather than a migration note. Decide whether that is how it should land.
-- Decide whether `leaseGrace` should move too. It stayed at 10 s on the argument that its radio
-  link is already down, which is a different situation from a client's transport dropping — but
-  that is a judgement, not a measurement.
+- ~~Two shipped defaults change with no migration note.~~ **Settled**: `docs/migrate-to-0.10.0.md`
+  now carries an operator-facing section for `transportGrace` 10 s → 120 s and the slot cap 4 → 8
+  becoming agent-wide, including what each costs on shared hardware and how to override it.
+- ~~Decide whether `leaseGrace` should move too.~~ **Settled: it stays at 10 s.** Its path is an
+  unsolicited BLE disconnect, where the radio link is already down — there is no warm link to
+  preserve, so the argument that justifies a long transport grace does not carry over. Recorded in
+  the migration note so it stops reading as an open question.
 - Re-run the agent parity checks if anything else lands on `main` first; the tables in
   `docs/agent-parity-verification.md` were updated by hand here.
 

@@ -627,7 +627,7 @@ class WebSocketEndToEndTest {
         // activeSubscriptionResumesAfterServerRestart proves observe.start replay via the resumed
         // notification stream.
         val received = Channel<Op.SetConnParams>(Channel.UNLIMITED)
-        fun spyBackend() = AgentBackend { incoming, outgoing, backendScope, _, _ ->
+        fun spyBackend() = AgentBackend { incoming, outgoing, backendScope, _, _, _ ->
             val codec = CborProtocolCodec()
             val tapped = incoming.onEach { bytes ->
                 val frame = codec.decode(bytes)

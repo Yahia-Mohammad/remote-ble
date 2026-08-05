@@ -44,8 +44,11 @@ struct Args {
     #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_LEASE_GRACE_MS")]
     lease_grace_ms: u64,
 
-    /// Transport-drop grace window in milliseconds
-    #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_TRANSPORT_GRACE_MS")]
+    /// Transport-drop grace window in milliseconds. Two minutes by default: the binding case is a
+    /// client with a process-per-command lifecycle (a CLI, a script, a coding agent) whose next
+    /// command must resume the same warm link. Lower it on a shared rig, where the trade is that a
+    /// peripheral stays leased for the whole window after its holder walks away.
+    #[arg(long, default_value_t = 120_000, env = "REMOTE_BLE_TRANSPORT_GRACE_MS")]
     transport_grace_ms: u64,
 
     /// How often the active (real GATT round-trip) liveness probe runs, in milliseconds

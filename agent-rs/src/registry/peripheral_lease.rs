@@ -20,7 +20,9 @@ impl Default for LeaseConfig {
         Self {
             default_exclusive: true,
             lease_grace: Duration::from_secs(10),
-            transport_grace: Duration::from_secs(10),
+            // See the `--transport-grace-ms` flag: long enough that a process-per-command client
+            // resumes its warm link on the next command.
+            transport_grace: Duration::from_secs(120),
             max_slots: 8,
         }
     }

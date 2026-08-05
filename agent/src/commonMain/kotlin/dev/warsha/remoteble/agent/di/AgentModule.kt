@@ -41,8 +41,22 @@ data class AgentConfig(
     val allowRemoteDashboard: Boolean = false,
     val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     val exclusiveByDefault: Boolean = true,
+    /**
+     * How long a lease survives an *unsolicited BLE disconnect* — the radio link is already down, so
+     * holding it only reserves the peripheral for a returning owner. Short on purpose.
+     */
     val leaseGrace: Duration = 10.seconds,
-    val transportGrace: Duration = 10.seconds,
+    /**
+     * How long a lease survives the *client's transport* dropping, with the radio link left warm.
+     *
+     * Two minutes because the binding case is a client whose process is short-lived: a CLI, a script,
+     * or a coding agent that runs one command per process and expects the next command to resume the
+     * same connection. Ten seconds is shorter than the gap between two commands a human types, so it
+     * silently paid a full reconnect and rediscovery on nearly every step. The cost of the longer
+     * window is contention — a peripheral stays leased for up to two minutes after its holder walks
+     * away — so an operator running a shared rig should lower it via `REMOTE_BLE_TRANSPORT_GRACE_MS`.
+     */
+    val transportGrace: Duration = 120.seconds,
     val livenessProbeInterval: Duration = 15.seconds,
     /** Scan isolation policy advertised for this process lifetime. */
     val scanConcurrency: ScanConcurrencyMode = ScanConcurrencyMode.MULTIPLEXED,

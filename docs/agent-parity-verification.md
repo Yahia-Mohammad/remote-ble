@@ -147,7 +147,7 @@ interop tests in `protocol/interop_tests.rs`).
 |---|---|---|
 | Acquire with exclusive/shared | ✅ | ✅ |
 | Re-acquire cancels grace | ✅ | ✅ |
-| Lease grace / transport grace | ✅ (10s/10s) | ✅ (10s/10s) |
+| Lease grace / transport grace | ✅ (10s/120s) | ✅ (10s/120s) |
 | Warm-link teardown on expiry | ✅ | ✅ |
 | `heldBy(clientKey)` for priming | ✅ | ✅ |
 | `onTransportDropped` | ✅ | ✅ |

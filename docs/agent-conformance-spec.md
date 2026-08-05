@@ -339,7 +339,8 @@ the peripheral within the window, the lease MUST persist; otherwise the agent MU
 ### 10.4 Transport-drop grace (`transportGrace`) & resume
 When a client's **transport** (WebSocket) drops, the agent:
 - MUST NOT immediately surrender the client's leases; it MUST keep the **radio link warm** and
-  schedule release after a configurable `transportGrace` (reference default **10 s**).
+  schedule release after a configurable `transportGrace` (reference default **120 s**, sized for
+  clients that run one command per process and resume on the next).
 - MUST allow a client that **reconnects with the same `X-RemoteBle-Client` id within the window**
   to **resume** — re-acquiring its own leases (its replayed `connect`s succeed as the owner, with
   no re-pair/rediscovery), which cancels the pending release.

@@ -282,11 +282,16 @@ Transport loss and radio loss are resumable grace cases; an explicit disconnect 
   lease at once; a later connect is a new connection.
 - **Unsolicited BLE disconnect → `leaseGrace` (10s).** A drop caught by `ConnectionWatcher`
   schedules release, debouncing radio flaps without treating an operator disconnect as resumable.
-- **Transport drop → `transportGrace` (10s), link kept warm.** When a client's WebSocket
+- **Transport drop → `transportGrace` (120s), link kept warm.** When a client's WebSocket
   drops, `BleAgent`'s job-completion teardown hands off to the registry, which leaves the
   radio link **up** and schedules release. A reconnect within the window **resumes** with no
   re-pair/rediscover; on expiry `onRelease` tears the warm link down. This is why a brief IP
-  blip no longer costs the BLE connection.
+  blip no longer costs the BLE connection. The window is two minutes rather than ten seconds
+  because the binding case is not a network blip but a **process-per-command client** — a CLI, a
+  script, or a coding agent — whose next command has to resume the same warm link, and the gap
+  between two such commands is a human or model thinking. The trade is contention: a peripheral
+  stays leased for up to the window after its holder walks away, so a shared rig should lower
+  `REMOTE_BLE_TRANSPORT_GRACE_MS`.
 - **Resume needs authenticated identity.** Each socket gets a fresh monotonic id; ownership is
   keyed by the verified credential principal plus the stable client id the SDK sends on every
   reconnect (`CLIENT_ID_HEADER`). A stable ID never crosses a principal boundary.

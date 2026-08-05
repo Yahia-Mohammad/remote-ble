@@ -43,7 +43,9 @@ import kotlinx.coroutines.sync.withLock
 class PeripheralRegistry(
     private val scope: CoroutineScope,
     private val leaseGrace: Duration = 10.seconds,
-    private val transportGrace: Duration = 10.seconds,
+    // Two minutes, because the binding case is a client with a process-per-command lifecycle whose
+    // next command must resume this lease; see AgentConfig.transportGrace for the trade.
+    private val transportGrace: Duration = 120.seconds,
     private val defaultExclusive: Boolean = true,
     private val onRelease: suspend (handle: String) -> Unit = {},
 ) {

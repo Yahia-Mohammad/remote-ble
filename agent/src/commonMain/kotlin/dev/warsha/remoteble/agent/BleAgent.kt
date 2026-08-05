@@ -459,10 +459,15 @@ class BleAgent(
 
     /** Rejects every device-bearing operation unless this connection owns a live lease. */
     private suspend fun authorizeConnected(device: DeviceHandle) {
-        when (registry.authorizeConnected(device.value, clientKey)) {
+        when (val authorization = registry.authorizeConnected(device.value, clientKey)) {
             PeripheralRegistry.Authorization.Granted -> Unit
-            PeripheralRegistry.Authorization.PeripheralBusy ->
-                throw AgentException(AgentError(ErrorKind.PERIPHERAL_BUSY, message = "peripheral in use"))
+            is PeripheralRegistry.Authorization.PeripheralBusy ->
+                throw AgentException(
+                    AgentError(
+                        ErrorKind.PERIPHERAL_BUSY,
+                        message = LeaseDisclosure.busyMessage(authorization.owner, clientKey),
+                    ),
+                )
             PeripheralRegistry.Authorization.NotConnected ->
                 throw AgentException(AgentError(ErrorKind.NOT_CONNECTED, message = "peripheral is not connected"))
         }
@@ -517,9 +522,14 @@ class BleAgent(
         if (state.withLock { device.value in connected }) return OpResult.Ok()
 
         // Cross-client ownership gate: another client holds an exclusive peripheral.
-        when (registry.acquire(device.value, clientKey)) {
+        when (val acquisition = registry.acquire(device.value, clientKey)) {
             is PeripheralRegistry.Acquisition.Denied ->
-                return OpResult.Err(AgentError(ErrorKind.PERIPHERAL_BUSY, message = "peripheral in use"))
+                return OpResult.Err(
+                    AgentError(
+                        ErrorKind.PERIPHERAL_BUSY,
+                        message = LeaseDisclosure.busyMessage(acquisition.owner, clientKey),
+                    ),
+                )
             PeripheralRegistry.Acquisition.Granted -> Unit
         }
 

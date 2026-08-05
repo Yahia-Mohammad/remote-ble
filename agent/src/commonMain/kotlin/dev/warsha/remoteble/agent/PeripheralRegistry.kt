@@ -83,8 +83,12 @@ class PeripheralRegistry(
     sealed interface Authorization {
         data object Granted : Authorization
 
-        /** Another client owns the live or grace-window lease. */
-        data object PeripheralBusy : Authorization
+        /**
+         * Another client owns the live or grace-window lease. [owner] is that client's session key,
+         * for disclosure through [LeaseDisclosure] — never rendered raw into a client-visible
+         * message, because half of it is text the holder chose.
+         */
+        data class PeripheralBusy(val owner: String) : Authorization
 
         /** No lease exists for this client, or its BLE link is not currently connected. */
         data object NotConnected : Authorization
@@ -144,7 +148,7 @@ class PeripheralRegistry(
     suspend fun authorizeConnected(handle: String, clientKey: String): Authorization = mutex.withLock {
         val lease = leases[handle] ?: return@withLock Authorization.NotConnected
         when {
-            lease.owner != clientKey -> Authorization.PeripheralBusy
+            lease.owner != clientKey -> Authorization.PeripheralBusy(lease.owner)
             !lease.connected -> Authorization.NotConnected
             else -> Authorization.Granted
         }

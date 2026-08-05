@@ -1,4 +1,5 @@
 use crate::protocol::errors::{AgentError, ErrorKind};
+use crate::registry::lease_disclosure;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
@@ -108,12 +109,14 @@ impl PeripheralRegistry {
                 return Ok(());
             }
             // A different client. The 0.9.0 surface is exclusive-only; a participant-based
-            // shared model is deferred rather than granting an untracked guest.
+            // shared model is deferred rather than granting an untracked guest. The holder is
+            // named through the disclosure policy, never by interpolating the raw session key —
+            // half of that key is text the holder chose, and it belongs to another tenant.
             return Err(AgentError::new(
                 ErrorKind::PeripheralBusy,
-                Some(format!(
-                    "Device {} is currently leased by client {}",
-                    device_handle, state.owner_client_id
+                Some(lease_disclosure::busy_message(
+                    &state.owner_client_id,
+                    client_id,
                 )),
             ));
         }
@@ -156,7 +159,10 @@ impl PeripheralRegistry {
             )),
             Some(state) if state.owner_client_id != client_id => Err(AgentError::new(
                 ErrorKind::PeripheralBusy,
-                Some("Peripheral is leased by another client".into()),
+                Some(lease_disclosure::busy_message(
+                    &state.owner_client_id,
+                    client_id,
+                )),
             )),
             Some(state) if !state.connected => Err(AgentError::new(
                 ErrorKind::NotConnected,

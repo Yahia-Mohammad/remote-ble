@@ -9,6 +9,7 @@ import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.isIdempotent
@@ -251,6 +252,21 @@ class DefaultAgentSession(
     private val scope: CoroutineScope,
     private val clientCapabilities: Set<String> = emptySet(),
     private val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
+    /**
+     * The identifier format this client declares in its handshake. Null resolves to the host's —
+     * the right answer for a Kable-facing consumer, which has to turn a device handle back into a
+     * native `Identifier`, and the reason the agent rewrites handles at all.
+     *
+     * A consumer that never constructs an `Identifier` should declare [IdentifierFormat.STRING]
+     * instead: it means "any string fits", so the agent stops synthesizing per-client handles and
+     * hands over its own opaque ones. That matters most for a client whose **processes are
+     * short-lived**. A synthesized handle is routed back through a per-connection reverse map that
+     * a fresh connection primes only from the leases that client still holds, so a handle learned
+     * by scanning in one process is unroutable in the next — while an untranslated agent handle
+     * addresses the same peripheral from any process, and matches what the agent's own dashboard
+     * and logs show.
+     */
+    private val identifierFormat: IdentifierFormat? = null,
 ) : AgentSession {
 
     // Do not own or cancel the caller's scope: a session gets its own child so endpoint/token
@@ -565,7 +581,7 @@ class DefaultAgentSession(
      */
     private suspend fun sendHello() {
         val caps = clientCapabilities + ALWAYS_OFFERED_CAPABILITIES
-        val fmt = currentIdentifierFormat()
+        val fmt = identifierFormat ?: currentIdentifierFormat()
         runCatchingNonCancellation {
             transport.send(
                 codec.encode(

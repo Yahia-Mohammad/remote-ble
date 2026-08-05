@@ -842,6 +842,61 @@ class BleAgentTest {
     }
 
     @Test
+    fun identifierTranslation_stringClientGetsHandlesThatRouteFromALaterConnection() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val registry = PeripheralRegistry(backgroundScope)
+
+        // A non-Kable client declares STRING: it holds any handle, so nothing is synthesized.
+        val first = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        first.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.STRING)
+        first.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+        val scanned = first.frames.firstScanResult(7).advertisement.device.value
+        assertEquals(realHandle.value, scanned)
+
+        // A *second connection* — the next process of a process-per-command client — that has
+        // scanned nothing and holds no lease still addresses the peripheral with that handle.
+        val second = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        second.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.STRING)
+        second.send(1, Op.Connect(DeviceHandle(scanned)))
+        assertEquals(OpResult.Ok(), second.frames.reply(1))
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun identifierTranslation_synthesizedHandleFromAnEarlierConnectionDoesNotRoute() = runTest {
+        // The behaviour the STRING opt-out above exists to avoid, pinned so it cannot change
+        // silently: synthesis is per connection and its reverse map is primed only from leases,
+        // so a handle a translating client scanned in one connection is meaningless in the next.
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend()
+        val synthesized = HandleTranslator.synthesize(IdentifierFormat.UUID, realHandle.value)
+
+        val fresh = Harness(
+            backgroundScope, backend,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        fresh.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        fresh.send(1, Op.Connect(DeviceHandle(synthesized)))
+        assertIs<OpResult.Ok>(fresh.frames.reply(1))
+
+        // It reached the radio as the synthetic string, not as the peripheral it names.
+        assertEquals(listOf(DeviceHandle(synthesized)), backend.connectCalls)
+    }
+
+    @Test
     fun identifierTranslation_strictModePassesHandlesThrough() = runTest {
         val realHandle = DeviceHandle("FA:KE:0A")
         val backend = FakeBleBackend(

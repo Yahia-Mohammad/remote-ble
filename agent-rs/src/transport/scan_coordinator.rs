@@ -36,6 +36,16 @@ impl ScanConcurrencyMode {
             }
         }
     }
+
+    /// The mode's lowercased name, as `agent.status` reports it and `--scan-concurrency` accepts
+    /// it. Matches the Kotlin agent's `ScanConcurrencyMode.name.lowercase()`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Multiplexed => "multiplexed",
+            Self::Single => "single",
+            Self::Uncontrolled => "uncontrolled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

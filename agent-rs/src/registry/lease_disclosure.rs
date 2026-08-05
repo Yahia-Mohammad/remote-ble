@@ -35,6 +35,28 @@ pub fn busy_message(owner_key: &str, requester_key: &str) -> String {
     }
 }
 
+/// A holder label for an `agent.status` lease row, addressed to `requester_key`.
+///
+/// The same policy as [`busy_message`], plus `operator_scope` — the caller presented the agent's
+/// operator credential on the upgrade, which is the management plane the Kotlin agent's dashboard
+/// already discloses holders on. Nothing here is reachable with a client bearer token alone,
+/// because the operator secret must be distinct from every client credential.
+///
+/// - **Own or same-principal lease** — `principal/client_id`.
+/// - **Another principal, operator scope** — `principal/client_id`.
+/// - **Another principal, no operator scope** — `principal` alone.
+pub fn holder_label(owner_key: &str, requester_key: &str, operator_scope: bool) -> String {
+    let (owner_principal, owner_client_id) = split(owner_key);
+    let (requester_principal, _) = split(requester_key);
+    let principal = sanitize(owner_principal);
+    match owner_client_id {
+        Some(client_id) if operator_scope || owner_principal == requester_principal => {
+            format!("{principal}/{}", sanitize(client_id))
+        }
+        _ => principal,
+    }
+}
+
 fn split(key: &str) -> (&str, Option<&str>) {
     match key.split_once(SESSION_KEY_SEPARATOR) {
         Some((principal, client_id)) => (principal, Some(client_id)),
@@ -132,5 +154,51 @@ mod tests {
             busy_message("lab-a", &key("lab-a", "rble-ci")),
             "peripheral in use by principal 'lab-a'"
         );
+    }
+
+    // ---- holder_label (agent.status lease rows) ----
+
+    #[test]
+    fn holder_label_names_the_client_id_within_one_principal() {
+        assert_eq!(
+            holder_label(
+                &key("lab-a", "rble-laptop"),
+                &key("lab-a", "rble-ci"),
+                false
+            ),
+            "lab-a/rble-laptop"
+        );
+    }
+
+    #[test]
+    fn holder_label_withholds_another_principals_client_id_without_operator_scope() {
+        assert_eq!(
+            holder_label(
+                &key("lab-b", "rble-laptop"),
+                &key("lab-a", "rble-ci"),
+                false
+            ),
+            "lab-b"
+        );
+    }
+
+    #[test]
+    fn operator_scope_is_the_only_thing_that_discloses_another_principals_client_id() {
+        assert_eq!(
+            holder_label(&key("lab-b", "rble-laptop"), &key("lab-a", "rble-ci"), true),
+            "lab-b/rble-laptop"
+        );
+    }
+
+    #[test]
+    fn holder_label_sanitizes_like_the_busy_message() {
+        // Same hazard, same treatment: a second disclosure path must not be a second policy.
+        let label = holder_label(
+            &key("lab-a", "evil\n all slots free"),
+            &key("lab-a", "rble-ci"),
+            false,
+        );
+        assert!(!label.contains('\n'), "{label}");
+        assert!(label.contains("\\u000a"), "{label}");
     }
 }

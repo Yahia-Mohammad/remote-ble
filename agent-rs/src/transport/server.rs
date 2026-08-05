@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,10 +19,12 @@ use crate::protocol::{
     codec::{decode_cbor, encode_cbor},
     errors::{AgentError, ErrorKind},
     events::{AdvertisementDto, AgentEvent, BleConnState},
-    frame::{Frame, capabilities},
+    frame::{Frame, PROTOCOL_VERSION, capabilities},
     op::Op,
-    results::OpResult,
+    results::{OpResult, ResultPayload},
+    status::{AgentStatusDto, LeaseStatusDto, StatusSettingsDto, StatusSlotsDto},
 };
+use crate::registry::lease_disclosure;
 use crate::registry::peripheral_lease::{LeaseAcquisition, PeripheralRegistry};
 use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
@@ -194,7 +196,37 @@ struct ExecuteContext<'a> {
     scan_bindings: &'a ScanBindings,
     scan_gates: &'a ScanGates,
     negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    /// Everything `agent.status` reports that no single op otherwise needs.
+    status: &'a StatusContext,
 }
+
+/// The agent-wide facts an `agent.status` reply is assembled from. One instance per process,
+/// shared by every connection.
+///
+/// Grouped rather than spread across [ExecuteContext] because they are one feature's inputs and
+/// exactly one op reads them.
+struct StatusSource {
+    /// When this agent process began serving.
+    started_at: Instant,
+    strict_identifiers: Arc<AtomicBool>,
+    live_sessions: Arc<LiveSessionRegistry>,
+    device_names: Arc<DeviceNames>,
+}
+
+/// [StatusSource] plus the one fact that is per-connection.
+struct StatusContext {
+    source: Arc<StatusSource>,
+    /// Whether this connection presented a valid operator credential on the upgrade. Widens what
+    /// `agent.status` discloses and authorizes nothing else.
+    operator_scope: bool,
+}
+
+/// The human-readable engine/platform label, in `ServerHello` and in `agent.status` alike.
+const AGENT_INFO: &str = concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"));
+
+/// Upgrade header carrying the optional operator credential. Mirrors the Kotlin
+/// `OPERATOR_HEADER`; the two agents must read the same name or a CLI works against only one.
+const OPERATOR_HEADER: &str = "X-RemoteBle-Operator";
 
 /// Per-connection reservations for streaming BLE work. Backend stream keys are scoped to the
 /// WebSocket generation, but backend implementations retain their own registrations, so cap and
@@ -348,6 +380,11 @@ pub struct ServerConfig {
     pub strict_identifiers: Arc<AtomicBool>,
     pub scan_concurrency: ScanConcurrencyMode,
     pub transport_grace: Duration,
+    /// Optional **operator** credential, distinct from every client credential. Presenting it on
+    /// the upgrade (`X-RemoteBle-Operator: Bearer …`) widens what `agent.status` discloses to that
+    /// session — every lease and its holder — and grants nothing else. `None` means no session can
+    /// ever obtain operator scope from this agent.
+    pub operator_token: Option<String>,
 }
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
@@ -431,6 +468,47 @@ impl LiveSessionRegistry {
         if generations.get(client_id) == Some(&generation) {
             generations.remove(client_id);
         }
+    }
+
+    /// How many client sessions are live right now, across every principal — what `agent.status`
+    /// reports. One entry per admitted identity, which is exactly one live socket each.
+    fn len(&self) -> usize {
+        self.generations.lock().len()
+    }
+}
+
+/// Last-seen advertised names, keyed by real radio handle, for `agent.status` lease rows.
+///
+/// btleplug hands the name to the scan path and nothing else keeps it, so without this the Rust
+/// agent would report a permanently null name where the Kotlin agent reports a real one — a
+/// divergence in what one status command answers depending on which agent it reached. Bounded, and
+/// evicted oldest-first: a long scan in a busy room must not grow this without limit.
+#[derive(Default)]
+struct DeviceNames {
+    names: parking_lot::Mutex<(HashMap<String, String>, VecDeque<String>)>,
+}
+
+impl DeviceNames {
+    const MAX_ENTRIES: usize = 256;
+
+    fn observe(&self, handle: &str, name: Option<&str>) {
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let mut guard = self.names.lock();
+        let (map, order) = &mut *guard;
+        if map.insert(handle.to_string(), name.to_string()).is_none() {
+            order.push_back(handle.to_string());
+            while order.len() > Self::MAX_ENTRIES {
+                if let Some(evicted) = order.pop_front() {
+                    map.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn get(&self, handle: &str) -> Option<String> {
+        self.names.lock().0.get(handle).cloned()
     }
 }
 
@@ -531,6 +609,7 @@ pub struct AgentServer {
     failed_auth_limiter: Arc<AuthFailureLimiter>,
     revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
     scan_coordinator: ScanCoordinator,
+    status_source: Arc<StatusSource>,
 }
 
 impl AgentServer {
@@ -545,14 +624,25 @@ impl AgentServer {
             config.transport_grace,
             MAX_ACTIVE_SCANS,
         );
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let status_source = Arc::new(StatusSource {
+            // Taken here rather than at first connection: uptime means "how long has this agent
+            // been serving", and a value that only starts once someone connects would answer a
+            // different question.
+            started_at: Instant::now(),
+            strict_identifiers: config.strict_identifiers.clone(),
+            live_sessions: live_sessions.clone(),
+            device_names: Arc::new(DeviceNames::default()),
+        });
         Self {
             config,
             backend,
             registry,
-            live_sessions: Arc::new(LiveSessionRegistry::default()),
+            live_sessions,
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
             revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             scan_coordinator,
+            status_source,
         }
     }
 
@@ -620,6 +710,8 @@ impl AgentServer {
             let revoked_principals = self.revoked_principals.clone();
             let scan_coordinator = self.scan_coordinator.clone();
             let scan_mode = self.config.scan_concurrency;
+            let status_source = self.status_source.clone();
+            let operator_token = self.config.operator_token.clone();
 
             tokio::spawn(Self::accept_connection_with_scan(
                 stream,
@@ -633,6 +725,8 @@ impl AgentServer {
                 revoked_principals,
                 scan_coordinator,
                 scan_mode,
+                status_source,
+                operator_token,
             ));
         }
     }
@@ -664,9 +758,16 @@ impl AgentServer {
         live_sessions: Arc<LiveSessionRegistry>,
         failed_auth_limiter: Arc<AuthFailureLimiter>,
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+        operator_token: Option<String>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status_source = Arc::new(StatusSource {
+            started_at: Instant::now(),
+            strict_identifiers: strict.clone(),
+            live_sessions: live_sessions.clone(),
+            device_names: Arc::new(DeviceNames::default()),
+        });
         Self::accept_connection_with_scan(
             stream,
             peer_addr,
@@ -684,6 +785,8 @@ impl AgentServer {
                 MAX_ACTIVE_SCANS,
             ),
             ScanConcurrencyMode::Multiplexed,
+            status_source,
+            operator_token,
         )
         .await
     }
@@ -701,12 +804,15 @@ impl AgentServer {
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status_source: Arc<StatusSource>,
+        operator_token: Option<String>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let mut client_id = format!("anon-{}", peer_addr);
         let mut principal = None;
         let mut session_generation = None;
+        let mut operator_scope = false;
 
         let callback = |req: &Request,
                         response: Response|
@@ -718,6 +824,32 @@ impl AgentServer {
                     .get("Authorization")
                     .and_then(|header| header.to_str().ok()),
             );
+
+            // Optional second credential, widening only what `agent.status` discloses. A missing
+            // or wrong value is deliberately NOT a rejection: the session proceeds at normal scope
+            // and says so in its status reply, so a client that asked for operator-only fields
+            // without the secret can tell that apart from an unreachable agent. A *wrong* value is
+            // still a guess at the operator secret, so it is rate-limited like any other.
+            if let Some(expected) = operator_token.as_deref() {
+                let offered = req
+                    .headers()
+                    .get(OPERATOR_HEADER)
+                    .and_then(|header| header.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .filter(|value| !value.is_empty());
+                if let Some(offered) = offered {
+                    operator_scope = constant_time_eq(expected, offered);
+                    if !operator_scope {
+                        let decision = failed_auth_limiter.record_failure(peer_addr.ip());
+                        if decision.should_log {
+                            tracing::warn!(
+                                "operator scope refused for {}: bad credential",
+                                peer_addr
+                            );
+                        }
+                    }
+                }
+            }
 
             if let Some(cid_hdr) = req.headers().get("X-RemoteBle-Client")
                 && let Ok(str_val) = cid_hdr.to_str()
@@ -794,6 +926,10 @@ impl AgentServer {
                     session_generation.expect("accepted session must have a generation"),
                     scan_coordinator,
                     scan_mode,
+                    StatusContext {
+                        source: status_source,
+                        operator_scope,
+                    },
                 )
                 .instrument(span)
                 .await;
@@ -819,6 +955,15 @@ impl AgentServer {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status = StatusContext {
+            source: Arc::new(StatusSource {
+                started_at: Instant::now(),
+                strict_identifiers: strict.clone(),
+                live_sessions: live_sessions.clone(),
+                device_names: Arc::new(DeviceNames::default()),
+            }),
+            operator_scope: false,
+        };
         Self::handle_connection_with_scan(
             ws_stream,
             client_id,
@@ -834,6 +979,7 @@ impl AgentServer {
                 MAX_ACTIVE_SCANS,
             ),
             ScanConcurrencyMode::Multiplexed,
+            status,
         )
         .await
     }
@@ -849,9 +995,11 @@ impl AgentServer {
         session_generation: u64,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status: StatusContext,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status = Arc::new(status);
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         // Per-connection handle translator (capability `identifier.translate`). Identity until a
         // ClientHello configures it; shared with the event pump (forward) and op tasks (reverse).
@@ -946,6 +1094,7 @@ impl AgentServer {
         let frame_tx_event = frame_tx.clone();
         let translator_event = translator.clone();
         let batch_capabilities = negotiated_capabilities.clone();
+        let device_names = status.source.device_names.clone();
         let event_task = tokio::spawn(async move {
             // Advertisements held for coalescing under capability `scan.batch`, keyed by scan id.
             // Batching lives here, at the one point both scan paths converge — the coordinator's
@@ -975,6 +1124,17 @@ impl AgentServer {
                 tokio::select! {
                     maybe_event = event_rx.recv() => {
                         let Some(event) = maybe_event else { break };
+                        // Remember advertised names here, where the handle is still the real one
+                        // and before batching can fold the advertisement away. This is the only
+                        // place btleplug offers a name, and `agent.status` has no other source for
+                        // it — without this the Rust agent would report a permanently null name
+                        // where the Kotlin agent reports a real one.
+                        if let AgentEvent::ScanResult { advertisement, .. } = &event {
+                            device_names.observe(
+                                &advertisement.device.value,
+                                advertisement.name.as_deref(),
+                            );
+                        }
                         // Read live rather than latched, so a scan opened before the hello starts
                         // batching once a later hello negotiates it — the same rule §5.3 states
                         // for handle translation on an already-running stream.
@@ -1108,10 +1268,7 @@ impl AgentServer {
                                 let reply_frame = Frame::ServerHello {
                                     version,
                                     capabilities: caps.clone(),
-                                    agent_info: Some(
-                                        concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"))
-                                            .into(),
-                                    ),
+                                    agent_info: Some(AGENT_INFO.into()),
                                 };
                                 *negotiated_capabilities.lock() = caps.clone();
                                 let _ = frame_tx.send(Outbound::Frame(reply_frame)).await;
@@ -1159,6 +1316,7 @@ impl AgentServer {
                                 let scan_bindings = scan_bindings.clone();
                                 let scan_gates = scan_gates.clone();
                                 let negotiated_capabilities = negotiated_capabilities.clone();
+                                let status = status.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
                                     Op::Write { device, .. } => {
@@ -1213,6 +1371,7 @@ impl AgentServer {
                                                 scan_bindings: &scan_bindings,
                                                 scan_gates: &scan_gates,
                                                 negotiated_capabilities: &negotiated_capabilities,
+                                                status: &status,
                                             },
                                         )
                                         .await;
@@ -1345,6 +1504,70 @@ impl AgentServer {
         })
     }
 
+    /// Builds this caller's view of the agent for `Op::AgentStatus`.
+    ///
+    /// Disclosure is decided here rather than at the client, because only the agent knows who is
+    /// asking: an ordinary caller sees the leases its own session key holds, and everything else
+    /// becomes `other_leases` plus the aggregate slot count — enough to answer "can I connect?"
+    /// without naming another tenant. A caller with operator scope sees every lease and its holder.
+    ///
+    /// Mirrors `BleAgent.agentStatus()` field for field; the two agents answering the same question
+    /// differently is the divergence this whole op exists to remove.
+    async fn agent_status(
+        client_id: &str,
+        registry: &PeripheralRegistry,
+        translator: &Arc<HandleTranslator>,
+        scan_mode: ScanConcurrencyMode,
+        status: &StatusContext,
+    ) -> AgentStatusDto {
+        let settings = registry.settings();
+        let leases = registry.snapshot();
+        let total = registry.total_slots();
+        let occupied = leases.len();
+        let visible: Vec<_> = leases
+            .iter()
+            .filter(|lease| status.operator_scope || lease.owner == client_id)
+            .collect();
+        AgentStatusDto {
+            agent_info: Some(AGENT_INFO.to_string()),
+            protocol_version: PROTOCOL_VERSION,
+            uptime_ms: status.source.started_at.elapsed().as_millis() as i64,
+            settings: StatusSettingsDto {
+                lease_grace_ms: settings.lease_grace.as_millis() as i64,
+                transport_grace_ms: settings.transport_grace.as_millis() as i64,
+                exclusive_by_default: settings.default_exclusive,
+                scan_concurrency: scan_mode.as_str().to_string(),
+                strict_identifiers: status.source.strict_identifiers.load(Ordering::Relaxed),
+                // No reference agent enforces a per-principal write policy yet; reported from the
+                // start so a client can tell an enforcing agent from a permissive one.
+                write_policy_enforced: false,
+            },
+            slots: StatusSlotsDto {
+                free: total.saturating_sub(occupied) as i32,
+                total: total as i32,
+            },
+            connected_clients: status.source.live_sessions.len() as i32,
+            leases: visible
+                .iter()
+                .map(|lease| LeaseStatusDto {
+                    handle: translator.to_client(&lease.handle),
+                    name: status.source.device_names.get(&lease.handle),
+                    holder: Some(lease_disclosure::holder_label(
+                        &lease.owner,
+                        client_id,
+                        status.operator_scope,
+                    )),
+                    mine: lease.owner == client_id,
+                    connected: lease.connected,
+                    in_grace: lease.in_grace,
+                    remaining_grace_ms: lease.remaining_grace_ms,
+                })
+                .collect(),
+            other_leases: (leases.len() - visible.len()) as i32,
+            operator_scope: status.operator_scope,
+        }
+    }
+
     async fn execute_op(op: Op, context: ExecuteContext<'_>) -> OpResult {
         let ExecuteContext {
             client_id,
@@ -1361,8 +1584,15 @@ impl AgentServer {
             scan_bindings,
             scan_gates,
             negotiated_capabilities,
+            status,
         } = context;
         match op {
+            // Names no device, so there is nothing to authorize against a lease: what a caller may
+            // see is decided inside, by who it is.
+            Op::AgentStatus => OpResult::ok(Some(ResultPayload::Status {
+                status: Self::agent_status(client_id, registry, translator, scan_mode, status)
+                    .await,
+            })),
             Op::ScanStart { filters, .. } if filters.len() > MAX_SCAN_FILTERS => {
                 OpResult::err(AgentError::new(
                     ErrorKind::InvalidRequest,
@@ -1860,6 +2090,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (first_client, _) = tokio_tungstenite::client_async(request(), first_client_io)
             .await
@@ -1877,6 +2108,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let second_err = tokio_tungstenite::client_async(request(), second_client_io)
             .await
@@ -1976,6 +2208,10 @@ mod tests {
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status_source: Arc<StatusSource>,
+        /// Configured operator secret, if this harness's agent has one. Per-client scope is chosen
+        /// by whether [ScanWsHarness::operator_client] sends it.
+        operator_token: Option<String>,
     }
 
     impl ScanWsHarness {
@@ -1989,17 +2225,26 @@ mod tests {
                 transport_grace,
                 MAX_ACTIVE_SCANS,
             );
+            let strict = Arc::new(AtomicBool::new(false));
+            let live_sessions = Arc::new(LiveSessionRegistry::default());
             Self {
                 fake,
                 backend,
                 registry,
                 credentials: Arc::new(HashMap::new()),
-                strict: Arc::new(AtomicBool::new(false)),
-                live_sessions: Arc::new(LiveSessionRegistry::default()),
+                strict: strict.clone(),
+                live_sessions: live_sessions.clone(),
                 failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
                 revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
                 scan_coordinator,
                 scan_mode,
+                status_source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: strict,
+                    live_sessions,
+                    device_names: Arc::new(DeviceNames::default()),
+                }),
+                operator_token: None,
             }
         }
 
@@ -2008,6 +2253,19 @@ mod tests {
             client_id: &str,
             capabilities: &[&str],
             expected_server_capabilities: &[&str],
+        ) -> ScanWsClient {
+            self.client_with_operator(client_id, capabilities, expected_server_capabilities, None)
+                .await
+        }
+
+        /// As [Self::client], but presenting `operator` on the upgrade. `Some` with the wrong
+        /// secret is a supported case on purpose: it must connect at normal scope, not fail.
+        async fn client_with_operator(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            operator: Option<&str>,
         ) -> ScanWsClient {
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -2024,12 +2282,22 @@ mod tests {
                 self.revoked_principals.clone(),
                 self.scan_coordinator.clone(),
                 self.scan_mode,
+                self.status_source.clone(),
+                self.operator_token.clone(),
             ));
             let mut request = "ws://localhost/agent".into_client_request().unwrap();
             request.headers_mut().insert(
                 "X-RemoteBle-Client",
                 client_id.parse().expect("client id header must be valid"),
             );
+            if let Some(operator) = operator {
+                request.headers_mut().insert(
+                    OPERATOR_HEADER,
+                    format!("Bearer {operator}")
+                        .parse()
+                        .expect("operator header must be valid"),
+                );
+            }
             let (mut ws, _) = tokio_tungstenite::client_async(request, client_io)
                 .await
                 .expect("scan client must complete the WebSocket handshake");
@@ -2960,6 +3228,134 @@ mod tests {
         client.close().await;
     }
 
+    // ---- agent.status (U3) ----
+
+    async fn request_status(client: &mut ScanWsClient, cid: i64) -> AgentStatusDto {
+        send_command(&mut client.ws, cid, Op::AgentStatus).await;
+        match recv_reply(&mut client.ws).await {
+            OpResult::Ok {
+                payload: Some(ResultPayload::Status { status }),
+            } => status,
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_status_shows_a_caller_its_own_leases_and_only_a_count_of_others() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        // A lease held by an entirely different principal, taken directly on the shared registry.
+        harness
+            .registry
+            .acquire_lease("dev-other", "lab-b\0ci-runner")
+            .expect("the other tenant's lease must be granted");
+
+        let mut client = harness.client("mine", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        let status = request_status(&mut client, 2).await;
+        assert_eq!(status.leases.len(), 1);
+        assert!(status.leases[0].mine);
+        assert!(status.leases[0].connected);
+        // The other tenant is a number, not a name: enough to explain the capacity, nothing more.
+        assert_eq!(status.other_leases, 1);
+        assert_eq!(status.slots.total, 8);
+        assert_eq!(status.slots.free, 6);
+        assert!(!status.operator_scope);
+        assert_eq!(status.connected_clients, 1);
+        assert_eq!(status.agent_info.as_deref(), Some(AGENT_INFO));
+        assert_eq!(status.settings.scan_concurrency, "multiplexed");
+        assert!(!status.settings.write_policy_enforced);
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn agent_status_discloses_every_holder_only_under_operator_scope() {
+        let mut harness =
+            ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        harness.operator_token = Some("operator-secret".to_string());
+        harness
+            .registry
+            .acquire_lease("dev-other", "lab-b\0ci-runner")
+            .expect("the other tenant's lease must be granted");
+
+        // No credential, then a wrong one: neither may fail the connection, and neither may widen
+        // disclosure. A wrong secret connecting normally is what lets a caller report "no operator
+        // credential" instead of "agent unreachable".
+        for offered in [None, Some("not-the-operator-secret")] {
+            let mut client = harness
+                .client_with_operator("plain", &[], &[], offered)
+                .await;
+            let status = request_status(&mut client, 1).await;
+            assert!(!status.operator_scope, "offered={offered:?}");
+            assert!(status.leases.is_empty(), "offered={offered:?}");
+            assert_eq!(status.other_leases, 1, "offered={offered:?}");
+            client.close().await;
+        }
+
+        let mut operator = harness
+            .client_with_operator("ops", &[], &[], Some("operator-secret"))
+            .await;
+        let status = request_status(&mut operator, 1).await;
+        assert!(status.operator_scope);
+        assert_eq!(status.leases.len(), 1);
+        // The other principal's client id is disclosed here and nowhere else.
+        assert_eq!(status.leases[0].holder.as_deref(), Some("lab-b/ci-runner"));
+        assert!(!status.leases[0].mine);
+        // Nothing is left over once every lease is listed.
+        assert_eq!(status.other_leases, 0);
+        operator.close().await;
+    }
+
+    #[tokio::test]
+    async fn agent_status_reports_remaining_grace_for_a_lease_whose_owner_dropped() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(60));
+        harness
+            .registry
+            .acquire_lease("dev-warm", "lab-b\0gone")
+            .expect("lease must be granted");
+        harness.registry.on_transport_drop("lab-b\0gone");
+
+        let mut operator = harness.client_with_operator("ops", &[], &[], None).await;
+        // Read as an operator would; without a token configured this connection has normal scope,
+        // so drive the assertion off the registry snapshot the reply is built from.
+        let lease = harness
+            .registry
+            .snapshot()
+            .into_iter()
+            .find(|l| l.handle == "dev-warm")
+            .expect("the warm lease must still be held");
+        assert!(lease.in_grace);
+        let remaining = lease
+            .remaining_grace_ms
+            .expect("a pending release must report how long is left");
+        // Measured against the registry's own transport grace, not the harness argument — that one
+        // configures the scan coordinator, and hard-coding a number here would silently pass if the
+        // two ever diverged.
+        let configured = harness.registry.settings().transport_grace.as_millis() as i64;
+        assert!(
+            remaining > configured - 5_000 && remaining <= configured,
+            "remaining was {remaining}ms against a {configured}ms window"
+        );
+        // And it is still occupying a slot, which is what the caller can see without disclosure.
+        let status = request_status(&mut operator, 1).await;
+        assert_eq!(status.slots.free, 7);
+        assert_eq!(status.other_leases, 1);
+        operator.close().await;
+    }
+
     #[tokio::test]
     async fn scan_conc_08_legacy_client_gets_legacy_agent_busy_on_contention() {
         let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
@@ -3339,6 +3735,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut alpha, _) =
             tokio_tungstenite::client_async(request_for("secret-a"), alpha_client_io)
@@ -3356,6 +3753,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut beta, _) =
             tokio_tungstenite::client_async(request_for("secret-b"), beta_client_io)
@@ -3423,6 +3821,7 @@ mod tests {
                 strict_identifiers: Arc::new(AtomicBool::new(false)),
                 scan_concurrency: ScanConcurrencyMode::Multiplexed,
                 transport_grace: Duration::from_secs(10),
+                operator_token: None,
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -3479,6 +3878,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut first, _) = tokio_tungstenite::client_async(request(), first_client_io)
             .await
@@ -3516,6 +3916,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let second_err = tokio_tungstenite::client_async(request(), second_client_io)
             .await
@@ -3744,6 +4145,15 @@ mod tests {
         let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
             std::collections::BTreeSet::new(),
         )));
+        let status = Box::leak(Box::new(StatusContext {
+            source: Arc::new(StatusSource {
+                started_at: Instant::now(),
+                strict_identifiers: strict.clone(),
+                live_sessions: Arc::new(LiveSessionRegistry::default()),
+                device_names: Arc::new(DeviceNames::default()),
+            }),
+            operator_scope: false,
+        }));
         ExecuteContext {
             client_id,
             backend,
@@ -3759,6 +4169,7 @@ mod tests {
             scan_bindings,
             scan_gates,
             negotiated_capabilities,
+            status,
         }
     }
 

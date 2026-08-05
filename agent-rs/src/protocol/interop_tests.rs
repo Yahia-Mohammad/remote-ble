@@ -329,3 +329,17 @@ fn event_scan_result_manufacturer_data_signed() {
         },
     );
 }
+
+#[test]
+fn command_agent_status() {
+    // A `data object` op: Kotlin encodes the payload half as an **empty map**, so `agent.status`
+    // arrives as `["agent.status", {}]`. A serde unit type would have written null here and the two
+    // agents would have disagreed over one byte on the only op with no arguments.
+    assert_kotlin_decodes_to(
+        "9f63636d64bf63636964181e626f709f6c6167656e742e737461747573bfffffffff",
+        Frame::Command {
+            cid: 30,
+            op: Op::AgentStatus,
+        },
+    );
+}

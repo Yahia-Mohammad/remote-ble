@@ -1,4 +1,5 @@
 use super::errors::AgentError;
+use super::status::AgentStatusDto;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -32,6 +33,7 @@ pub enum ResultPayload {
     Mtu { mtu: i32 },
     Bond { state: BleBondState },
     Rssi { rssi: i32 },
+    Status { status: AgentStatusDto },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +60,11 @@ struct BondPayload {
 #[derive(Serialize, Deserialize)]
 struct RssiPayload {
     rssi: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StatusPayload {
+    status: AgentStatusDto,
 }
 
 impl Serialize for ResultPayload {
@@ -91,6 +98,12 @@ impl Serialize for ResultPayload {
             ResultPayload::Rssi { rssi } => {
                 seq.serialize_element("rssi")?;
                 seq.serialize_element(&RssiPayload { rssi: *rssi })?;
+            }
+            ResultPayload::Status { status } => {
+                seq.serialize_element("status")?;
+                seq.serialize_element(&StatusPayload {
+                    status: status.clone(),
+                })?;
             }
         }
         seq.end()
@@ -152,9 +165,15 @@ impl<'de> Deserialize<'de> for ResultPayload {
                             .ok_or_else(|| de::Error::invalid_length(1, &self))?;
                         Ok(ResultPayload::Rssi { rssi: p.rssi })
                     }
+                    "status" => {
+                        let p: StatusPayload = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                        Ok(ResultPayload::Status { status: p.status })
+                    }
                     _ => Err(de::Error::unknown_variant(
                         &tag,
-                        &["bytes", "services", "mtu", "bond", "rssi"],
+                        &["bytes", "services", "mtu", "bond", "rssi", "status"],
                     )),
                 }
             }

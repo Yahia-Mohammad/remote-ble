@@ -36,6 +36,13 @@ struct Args {
     #[arg(long, env = "REMOTE_BLE_TOKENS")]
     tokens: Option<String>,
 
+    /// Operator credential, presented as `X-RemoteBle-Operator: Bearer <secret>` on the upgrade.
+    /// Widens what `agent.status` discloses to that session — every lease and its holder — and
+    /// grants nothing else. Must be distinct from every client credential, so a normal bearer
+    /// token cannot quietly acquire operator reach.
+    #[arg(long, env = "REMOTE_BLE_OPERATOR_TOKEN")]
+    operator_token: Option<String>,
+
     /// Permit an unauthenticated non-loopback listener for local development only.
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_INSECURE_LAN")]
     allow_insecure_lan: bool,
@@ -117,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         subscriber.init();
     }
     let credentials = parse_credentials(args.token.as_deref(), args.tokens.as_deref())?;
+    validate_operator_token(args.operator_token.as_deref(), &credentials)?;
     validate_bind(&args, !credentials.is_empty())?;
 
     tracing::info!(
@@ -173,6 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
         scan_concurrency: args.scan_concurrency,
         transport_grace: Duration::from_millis(args.transport_grace_ms),
+        operator_token: args.operator_token.clone(),
     };
 
     let backend_for_shutdown = ble_backend.clone();
@@ -188,6 +197,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// The operator secret must not be one of the client secrets.
+///
+/// Without this a deployment could hand out one token that authenticates a client *and* carries
+/// operator disclosure, which is exactly the "a normal bearer token must not silently gain operator
+/// access" rule the status contract is built on. Fails startup rather than warning: a
+/// misconfiguration here is invisible in normal operation and only shows up as one tenant reading
+/// another's client ids. Mirrors the same check in the Kotlin agent's `AgentWebSocketServer`.
+fn validate_operator_token(
+    operator_token: Option<&str>,
+    credentials: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(token) = operator_token else {
+        return Ok(());
+    };
+    if token.trim().is_empty() {
+        return Err("operator token must not be blank".into());
+    }
+    if credentials.values().any(|secret| secret == token) {
+        return Err("operator token must be distinct from every client credential".into());
+    }
     Ok(())
 }
 

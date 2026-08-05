@@ -21,6 +21,7 @@ pub mod capabilities {
     pub const CONN_PARAMS: &str = "conn.params";
     pub const SCAN_BATCH: &str = "scan.batch";
     pub const IDENTIFIER_TRANSLATION: &str = "identifier.translate";
+    pub const AGENT_STATUS: &str = "agent.status";
     pub const SCAN_CONCURRENCY_MULTIPLEXED: &str = "scan.concurrency.multiplexed";
     pub const SCAN_CONCURRENCY_SINGLE: &str = "scan.concurrency.single";
     pub const SCAN_CONCURRENCY_UNCONTROLLED: &str = "scan.concurrency.uncontrolled";
@@ -30,7 +31,12 @@ pub mod capabilities {
     /// Kotlin agent's `BleAgent.AGENT_CAPABILITIES`, and the reason it is a set rather than a
     /// per-capability decision — a client is entitled to the same answer from either agent on
     /// the same host, and an agent-level capability must not vary at all.
-    pub const AGENT_CAPABILITIES: &[&str] = &[CONNECTION_SLOTS, IDENTIFIER_TRANSLATION, SCAN_BATCH];
+    pub const AGENT_CAPABILITIES: &[&str] = &[
+        CONNECTION_SLOTS,
+        IDENTIFIER_TRANSLATION,
+        SCAN_BATCH,
+        AGENT_STATUS,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq)]

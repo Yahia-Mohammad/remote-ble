@@ -82,7 +82,12 @@ impl HandleTranslator {
     }
 
     /// Real radio handle → the handle the client sees. Records the reverse mapping for routing.
-    fn to_client(&self, real: &str) -> String {
+    ///
+    /// Public within the crate because handles now leave by two doors: inside an `AgentEvent` (see
+    /// [Self::to_client_event]) and inside an `agent.status` reply's lease rows. Both must mint the
+    /// client-facing form and register the reverse mapping — a handle a client reads from a status
+    /// reply has to be routable in its next op.
+    pub(crate) fn to_client(&self, real: &str) -> String {
         if self.strict.load(Ordering::Relaxed) {
             return real.to_string();
         }
@@ -269,7 +274,10 @@ fn map_op_device(op: Op, f: impl Fn(DeviceHandle) -> DeviceHandle) -> Op {
             profile,
             hint,
         },
-        other @ (Op::ScanStart { .. } | Op::ScanStop { .. } | Op::ObserveStop { .. }) => other,
+        other @ (Op::ScanStart { .. }
+        | Op::ScanStop { .. }
+        | Op::ObserveStop { .. }
+        | Op::AgentStatus) => other,
     }
 }
 

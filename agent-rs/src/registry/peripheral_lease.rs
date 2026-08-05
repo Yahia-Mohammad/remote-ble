@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -53,6 +53,10 @@ struct PeripheralState {
     /// Pending release timer, if the owner is (temporarily) gone. `None` when the
     /// owner is present.
     grace_task: Option<JoinHandle<()>>,
+    /// When [Self::grace_task] will fire. Tracked alongside the task because "a release is
+    /// pending" and "the release is 4 seconds away" are different answers, and only the second
+    /// one tells a process-per-command client whether its next invocation will resume.
+    grace_deadline: Option<Instant>,
     /// Bumped whenever the owner returns (re-acquire/connect) or the lease is dropped.
     /// A fired grace timer only releases if the epoch still matches the one it captured,
     /// so a resume that raced the timer wins without needing the abort to land first.
@@ -66,8 +70,36 @@ impl PeripheralState {
         if let Some(task) = self.grace_task.take() {
             task.abort();
         }
+        // Goes with the task: a stale deadline would report a release that is no longer coming.
+        self.grace_deadline = None;
         self.epoch = self.epoch.wrapping_add(1);
     }
+
+    /// Whether a release timer is running, and how long is left on it.
+    fn grace_state(&self) -> (bool, Option<i64>) {
+        let pending = self.grace_task.as_ref().is_some_and(|t| !t.is_finished());
+        if !pending {
+            return (false, None);
+        }
+        // Saturating at zero: the timer can be past due but not yet resumed on the runtime, and a
+        // negative "time remaining" is a number no caller can do anything sensible with.
+        let remaining = self.grace_deadline.map(|deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i64
+        });
+        (true, remaining)
+    }
+}
+
+/// A consistent view of one peripheral's ownership. Mirrors the Kotlin registry's `LeaseInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseInfo {
+    pub handle: String,
+    pub owner: String,
+    pub connected: bool,
+    pub in_grace: bool,
+    pub remaining_grace_ms: Option<i64>,
 }
 
 struct Inner {
@@ -162,6 +194,7 @@ impl PeripheralRegistry {
                 owner_client_id: client_id.to_string(),
                 connected: false,
                 grace_task: None,
+                grace_deadline: None,
                 epoch: 0,
             },
         );
@@ -323,6 +356,35 @@ impl PeripheralRegistry {
             }
         });
         state.grace_task = Some(task);
+        state.grace_deadline = Some(Instant::now() + after);
+    }
+
+    /// A consistent snapshot of every current lease, for `agent.status`.
+    ///
+    /// Deliberately unfiltered: who may see which row is a **disclosure** decision, made by the
+    /// caller's session in `transport::server` against `lease_disclosure`, not something the
+    /// ownership registry should be second-guessing.
+    pub fn snapshot(&self) -> Vec<LeaseInfo> {
+        self.inner
+            .state
+            .lock()
+            .iter()
+            .map(|(handle, state)| {
+                let (in_grace, remaining_grace_ms) = state.grace_state();
+                LeaseInfo {
+                    handle: handle.clone(),
+                    owner: state.owner_client_id.clone(),
+                    connected: state.connected,
+                    in_grace,
+                    remaining_grace_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// The effective ownership settings this process is running with, for `agent.status`.
+    pub fn settings(&self) -> &LeaseConfig {
+        &self.inner.config
     }
 
     /// Free connection slots, sampled once. The `SlotState` feed uses [Self::occupancy] instead —

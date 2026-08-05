@@ -140,6 +140,9 @@ pub enum Op {
         profile: ConnProfile,
         hint: Option<ConnParamHint>,
     },
+    /// Caller-scoped agent snapshot (capability `agent.status`). Carries no arguments: the answer
+    /// is scoped by who is asking, which the authenticated session already establishes.
+    AgentStatus,
 }
 
 impl Op {
@@ -150,7 +153,10 @@ impl Op {
     /// *authorized* before they are answered — see the catch-all arm in `transport::server`.
     pub fn device_handle(&self) -> Option<&DeviceHandle> {
         match self {
-            Op::ScanStart { .. } | Op::ScanStop { .. } | Op::ObserveStop { .. } => None,
+            Op::ScanStart { .. }
+            | Op::ScanStop { .. }
+            | Op::ObserveStop { .. }
+            | Op::AgentStatus => None,
             Op::Connect { device }
             | Op::Disconnect { device }
             | Op::Discover { device }
@@ -168,6 +174,14 @@ impl Op {
         }
     }
 }
+
+/// The payload half of `agent.status`, which carries nothing.
+///
+/// A struct with no fields rather than a serde unit type on purpose: Kotlin's `data object` encodes
+/// as an **empty map**, and only the braced form writes `{}` on both sides. A unit struct would
+/// write null and the two agents would disagree over one byte.
+#[derive(Serialize, Deserialize)]
+struct AgentStatusPayload {}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -394,6 +408,10 @@ impl Serialize for Op {
                     hint: *hint,
                 })?;
             }
+            Op::AgentStatus => {
+                seq.serialize_element("agent.status")?;
+                seq.serialize_element(&AgentStatusPayload {})?;
+            }
         }
         seq.end()
     }
@@ -556,6 +574,12 @@ impl<'de> Deserialize<'de> for Op {
                             hint: p.hint,
                         })
                     }
+                    "agent.status" => {
+                        let _: AgentStatusPayload = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                        Ok(Op::AgentStatus)
+                    }
                     _ => Err(de::Error::unknown_variant(
                         &tag,
                         &[
@@ -576,6 +600,7 @@ impl<'de> Deserialize<'de> for Op {
                             "conn.priority",
                             "rssi",
                             "conn.params",
+                            "agent.status",
                         ],
                     )),
                 }

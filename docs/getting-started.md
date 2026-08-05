@@ -3,13 +3,16 @@
 [← back to index](README.md)
 
 This is a hands-on tutorial: stand up an agent, write a client that talks to it, and
-see the **one-line local↔remote swap** that is the whole point of the system. It
-assumes you can build the repo (`./gradlew build`) and have read nothing else.
+see the **one-line local↔remote swap** the client SDK gives you. It assumes you can
+build the repo (`./gradlew build`) and have read nothing else.
 
 > **Mental model.** You write your app against Kable's `Peripheral` / `Scanner`
 > interfaces, exactly as you would for local Bluetooth. At *construction* time you
 > choose whether a given `Peripheral` is driven by the local radio or by a remote
 > **agent** over a WebSocket. Everything downstream is identical. That's it.
+>
+> (What travels over that WebSocket is a documented, versioned protocol rather than a
+> private one — see [protocol.md](protocol.md) when you want to look underneath the swap.)
 
 ---
 

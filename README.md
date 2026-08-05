@@ -5,16 +5,41 @@
 [![GitHub release](https://img.shields.io/github/v/release/Yahia-Mohammad/remote-ble?label=GitHub%20release&sort=semver)](https://github.com/Yahia-Mohammad/remote-ble/releases/latest)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-A "remote mode" for a Kotlin Multiplatform BLE stack: client app code written against
+RemoteBLE operates Bluetooth Low Energy devices across a network: an **agent** near the device
+owns the physical radio, and a **client** drives it over an IP link. With the bundled Kotlin
+Multiplatform **client SDK**, app code written against
 [Kable](https://github.com/JuulLabs/kable)'s `Peripheral` runs **unchanged** whether the
-peripheral is physically local or driven by a remote **agent** over an IP link
-(WebSocket). Not affiliated with JUUL Labs or the Kable project.
+peripheral is physically local or remote. The two sides meet on a versioned,
+capability-negotiated **protocol** — specified normatively in the
+[conformance spec](docs/agent-conformance-spec.md), implemented independently in Kotlin and
+Rust, and interop-tested against the exact CBOR on the wire. Not affiliated with JUUL Labs or
+the Kable project.
 
 Inspired by [ESPHome's Bluetooth Proxy](https://esphome.io/components/bluetooth_proxy/),
 which pioneered relaying the full BLE/GATT surface over IP behind the host BLE library's own
 interface (Bleak + Home Assistant there, Kable here) — RemoteBLE applies the same idea to
 Kotlin Multiplatform and OS-class hosts for development, testing, and CI. Independent and
 not affiliated with the ESPHome or Home Assistant projects.
+
+## System at a glance
+
+RemoteBLE has three core parts:
+
+1. **Protocol** — the implementation-independent wire contract: handshake, capabilities,
+   commands, replies, events, errors, and CBOR/JSON codecs. It has no BLE or networking code.
+2. **Agent** — the radio-side service that implements the protocol, arbitrates access to
+   peripherals, and maps protocol operations onto a real or simulated BLE backend. The repository
+   contains interoperable Kotlin and Rust agents.
+3. **Client SDK** — the bundled Kotlin Multiplatform client implementation: transport, session,
+   reconnection, GATT/scanning operations, and Kable-compatible adapters.
+
+The protocol is the interoperability boundary: agents and clients never depend on each other in
+production — they meet on the wire. What each side must do is normative in
+[docs/agent-conformance-spec.md](docs/agent-conformance-spec.md), and
+[`RustAgentInteropTest`](protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt)
+pins the exact CBOR the Rust agent emits and proves the Kotlin side decodes it. Kable is a
+public integration surface of the bundled client SDK, and an internal radio engine of the
+Kotlin agent.
 
 ## Installation
 
@@ -72,26 +97,28 @@ dependency — see [Running the agent](#running-the-agent).
 - **Two agents, one wire contract** — a Kotlin/Kable and a native Rust/`btleplug` agent, both speaking the same versioned, capability-negotiated **CBOR** protocol (JSON for debugging), interop-tested.
 - **Optional bearer-token auth** at the handshake, plus an optional status dashboard protected by a separate operator credential (native Compose UI on the phone agents).
 
-## How it works
+## How the system works
 
 In **remote** mode, `RemotePeripheral`/`RemoteScanner` implement Kable's own `Peripheral`/
 `Scanner` interfaces, but forward every call over an IP link to an **agent** process near the
 physical device, which drives the real radio and streams results/events back:
 
 ```mermaid
-flowchart LR
+flowchart TB
+    Protocol["RemoteBLE protocol<br/>———————<br/>handshake + capabilities<br/>Frame · Op · OpResult · AgentEvent<br/>CBOR codec (JSON for debugging)"]
     Client["Client process · phone / laptop / CI<br/>———————<br/>app code<br/>↓<br/>Kable Peripheral<br/>(= RemotePeripheral / RemoteScanner)<br/>↓<br/>AgentSession<br/>↓<br/>AgentTransport"]
-    Agent["Agent process · near the BLE device<br/>———————<br/>AgentWebSocketServer<br/>↓<br/>BleAgent<br/>↓<br/>BleBackend<br/>↓<br/>real radio<br/>(CoreBluetooth · Android BLE · btleplug)"]
+    Agent["Agent process · near the BLE device<br/>———————<br/>AgentWebSocketServer<br/>↓<br/>BleAgent<br/>(leases · scan coordination)<br/>↓<br/>BleBackend<br/>↓<br/>real radio<br/>(CoreBluetooth · Android BLE · btleplug)"]
     Dev(["BLE<br/>device"])
-    Client -->|"Command<br/>(WebSocket / CBOR)"| Agent
-    Agent -->|"Reply / Event"| Client
+    Client -.->|"implements"| Protocol
+    Agent -.->|"implements"| Protocol
+    Client <-->|"commands · replies · events<br/>(WebSocket / CBOR)"| Agent
     Agent --> Dev
 ```
 
-In **local** mode it's the box on the left minus the IP link — ordinary Kable, talking to the
-radio on the same device. Switching modes is a factory choice (`peripheralFor(mode, …)`), not an
-app-code change. See [docs/README.md](docs/README.md#architecture) for the full layered
-breakdown inside the client SDK.
+In **local** mode the client bypasses the RemoteBLE protocol and agent: ordinary Kable talks to
+the radio on the same device. Switching modes is a factory choice (`peripheralFor(mode, …)`), not
+an app-code change. See [docs/README.md](docs/README.md#architecture) for the full system and
+component architecture.
 
 📖 **Docs:** new to this? Start with the [**getting-started tutorial**](docs/getting-started.md).
 Full implementation reference (APIs, internals, rationale) in [`docs/`](docs/README.md) —
@@ -110,9 +137,10 @@ the accepted security/lifecycle hardening. The future
 
 | Module | Role | Deps |
 |---|---|---|
+| `:log` | Shared multiplatform logging facade used across the Kotlin components | No external dependencies. Targets: JVM + Android + iOS |
 | `:protocol` | The wire contract (`Frame`/`Op`/`OpResult`/`AgentEvent`) + CBOR/JSON codec | kotlinx-serialization only — **no BLE/network**. Targets: JVM + Android + iOS |
-| `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, coroutines, Kable. Targets: JVM (tests) + Android + iOS |
-| `:agent` | Remote Bluetooth agent (Kotlin) + live status dashboard + a Compose Multiplatform status UI (Android/iOS). Run via `agent/run-agent.sh` (JVM) or the `android-agent`/`ios-agent` apps | `:protocol`, coroutines, Ktor server, Kable, Compose Multiplatform. Targets: JVM + Android + iOS |
+| `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, `:log`, coroutines, Kable. Targets: JVM (tests) + Android + iOS |
+| `:agent` | Remote Bluetooth agent (Kotlin) + live status dashboard + a Compose Multiplatform status UI (Android/iOS). Run via `agent/run-agent.sh` (JVM) or the `android-agent`/`ios-agent` apps | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform. Targets: JVM + Android + iOS |
 | `agent-rs` | Native cross-platform Bluetooth agent (Rust 2024). Run via the self-bootstrapping `run-agent-rs.sh` | tokio, tokio-tungstenite, btleplug, serde/ciborium. Targets: macOS + Linux |
 | `:e2e-runner` | Live E2E runner (`jvmRun`) + radio-less scan smoke test (`scanRun`) | `:client-sdk` (JVM). See [README](e2e-runner/README.md) |
 | `:client-ui` | The central demo's UI (`RemoteBleApp`: `ScanScreen`/`DeviceScreen`) + orchestration (`RemoteBleController`) — Compose Multiplatform, shared by `:android-client` and `ios-client/` | `:client-sdk`. Targets: Android (library) + iOS |

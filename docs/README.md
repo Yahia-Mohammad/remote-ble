@@ -1,9 +1,13 @@
 # RemoteBLE — System Reference
 
-This is the **implementation reference** for the RemoteBLE transport: what each
-piece is, the public API surface, how the pieces fit, and *why* they are built the
-way they are. It documents the system as it actually exists in the tree, not as a
-plan.
+This is the **system reference** for RemoteBLE: its protocol, agent implementations,
+client implementation, public API surfaces, and the reasons behind their boundaries.
+It documents the system as it actually exists in the tree, not as a plan.
+
+RemoteBLE is organized around a protocol. The protocol is the stable interoperability contract;
+agents implement its radio-facing side, and clients implement its consumer-facing side. This
+repository includes two agents and a Kotlin Multiplatform client SDK whose public adapters
+use Kable.
 
 For quickstart/build commands see [`../README.md`](../README.md).
 
@@ -15,18 +19,24 @@ maintainer-internal and are not part of the published docs.
 
 ## Documents
 
-Grouped by who they're for. If you're evaluating or building against this SDK, the first two
-sections are everything you need — the rest exists for people extending the protocol itself or
-auditing how the release was verified.
+Grouped by what you are doing. Start with the system map, then follow the agent or client path
+that matches your role; the final sections are for extending the protocol or auditing a release.
+
+### Start here
+
+| Document | Covers |
+|---|---|
+| [architecture](#architecture) (below) | **The system map:** protocol at the interoperability boundary, agent and client roles, module dependencies, seams, and glossary |
+| [getting-started.md](getting-started.md) | Run an agent, connect the bundled Kable-compatible client, and exercise the complete system |
+| [protocol.md](protocol.md) | **The contract itself** — every frame/op/result/event type, negotiation, codec, serialization rule. Read it end-to-end if you're implementing an endpoint; skim it if you're just using the bundled client |
 
 ### For app developers
 
 | Document | Covers |
 |---|---|
-| [getting-started.md](getting-started.md) | **Start here if you're building an app.** Run an agent, connect a client, the local↔remote swap, lifecycle & errors |
 | [scanning.md](scanning.md) | **Discovery, for app developers** — filters and their exact semantics, holding two scanners at once, the three agent scan-concurrency modes, replay/late-join, reconnect behaviour, limits |
 | [migrate-to-0.10.0.md](migrate-to-0.10.0.md) | Upgrade a Maven Central consumer to 0.10.0; `authToken` provider change and platform compatibility |
-| [client-sdk.md](client-sdk.md) | The client SDK: transport → session → GATT/scan → Kable adapters, every public class |
+| [client-sdk.md](client-sdk.md) | The bundled client implementation: transport → session → GATT/scan → Kable adapters, every public class |
 | [simulation.md](simulation.md) | Versioned radio-less JVM agent profile, CLI use, supported behaviors, and validation limits — test app logic in CI with no Bluetooth hardware |
 
 ### Running an agent
@@ -45,9 +55,7 @@ this one is built.
 
 | Document | Covers |
 |---|---|
-| [architecture](#architecture) (below) | The layered model, module map, the seams, glossary |
 | [agent-conformance-spec.md](agent-conformance-spec.md) | **The normative conformance spec** — what an independent agent/proxy (or client) MUST do to interoperate. The *contract*, language-agnostic; the others explain *why*. |
-| [protocol.md](protocol.md) | The wire contract: every frame/op/result/event type, the codec, serialization rules |
 | [flows.md](flows.md) | End-to-end walkthroughs (with sequence diagrams): connect, read, write, observe, scan, reconnect, auth |
 | [design-decisions.md](design-decisions.md) | The rationale — *why it is built this way*; concurrency, errors, ids, timeouts, MTU, reconnection |
 | [prior-art.md](prior-art.md) | **Credit where due** — the ESPHome Bluetooth Proxy architecture RemoteBLE is inspired by, a feature-by-feature comparison + where the two diverge, and the CBOR-vs-Protobuf serialization rationale |
@@ -96,12 +104,15 @@ host.
 
 ## What this system is
 
-A **"remote mode" for a Kotlin-Multiplatform BLE stack.** Application code is
-written once against [Kable](https://github.com/JuulLabs/kable)'s `Peripheral` /
-`Scanner` interfaces. At construction time you choose whether that `Peripheral` is
-driven by the **local radio** (ordinary Kable) or by a **remote agent** — a process
-near the physical device that owns the real Bluetooth radio and is reached over an
-IP link (WebSocket today). The app logic in between does not change.
+A **protocol-centered remote BLE system.** The protocol defines how a client controls a BLE
+radio across a network without prescribing either endpoint's language, BLE library, or transport
+implementation. An **agent** near the physical device owns the radio and serves that contract; a
+**client** sends commands and consumes replies and events.
+
+The bundled Kotlin Multiplatform client SDK adds one integration on top of that: application
+code written against [Kable](https://github.com/JuulLabs/kable)'s `Peripheral` / `Scanner`
+interfaces can choose at construction time between the **local radio** (ordinary Kable) and a
+**remote agent**, with nothing above that boundary changing.
 
 ```
    ┌──────────────────────────┐                       ┌───────────────────────────┐
@@ -127,15 +138,17 @@ IP link (WebSocket today). The app logic in between does not change.
                                                                    └─────────┘
 ```
 
-The promise, proven by [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt):
+The bundled client's Kable compatibility promise, proven by [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt):
 a function written purely against Kable's `Peripheral` compiles and runs unchanged
 against a `RemotePeripheral` talking to an agent over a real WebSocket.
 
 ## Architecture
 
-The system is three Gradle modules and a strict **layered** design inside the
-client. Every boundary is a narrow interface ("a seam") so each layer can be tested
-and swapped in isolation.
+The system has three core responsibilities — protocol, agent, and client — with multiple
+implementations and supporting modules. The dependency direction makes the protocol the center:
+both sides depend on the contract, while neither production side depends on the other. Every
+boundary is a narrow interface ("a seam") so layers and implementations can be tested and swapped
+in isolation.
 
 | Module / Project | Role | Dependencies | Targets |
 |---|---|---|---|

@@ -1573,6 +1573,22 @@ impl AgentServer {
                 }
                 OpResult::from_unit(backend.write(&device, &char, &value, with_response).await)
             }
+            Op::ReadDescriptor { device, desc } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                    return OpResult::err(e);
+                }
+                OpResult::from_payload(backend.read_descriptor(&device, &desc).await)
+            }
+            Op::WriteDescriptor {
+                device,
+                desc,
+                value,
+            } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                    return OpResult::err(e);
+                }
+                OpResult::from_unit(backend.write_descriptor(&device, &desc, &value).await)
+            }
             Op::RequestMtu { device, mtu } => {
                 if let Err(e) = registry.authorize_connected(&device.value, client_id) {
                     return OpResult::err(e);
@@ -3522,6 +3538,10 @@ mod tests {
         reads: AtomicUsize,
         connects: AtomicUsize,
         disconnects: AtomicUsize,
+        /// Descriptor ops this backend was actually asked to perform, so a test can tell a
+        /// dispatched op from one the catch-all `Unsupported` arm swallowed.
+        descriptor_reads: Mutex<Vec<DescRef>>,
+        descriptor_writes: Mutex<Vec<(DescRef, Vec<u8>)>>,
     }
 
     /// Holds the reader pending forever while every writer attempt fails. This models a socket
@@ -3619,6 +3639,27 @@ mod tests {
             _mtu: i32,
         ) -> Result<ResultPayload, AgentError> {
             Err(AgentError::new(ErrorKind::Unsupported, None))
+        }
+        async fn read_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            desc_ref: &DescRef,
+        ) -> Result<ResultPayload, AgentError> {
+            self.descriptor_reads.lock().push(desc_ref.clone());
+            Ok(ResultPayload::Bytes {
+                value: vec![0x01, 0x00],
+            })
+        }
+        async fn write_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            desc_ref: &DescRef,
+            value: &[u8],
+        ) -> Result<(), AgentError> {
+            self.descriptor_writes
+                .lock()
+                .push((desc_ref.clone(), value.to_vec()));
+            Ok(())
         }
         async fn start_observe(
             &self,
@@ -3775,6 +3816,108 @@ mod tests {
             matches!(result, OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy)
         );
         assert_eq!(fake.reads.load(Ordering::Relaxed), 0);
+    }
+
+    fn test_descriptor() -> DescRef {
+        DescRef {
+            service: "180d".into(),
+            characteristic: "2a37".into(),
+            // Client Characteristic Configuration — the descriptor a client actually reaches for.
+            descriptor: "2902".into(),
+            instance: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn descriptor_read_reaches_the_backend() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::ReadDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+
+        // Dispatched, not swallowed by the catch-all arm that used to answer UNSUPPORTED here.
+        assert!(matches!(
+            result,
+            OpResult::Ok {
+                payload: Some(ResultPayload::Bytes { ref value }),
+            } if value == &[0x01, 0x00]
+        ));
+        assert_eq!(*fake.descriptor_reads.lock(), vec![test_descriptor()]);
+    }
+
+    #[tokio::test]
+    async fn descriptor_write_reaches_the_backend_with_its_value() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+                value: vec![0x01, 0x00],
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+
+        assert!(matches!(result, OpResult::Ok { .. }));
+        assert_eq!(
+            *fake.descriptor_writes.lock(),
+            vec![(test_descriptor(), vec![0x01, 0x00])]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_is_rejected_before_a_descriptor_op_reaches_the_radio() {
+        // Descriptor ops moved out of the catch-all arm, which authorized before answering. The
+        // new arms must do the same, or implementing them would have quietly reopened the
+        // cross-client hole Rig A case 3 closed: a handle is routing data, not a credential.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        for op in [
+            Op::ReadDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+            },
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+                value: vec![0x01, 0x00],
+            },
+        ] {
+            let result =
+                AgentServer::execute_op(op, context("other", &backend, &registry, 1)).await;
+            assert!(
+                matches!(result, OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy)
+            );
+        }
+        assert!(fake.descriptor_reads.lock().is_empty());
+        assert!(fake.descriptor_writes.lock().is_empty());
     }
 
     /// Regression (Rig A case 3, 2026-07-28): an op this agent does not implement must still be

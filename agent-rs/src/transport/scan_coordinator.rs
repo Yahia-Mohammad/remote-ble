@@ -758,6 +758,23 @@ mod tests {
             Ok(ResultPayload::Mtu { mtu: 23 })
         }
 
+        async fn read_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            _desc_ref: &crate::protocol::op::DescRef,
+        ) -> Result<ResultPayload, AgentError> {
+            Ok(ResultPayload::Bytes { value: vec![] })
+        }
+
+        async fn write_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            _desc_ref: &crate::protocol::op::DescRef,
+            _value: &[u8],
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
         async fn start_observe(
             &self,
             _stream: crate::ble::backend::StreamKey,

@@ -15,6 +15,7 @@ import dev.warsha.remoteble.agent.ScanCoordinator
 import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.agent.StrictModeState
+import dev.warsha.remoteble.agent.WritePolicy
 import dev.warsha.remoteble.agent.DefaultDispatcherProvider
 import dev.warsha.remoteble.agent.DispatcherProvider
 import dev.warsha.remoteble.agent.platformName
@@ -70,6 +71,8 @@ data class AgentConfig(
     val failFastOnDegradedWrites: Boolean = true,
     /** Non-null only for the JVM's explicit radio-less simulation mode. */
     val simulationProfile: SimulationProfile? = null,
+    /** Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks. */
+    val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) {
     companion object {
         const val DEFAULT_BIND_HOST: String = "127.0.0.1"
@@ -140,6 +143,7 @@ fun agentModule(config: AgentConfig): Module = module {
             agentInfo = "RemoteBLE Agent 0.10.0 (kable/${platformName()})",
             strictMode = get(),
             scanCoordinator = get(),
+            writePolicy = config.writePolicy,
         )
     }
     single {

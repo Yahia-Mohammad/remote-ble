@@ -116,6 +116,10 @@ class BleAgent(
     // Whether this connection presented a valid operator credential on the upgrade (OPERATOR_HEADER).
     // Widens `agent.status` disclosure to every lease and its holder; nothing else consults it.
     private val operatorScope: Boolean = false,
+    // Per-principal write allowlist (U7): the only real control on writes, since CLI-side policy is
+    // advisory (it lives in a file the calling agent can edit). Permissive by default so nothing
+    // changes for a consumer that never configures one.
+    private val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) {
     init {
         require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
@@ -123,6 +127,10 @@ class BleAgent(
             "maxActiveObservations must be 1..$MAX_ACTIVE_OBSERVATIONS"
         }
     }
+
+    // The principal half of [clientKey], for write-policy lookups — computed once since clientKey
+    // never changes for this connection's lifetime.
+    private val principal: String by lazy { ClientCredentials.principalOf(clientKey) }
 
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
@@ -396,6 +404,12 @@ class BleAgent(
                     // a rejected write never wedges the chain. See [reserveWriteTurn].
                     try {
                         writeTurn?.predecessor?.await()
+                        // Inside the turn, not before it: a denial still runs the `finally` below,
+                        // so a policy-refused write cannot wedge the next write to this device the
+                        // way throwing ahead of this block would.
+                        if (!writePolicy.authorizesWrite(principal, op.char.service, op.char.characteristic, op.value.size, op.withResponse)) {
+                            throw AgentException(policyDeniedError("write not permitted for this principal"))
+                        }
                         backend.write(op.device, op.char, op.value, op.withResponse)
                         reply(cmd.cid, OpResult.Ok())
                     } finally {
@@ -416,17 +430,33 @@ class BleAgent(
                 }
                 is Op.WriteDescriptor -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesDescriptorWrite(
+                            principal,
+                            op.desc.service,
+                            op.desc.characteristic,
+                            op.desc.descriptor,
+                            op.value.size,
+                        )
+                    ) {
+                        throw AgentException(policyDeniedError("descriptor write not permitted for this principal"))
+                    }
                     backend.writeDescriptor(op.device, op.desc, op.value)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.Pair -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesPairing(principal)) {
+                        throw AgentException(policyDeniedError("pairing not permitted for this principal"))
+                    }
                     val state = backend.pair(op.device)
                     emitBondStateIfNegotiated(op.device, state)
                     reply(cmd.cid, OpResult.Ok(ResultPayload.Bond(state)))
                 }
                 is Op.Unpair -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesPairing(principal)) {
+                        throw AgentException(policyDeniedError("pairing not permitted for this principal"))
+                    }
                     backend.unpair(op.device)
                     emitBondStateIfNegotiated(op.device, BleBondState.NONE)
                     reply(cmd.cid, OpResult.Ok())
@@ -501,6 +531,7 @@ class BleAgent(
                     ?.name?.lowercase()
                     ?: ScanConcurrencyMode.UNCONTROLLED.name.lowercase(),
                 strictIdentifiers = strictMode.enabled,
+                writePolicyEnforced = writePolicy.enforced,
             ),
             slots = StatusSlotsDto(
                 free = (registry.totalSlots - registry.occupiedSlots.value).coerceAtLeast(0),
@@ -540,6 +571,20 @@ class BleAgent(
                 throw AgentException(AgentError(ErrorKind.NOT_CONNECTED, message = "peripheral is not connected"))
         }
     }
+
+    /**
+     * The error for a write the policy refused. Never enumerates the policy — a refused caller
+     * learns that it was refused, not the shape of the allowlist.
+     *
+     * Gated on [Capabilities.WRITE_POLICY] for the same reason [radioUnavailableError] gates
+     * [ErrorKind.RADIO_OFF]: [ErrorKind] serializes by name, and an unknown name would fail a v1
+     * client's decode. A client that has not negotiated this receives [ErrorKind.INVALID_REQUEST]
+     * instead — the same kind an over-limit write already returns.
+     */
+    private fun policyDeniedError(message: String): AgentError = AgentError(
+        if (Capabilities.WRITE_POLICY in negotiated) ErrorKind.POLICY_DENIED else ErrorKind.INVALID_REQUEST,
+        message = message,
+    )
 
     private fun operationLimitError(op: Op): AgentError? = when (op) {
         is Op.ScanStart -> op.filters.takeIf { it.size > MAX_SCAN_FILTERS }?.let {
@@ -1163,6 +1208,7 @@ class BleAgent(
             Capabilities.SCAN_BATCH,
             Capabilities.IDENTIFIER_TRANSLATION,
             Capabilities.AGENT_STATUS,
+            Capabilities.WRITE_POLICY,
         )
     }
 }

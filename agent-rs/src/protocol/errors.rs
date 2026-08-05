@@ -20,6 +20,7 @@ pub enum ErrorKind {
     Unsupported,
     Timeout,
     TransportLost,
+    PolicyDenied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

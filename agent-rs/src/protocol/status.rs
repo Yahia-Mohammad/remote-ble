@@ -66,7 +66,7 @@ pub struct StatusSettingsDto {
     /// The scan-isolation policy, as its lowercased mode name.
     pub scan_concurrency: String,
     pub strict_identifiers: bool,
-    /// Whether a per-principal write policy is enforced. No reference agent enforces one yet.
+    /// Whether a per-principal write policy is configured and enforced by this agent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub write_policy_enforced: bool,
 }

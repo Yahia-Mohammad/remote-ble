@@ -47,6 +47,7 @@ enum class ErrorKind(val transient: Boolean) {
     TRANSPORT_LOST(transient = true),      // the IP link may reconnect
     INCOMPATIBLE_PROTOCOL(transient = false), // the peer has no mutually supported wire version
     RADIO_OFF(transient = true),           // the agent host's radio is off; it can be switched back on
+    POLICY_DENIED(transient = false),      // the per-principal write allowlist refused this op
     ;
 
     companion object {

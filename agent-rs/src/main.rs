@@ -5,7 +5,7 @@ mod translate;
 mod transport;
 
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use ble::backend::BleBackend;
 use ble::btleplug_impl::BtleplugBackend;
 use protocol::op::DeviceHandle;
 use registry::peripheral_lease::{LeaseConfig, PeripheralRegistry};
+use registry::write_policy::WritePolicy;
 use transport::server::{AgentServer, ScanConcurrencyMode, ServerConfig};
 
 #[derive(Parser, Debug)]
@@ -42,6 +43,11 @@ struct Args {
     /// token cannot quietly acquire operator reach.
     #[arg(long, env = "REMOTE_BLE_OPERATOR_TOKEN")]
     operator_token: Option<String>,
+
+    /// Path to a per-principal write policy file (U7). Absent means every write is allowed,
+    /// matching pre-U7 behaviour; see docs/proposals/agent-write-policy.md for the schema.
+    #[arg(long, env = "REMOTE_BLE_POLICY_FILE")]
+    policy_file: Option<String>,
 
     /// Permit an unauthenticated non-loopback listener for local development only.
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_INSECURE_LAN")]
@@ -127,6 +133,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_operator_token(args.operator_token.as_deref(), &credentials)?;
     validate_bind(&args, !credentials.is_empty())?;
 
+    // Mirrors `authenticate()`'s own resolution: with no credentials configured at all, every
+    // connection is the anonymous principal; otherwise it's a named credential. A policy naming
+    // anyone else is a typo the agent should refuse to boot on, not silently tolerate.
+    let known_principals: HashSet<String> = if credentials.is_empty() {
+        HashSet::from(["anonymous".to_string()])
+    } else {
+        credentials.keys().cloned().collect()
+    };
+    let write_policy = load_write_policy(args.policy_file.as_deref(), &known_principals)?;
+
     tracing::info!(
         "Starting RemoteBLE Agent (Rust) v{} | log level: {}",
         env!("CARGO_PKG_VERSION"),
@@ -182,6 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scan_concurrency: args.scan_concurrency,
         transport_grace: Duration::from_millis(args.transport_grace_ms),
         operator_token: args.operator_token.clone(),
+        write_policy,
     };
 
     let backend_for_shutdown = ble_backend.clone();
@@ -284,6 +301,27 @@ fn parse_credentials(
     Ok(credentials)
 }
 
+/// Resolve the policy before the backend or listener starts: a nonblank unreadable or malformed
+/// policy must fail the process closed rather than accidentally booting permissive.
+fn load_write_policy(
+    path: Option<&str>,
+    known_principals: &HashSet<String>,
+) -> Result<WritePolicy, std::io::Error> {
+    match path {
+        Some(path) if path.trim().is_empty() => {
+            tracing::warn!(
+                "write policy path is blank; treating it as unconfigured (write policy is permissive)"
+            );
+            Ok(WritePolicy::permissive())
+        }
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)?;
+            WritePolicy::decode(&raw, known_principals).map_err(std::io::Error::other)
+        }
+        None => Ok(WritePolicy::permissive()),
+    }
+}
+
 fn validate_bind_policy(
     bind: IpAddr,
     has_token: bool,
@@ -351,5 +389,34 @@ mod tests {
         assert_eq!(credentials.len(), 3);
         assert!(parse_credentials(Some("legacy"), Some("default=other")).is_err());
         assert!(parse_credentials(None, Some("alpha=same,beta=same")).is_err());
+    }
+
+    #[test]
+    fn policy_file_loader_is_permissive_only_when_absent_and_fails_closed_otherwise() {
+        let known = HashSet::from(["lab-a".to_string()]);
+        assert!(!load_write_policy(None, &known).unwrap().enforced());
+        assert!(!load_write_policy(Some(""), &known).unwrap().enforced());
+        assert!(!load_write_policy(Some(" \t "), &known).unwrap().enforced());
+
+        let missing =
+            std::env::temp_dir().join(format!("remoteble-missing-policy-{}", std::process::id()));
+        assert!(load_write_policy(missing.to_str(), &known).is_err());
+
+        let malformed =
+            std::env::temp_dir().join(format!("remoteble-invalid-policy-{}", std::process::id()));
+        std::fs::write(
+            &malformed,
+            r#"{"version":1,"principals":{"lab-a":{"writes":[]}}}"#,
+        )
+        .unwrap();
+        assert!(
+            load_write_policy(malformed.to_str(), &known)
+                .unwrap()
+                .enforced()
+        );
+        std::fs::write(&malformed, "not json").unwrap();
+        let result = load_write_policy(malformed.to_str(), &known);
+        let _ = std::fs::remove_file(malformed);
+        assert!(result.is_err());
     }
 }

@@ -73,6 +73,7 @@ JVM Kotlin agent does not advertise either.
 | `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
 | `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same 100 ms window and 16-result cap |
 | `agent.status` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same DTO, same disclosure rules, same skipped defaults on the wire |
+| `write.policy` | agent | ✅ | ✅ | ✅ | **Match for valid unique-key policies** — blank paths warn and remain permissive; duplicate-member rejection is a documented deferred portability gap |
 | `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.10.1 — see §1 |
 | `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
@@ -345,6 +346,7 @@ agents. These supersede the stale specifics above where they conflict.
 | Loopback-default bind + policy | ✅ | ✅ | non-loopback needs a credential or the explicit insecure-LAN override |
 | Failed-auth rate limiting | ✅ (client + operator planes) | ✅ (client plane) | fixed-memory per-peer/global limiter, LRU eviction, `429` |
 | Operator credential | ✅ (`REMOTE_BLE_OPERATOR_TOKEN`) | ✅ (`--operator-token` / `REMOTE_BLE_OPERATOR_TOKEN`) | Must be distinct from every client credential; both fail startup otherwise. Grants the HTTP dashboard (Kotlin only — Rust serves no HTTP) and, on both, `agent.status` holder disclosure via `X-RemoteBle-Operator` |
+| Write policy | ✅ (`REMOTE_BLE_POLICY_FILE`) | ✅ (`--policy-file` / `REMOTE_BLE_POLICY_FILE`) | Read once before backend/listener startup. Unset or blank = permissive (blank warns); configured policy is strict and per principal. Unique JSON keys are required pending duplicate-member hardening. |
 | Duplicate live session refused | ✅ (post-upgrade `1008`) | ✅ (handshake `409`) | `LEASE-DUPLICATE-01`; transport signal is implementation-specific |
 | 1 MiB inbound frame cap | ✅ | ✅ | framing-layer enforcement before decode |
 | Argument ceilings → `INVALID_REQUEST` | ✅ | ✅ | ≤64 filters, ≤512-byte writes/descriptors, **MTU 23–517** |

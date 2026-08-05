@@ -21,7 +21,8 @@ protocol version: **1**.
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
 > running one command per process. The wire protocol version is unchanged at **1** and no existing
 > `@SerialName` discriminator moved; the additions are one new op (`agent.status`) with its result
-> payload and capability string, gated so it reaches only clients that negotiate it. `agent-rs`
+> payload and capability string, gated so it reaches only clients that negotiate it. This release
+> also adds a capability-gated per-principal write policy. `agent-rs`
 > also begins advertising and emitting capabilities and events that already existed (`slots`,
 > `scan.batch`, and their `SlotState` / `ScanResultBatch` events).
 
@@ -44,8 +45,19 @@ protocol version: **1**.
   `REMOTE_BLE_OPERATOR_TOKEN` for this; like the JVM agent's, it must be distinct from every client
   credential, and startup fails otherwise.
 
-  `StatusSettingsDto.writePolicyEnforced` is reported from the start and is `false` on every
-  reference agent — see [`docs/proposals/agent-write-policy.md`](docs/proposals/agent-write-policy.md).
+  `StatusSettingsDto.writePolicyEnforced` reports whether this agent has a configured
+  per-principal write policy — see [`docs/proposals/agent-write-policy.md`](docs/proposals/agent-write-policy.md).
+
+- **Per-principal write policy at the agent boundary.** `REMOTE_BLE_POLICY_FILE` (and Rust's
+  `--policy-file`) loads a strict, read-once JSON allowlist before the backend or listener starts.
+  It covers characteristic writes, descriptor writes (including their descriptor UUID), and
+  pair/unpair. An absent or blank path preserves allow-all behavior (a blank path logs a warning);
+  a configured file denies unlisted principals. Both agents reject malformed, unknown-field,
+  unknown-principal, and invalid-bound configuration rather than silently broadening access.
+  Portable policies must use unique JSON member names; complete duplicate-member rejection remains
+  deferred. The agent-level `write.policy` capability
+  gates the new non-transient `POLICY_DENIED` error; clients that did not negotiate it receive the
+  wire-safe `INVALID_REQUEST` fallback instead.
 
 - **A client can declare its identifier format.** `DefaultAgentSession` takes an optional
   `identifierFormat`, still defaulting to the host's. A consumer that never constructs a Kable

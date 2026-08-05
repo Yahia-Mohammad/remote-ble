@@ -29,6 +29,16 @@ fun main(args: Array<String>) {
     val token = System.getenv("REMOTE_BLE_TOKEN")?.takeIf { it.isNotBlank() }
     val namedCredentials = parseNamedCredentials(System.getenv("REMOTE_BLE_TOKENS"))
     val operatorToken = System.getenv("REMOTE_BLE_OPERATOR_TOKEN")?.takeIf { it.isNotBlank() }
+    // Mirrors ClientCredentials.authenticate's own resolution: with no credentials configured at
+    // all, every connection is the anonymous principal; otherwise it's a named credential or the
+    // bare-token "default". A policy naming anyone else is a typo the agent should refuse to boot
+    // on, not silently tolerate.
+    val knownPrincipals = if (token == null && namedCredentials.isEmpty()) {
+        setOf(ClientCredentials.ANONYMOUS_PRINCIPAL)
+    } else {
+        namedCredentials.keys + setOfNotNull(token?.let { ClientCredentials.DEFAULT_PRINCIPAL })
+    }
+    val writePolicy = loadWritePolicy(System.getenv("REMOTE_BLE_POLICY_FILE"), knownPrincipals)
     val bindHost = validateBind(
         requested = cli.bindHost ?: System.getenv("REMOTE_BLE_BIND") ?: AgentConfig.DEFAULT_BIND_HOST,
         hasCredential = token != null || namedCredentials.isNotEmpty(),
@@ -61,6 +71,7 @@ fun main(args: Array<String>) {
             }
             ?: AgentConfig().failFastOnDegradedWrites,
         simulationProfile = simulationProfile,
+        writePolicy = writePolicy,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -145,6 +156,27 @@ internal fun readSimulationProfile(path: String): SimulationProfile = try {
     throw error
 } catch (error: Throwable) {
     throw IllegalArgumentException("cannot load simulation profile '$path': ${error.message}", error)
+}
+
+/** Resolved before Koin/server startup, like [readSimulationProfile]: malformed input never opens a port. */
+internal fun readWritePolicy(path: String, knownPrincipals: Set<String>): WritePolicy = try {
+    WritePolicy.decode(Files.readString(Path.of(path)), knownPrincipals)
+} catch (error: IllegalArgumentException) {
+    throw error
+} catch (error: Throwable) {
+    throw IllegalArgumentException("cannot load write policy '$path': ${error.message}", error)
+}
+
+/** Resolves the optional policy setting before Koin/server startup. */
+internal fun loadWritePolicy(path: String?, knownPrincipals: Set<String>): WritePolicy = when {
+    path == null -> WritePolicy.permissive()
+    path.isBlank() -> {
+        Logger.warn(LogTags.AGENT) {
+            "REMOTE_BLE_POLICY_FILE is blank; treating it as unconfigured (write policy is permissive)"
+        }
+        WritePolicy.permissive()
+    }
+    else -> readWritePolicy(path, knownPrincipals)
 }
 
 // BIND-SECURITY-01: internal (not private) so MainTest.kt can exercise the policy directly.

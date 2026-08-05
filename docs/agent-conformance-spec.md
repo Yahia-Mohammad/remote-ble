@@ -172,7 +172,7 @@ points the same command at a different agent.
 - **Agent-level** capabilities are radio-independent: the agent implements them itself, over
   bookkeeping it already keeps. A conforming agent MUST advertise **all** of them, unconditionally
   — the backend has no say, and no host, platform, or radio library may narrow the set. Today these
-  are `slots`, `scan.batch`, `identifier.translate`, and `agent.status` (§6.2).
+  are `slots`, `scan.batch`, `identifier.translate`, `agent.status` (§6.2), and `write.policy`.
 - **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
   differ between an Android phone and a Linux box. But two agents on the **same host** MUST
   advertise the same backend-level set: a divergence there is a defect in one of them, not a
@@ -188,6 +188,36 @@ Capability strings are defined where their feature is specified (this spec defin
 `identifier.translate`, §6.1); the reference registry is
 [`Capabilities.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
 in `:protocol`.
+
+### 5.4 Per-principal write policy (capability `write.policy`)
+
+An agent that implements `write.policy` MUST advertise it as an agent-level capability. The policy
+is an optional, read-once startup configuration keyed by the authenticated principal. With no
+configured policy source, every mutation remains allowed for compatibility. A configured policy
+MUST deny an unlisted principal and a listed principal with no matching rule; malformed JSON,
+unknown fields, unsupported schema versions, unknown principals, and invalid byte bounds MUST fail
+startup before the listener or BLE backend starts. The reference agents treat a supplied blank or
+whitespace-only policy path as unconfigured and emit a startup warning; an absent path is silent.
+
+The current schema version is `1`. A valid policy JSON document has unique member names in every
+object, a top-level `version`, and an optional `principals` object. Each principal may contain
+`writes`, `descriptorWrites`, and `pairing`; no other members are valid. A write rule requires
+`service` and `characteristic`, with optional nullable `maximumBytes` (a nonnegative signed 32-bit
+integer) and nullable `withResponse`. A descriptor rule requires `service`, `characteristic`, and
+`descriptor`, with optional nullable `maximumBytes`. `null` means unlimited and `0` permits only
+an empty payload; the normal 512-byte operation ceiling still applies. UUID fields compare
+case-insensitively to the wire form, and `"*"` is the only wildcard, independently in each field.
+
+The agent MUST authorize the lease before evaluating policy. It then evaluates `write`,
+`descriptor-write`, `pair`, and `unpair` before invoking the backend; descriptor permission is
+independent of characteristic-write permission. A policy refusal is `POLICY_DENIED` only for a
+client that negotiated `write.policy`, otherwise it is the wire-safe `INVALID_REQUEST` fallback.
+`agent.status.settings.writePolicyEnforced` reports whether a nonblank policy source was loaded.
+
+Duplicate JSON member names are invalid and portable policy files MUST NOT rely on last-value
+semantics. Reference-agent rejection of this invalid input is deferred hardening: Kotlin can retain
+the last duplicate value, Rust rejects duplicate DTO fields, and duplicate principal-map behavior is
+not guaranteed.
 
 ## 6. Identifiers
 
@@ -375,6 +405,7 @@ retry could help:
 | `UNKNOWN_DEVICE` | never reached | agent | `DeviceHandle` not known to the agent. |
 | `NO_CONNECTION_SLOT` | never reached | agent | The agent's per-client connection cap is full. |
 | `PERIPHERAL_BUSY` | never reached | agent | The peripheral is owned by **another** client (§10). |
+| `POLICY_DENIED` | never reached | agent | A configured per-principal write policy refused the mutation; emitted only after negotiating `write.policy`. |
 | `AGENT_BUSY` | never reached | agent | The agent transiently cannot service the op. |
 | `UNSUPPORTED` | never reached | agent | The op/feature isn't supported by this agent. |
 | `TIMEOUT` | never reached | **client** | No reply within the client's deadline (§11). |
@@ -384,8 +415,10 @@ Rules:
 - The agent MUST NOT emit `TIMEOUT` or `TRANSPORT_LOST` — by definition they describe the agent
   being *unreachable*, so the client mints them locally; everything else originates at the agent.
 - `gattStatus` MUST only be present for "reached radio" kinds, carrying the raw BLE-stack status.
-- The `ErrorKind` set is frozen for `1.x`; new kinds require a minor bump and clients MUST treat
-  an unknown kind as a generic failure (fail the op; do not crash).
+- The ungated `ErrorKind` set is frozen for `1.x`; a new wire-breaking kind MUST be capability-gated
+  and have a pre-existing fallback for clients that did not negotiate it. `POLICY_DENIED`, for
+  example, is gated by `write.policy` and falls back to `INVALID_REQUEST`. Clients MUST treat an
+  unknown kind as a generic failure (fail the op; do not crash).
 
 ## 10. Peripheral ownership & leasing
 

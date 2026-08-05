@@ -99,23 +99,21 @@ replies" a real check rather than two encodings a decoder happens to tolerate.
 
 ## Still open
 
-### Next up: U7, per-principal write policy
+### U7, per-principal write policy — completed on `feat/write-policy`
 
-The actual security boundary, and the last upstream ask other than publishing. **Designed, not
-built** — the shape is settled in
-[`agent-write-policy.md`](agent-write-policy.md) and implementation belongs on its own branch,
-because a security control deserves its own review surface and this branch's diff is already larger
-than its name suggests.
+The actual security boundary and last upstream ask other than publishing is implemented on its own
+review branch. The delivered schema, capability/error gate, and verification record are in
+[`agent-write-policy.md`](agent-write-policy.md) and
+[`write-policy-progress.md`](write-policy-progress.md).
 
 The crux, and the reason it is worth reading that doc before writing any code: a new
 `ErrorKind.POLICY_DENIED` **cannot simply be sent**. An unknown enum name fails a v1 client's CBOR
 decode — the documented reason `RADIO_OFF` is capability-gated — so a denial kind must sit behind a
-`write.policy` capability, with `INVALID_REQUEST` as the ungated fallback. The one hook already
-built here is `StatusSettingsDto.writePolicyEnforced`, wired `false` on both agents.
+`write.policy` capability, with `INVALID_REQUEST` as the ungated fallback. The implementation now
+wires `StatusSettingsDto.writePolicyEnforced` to the actual configured policy on both agents.
 
-The CLI's own policy stays labelled advisory until this exists and is independently verified
-against a raw SDK client — not just through the CLI, which is the executable whose advisory
-property this replaces.
+The CLI's own policy remains advisory by design; the agent policy is independently verified with
+the SDK and a raw WebSocket/CBOR client, so neither client controls the security decision.
 
 ### U3 is done — what it cost that the plan did not anticipate
 

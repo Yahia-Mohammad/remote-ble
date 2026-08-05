@@ -26,6 +26,7 @@ use crate::protocol::{
 };
 use crate::registry::lease_disclosure;
 use crate::registry::peripheral_lease::{LeaseAcquisition, PeripheralRegistry};
+use crate::registry::write_policy::{self, WritePolicy};
 use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
@@ -205,12 +206,18 @@ struct ExecuteContext<'a> {
 ///
 /// Grouped rather than spread across [ExecuteContext] because they are one feature's inputs and
 /// exactly one op reads them.
+#[derive(Clone)]
 struct StatusSource {
     /// When this agent process began serving.
     started_at: Instant,
     strict_identifiers: Arc<AtomicBool>,
     live_sessions: Arc<LiveSessionRegistry>,
     device_names: Arc<DeviceNames>,
+    /// Per-principal write allowlist (U7). Lives here rather than a new `ExecuteContext` field
+    /// because it's an agent-wide fact `agent.status` already reports (`writePolicyEnforced`) and
+    /// exactly the two write-bearing ops need it otherwise — the same shape as the rest of this
+    /// struct.
+    write_policy: Arc<WritePolicy>,
 }
 
 /// [StatusSource] plus the one fact that is per-connection.
@@ -385,6 +392,8 @@ pub struct ServerConfig {
     /// session — every lease and its holder — and grants nothing else. `None` means no session can
     /// ever obtain operator scope from this agent.
     pub operator_token: Option<String>,
+    /// Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks.
+    pub write_policy: WritePolicy,
 }
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
@@ -633,6 +642,8 @@ impl AgentServer {
             strict_identifiers: config.strict_identifiers.clone(),
             live_sessions: live_sessions.clone(),
             device_names: Arc::new(DeviceNames::default()),
+            // Cloned rather than moved: `config` as a whole is still stored on `Self` below.
+            write_policy: Arc::new(config.write_policy.clone()),
         });
         Self {
             config,
@@ -767,6 +778,7 @@ impl AgentServer {
             strict_identifiers: strict.clone(),
             live_sessions: live_sessions.clone(),
             device_names: Arc::new(DeviceNames::default()),
+            write_policy: Arc::new(WritePolicy::permissive()),
         });
         Self::accept_connection_with_scan(
             stream,
@@ -961,6 +973,7 @@ impl AgentServer {
                 strict_identifiers: strict.clone(),
                 live_sessions: live_sessions.clone(),
                 device_names: Arc::new(DeviceNames::default()),
+                write_policy: Arc::new(WritePolicy::permissive()),
             }),
             operator_scope: false,
         };
@@ -1538,9 +1551,7 @@ impl AgentServer {
                 exclusive_by_default: settings.default_exclusive,
                 scan_concurrency: scan_mode.as_str().to_string(),
                 strict_identifiers: status.source.strict_identifiers.load(Ordering::Relaxed),
-                // No reference agent enforces a per-principal write policy yet; reported from the
-                // start so a client can tell an enforcing agent from a permissive one.
-                write_policy_enforced: false,
+                write_policy_enforced: status.source.write_policy.enforced(),
             },
             slots: StatusSlotsDto {
                 free: total.saturating_sub(occupied) as i32,
@@ -1566,6 +1577,22 @@ impl AgentServer {
             other_leases: (leases.len() - visible.len()) as i32,
             operator_scope: status.operator_scope,
         }
+    }
+
+    /// The error for a write the policy refused. Never enumerates the policy — a refused caller
+    /// learns that it was refused, not the shape of the allowlist.
+    ///
+    /// Gated on `write.policy` for the same reason `RADIO_OFF` needs `radio.state`: `ErrorKind`
+    /// serializes by name, and an unknown name would fail a v1 client's decode. A client that has
+    /// not negotiated this receives `INVALID_REQUEST` instead — the same kind an over-limit write
+    /// already returns.
+    fn policy_error(negotiated: &std::collections::BTreeSet<String>, message: &str) -> AgentError {
+        let kind = if negotiated.contains(capabilities::WRITE_POLICY) {
+            ErrorKind::PolicyDenied
+        } else {
+            ErrorKind::InvalidRequest
+        };
+        AgentError::new(kind, Some(message.to_string()))
     }
 
     async fn execute_op(op: Op, context: ExecuteContext<'_>) -> OpResult {
@@ -1801,6 +1828,19 @@ impl AgentServer {
                 if let Err(e) = registry.authorize_connected(&device.value, client_id) {
                     return OpResult::err(e);
                 }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_write(
+                    principal,
+                    &char.service,
+                    &char.characteristic,
+                    value.len(),
+                    with_response,
+                ) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "write not permitted for this principal",
+                    ));
+                }
                 OpResult::from_unit(backend.write(&device, &char, &value, with_response).await)
             }
             Op::ReadDescriptor { device, desc } => {
@@ -1816,6 +1856,19 @@ impl AgentServer {
             } => {
                 if let Err(e) = registry.authorize_connected(&device.value, client_id) {
                     return OpResult::err(e);
+                }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_descriptor_write(
+                    principal,
+                    &desc.service,
+                    &desc.characteristic,
+                    &desc.descriptor,
+                    value.len(),
+                ) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "descriptor write not permitted for this principal",
+                    ));
                 }
                 OpResult::from_unit(backend.write_descriptor(&device, &desc, &value).await)
             }
@@ -1859,6 +1912,28 @@ impl AgentServer {
                     streams.release_observation(stream);
                 }
                 OpResult::from_unit(result)
+            }
+            // Pairing itself is unimplemented on every reference agent (parity: neither JVM, Android,
+            // nor Rust advertises `pairing`), so these two answer UNSUPPORTED exactly like the
+            // catch-all below — but with an explicit policy check first, ahead of that answer,
+            // keeping this agent structurally parallel with the Kotlin one (whose common `BleAgent`
+            // dispatches Pair/Unpair for every Kotlin target, including Android/iOS backends that
+            // may implement bonding) for whenever pairing lands on either.
+            Op::Pair { device } | Op::Unpair { device } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                    return OpResult::err(e);
+                }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_pairing(principal) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "pairing not permitted for this principal",
+                    ));
+                }
+                OpResult::err(AgentError::new(
+                    ErrorKind::Unsupported,
+                    Some("Operation not supported on this agent".into()),
+                ))
             }
             // Ops this agent does not implement. Authorization still runs first when the op names a
             // device: a client that does not own it must get the same PERIPHERAL_BUSY the supported
@@ -2243,9 +2318,24 @@ mod tests {
                     strict_identifiers: strict,
                     live_sessions,
                     device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(WritePolicy::permissive()),
                 }),
                 operator_token: None,
             }
+        }
+
+        /// Replaces the write policy every subsequent [Self::client]/[Self::client_with_operator]
+        /// connection sees. Rebuilds [Self::status_source] rather than mutating a field through the
+        /// `Arc`, since every other field is unaffected.
+        fn set_write_policy(&mut self, policy: WritePolicy) {
+            self.status_source = Arc::new(StatusSource {
+                write_policy: Arc::new(policy),
+                ..(*self.status_source).clone()
+            });
+        }
+
+        fn set_credentials(&mut self, credentials: HashMap<String, String>) {
+            self.credentials = Arc::new(credentials);
         }
 
         async fn client(
@@ -2265,6 +2355,41 @@ mod tests {
             client_id: &str,
             capabilities: &[&str],
             expected_server_capabilities: &[&str],
+            operator: Option<&str>,
+        ) -> ScanWsClient {
+            self.client_with_headers(
+                client_id,
+                capabilities,
+                expected_server_capabilities,
+                None,
+                operator,
+            )
+            .await
+        }
+
+        async fn client_with_bearer(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            bearer: &str,
+        ) -> ScanWsClient {
+            self.client_with_headers(
+                client_id,
+                capabilities,
+                expected_server_capabilities,
+                Some(bearer),
+                None,
+            )
+            .await
+        }
+
+        async fn client_with_headers(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            bearer: Option<&str>,
             operator: Option<&str>,
         ) -> ScanWsClient {
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -2290,6 +2415,14 @@ mod tests {
                 "X-RemoteBle-Client",
                 client_id.parse().expect("client id header must be valid"),
             );
+            if let Some(bearer) = bearer {
+                request.headers_mut().insert(
+                    "Authorization",
+                    format!("Bearer {bearer}")
+                        .parse()
+                        .expect("authorization header must be valid"),
+                );
+            }
             if let Some(operator) = operator {
                 request.headers_mut().insert(
                     OPERATOR_HEADER,
@@ -3228,6 +3361,102 @@ mod tests {
         client.close().await;
     }
 
+    // ---- write policy over a real handshake (U7) ----
+    //
+    // Every other write-policy test drives `execute_op` directly with a hand-built
+    // `negotiated_capabilities` set. This one instead goes through a real `ClientHello`, proving
+    // the negotiated set an actual handshake produces is what the policy check reads — not just
+    // what a test constructed to look like one.
+
+    #[tokio::test]
+    async fn named_principals_receive_the_same_write_policy_matrix_over_real_handshakes() {
+        let mut harness =
+            ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        harness.set_credentials(HashMap::from([
+            ("lab-a".to_string(), "secret-a".to_string()),
+            ("lab-b".to_string(), "secret-b".to_string()),
+        ]));
+        harness.set_write_policy(
+            WritePolicy::decode(
+                r#"{"version":1,"principals":{
+                    "lab-a":{"writes":[{"service":"180d","characteristic":"2a39"}]},
+                    "lab-b":{"writes":[{"service":"180d","characteristic":"2a39"}]}
+                }}"#,
+                &HashSet::from(["lab-a".to_string(), "lab-b".to_string()]),
+            )
+            .unwrap(),
+        );
+
+        for (principal, secret) in [("lab-a", "secret-a"), ("lab-b", "secret-b")] {
+            let mut client = harness
+                .client_with_bearer(
+                    &format!("{principal}-policy-client"),
+                    &[capabilities::WRITE_POLICY],
+                    &[capabilities::WRITE_POLICY],
+                    secret,
+                )
+                .await;
+            let device = DeviceHandle {
+                value: "dev-1".into(),
+            };
+
+            send_command(
+                &mut client.ws,
+                1,
+                Op::Connect {
+                    device: device.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+
+            send_command(
+                &mut client.ws,
+                2,
+                Op::Write {
+                    device: device.clone(),
+                    char: test_char(),
+                    value: vec![0x01],
+                    with_response: true,
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+
+            send_command(
+                &mut client.ws,
+                3,
+                Op::Write {
+                    device: device.clone(),
+                    char: CharRef {
+                        characteristic: "2a38".into(),
+                        ..test_char()
+                    },
+                    value: vec![0x01],
+                    with_response: true,
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+
+            send_command(&mut client.ws, 4, Op::Disconnect { device }).await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+            client.close().await;
+        }
+    }
+
     // ---- agent.status (U3) ----
 
     async fn request_status(client: &mut ScanWsClient, cid: i64) -> AgentStatusDto {
@@ -3822,6 +4051,7 @@ mod tests {
                 scan_concurrency: ScanConcurrencyMode::Multiplexed,
                 transport_grace: Duration::from_secs(10),
                 operator_token: None,
+                write_policy: WritePolicy::permissive(),
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -4151,6 +4381,7 @@ mod tests {
                 strict_identifiers: strict.clone(),
                 live_sessions: Arc::new(LiveSessionRegistry::default()),
                 device_names: Arc::new(DeviceNames::default()),
+                write_policy: Arc::new(WritePolicy::permissive()),
             }),
             operator_scope: false,
         }));
@@ -4171,6 +4402,29 @@ mod tests {
             negotiated_capabilities,
             status,
         }
+    }
+
+    /// As [context], but with a caller-supplied [WritePolicy] and negotiated-capability set — for
+    /// the write-policy dispatch tests, which need both to differ from every other `execute_op`
+    /// test in this module.
+    fn context_with_policy<'a>(
+        client_id: &'a str,
+        backend: &'a Arc<dyn BleBackend>,
+        registry: &'a PeripheralRegistry,
+        generation: u64,
+        policy: WritePolicy,
+        negotiated: &[&str],
+    ) -> ExecuteContext<'a> {
+        let mut ctx = context(client_id, backend, registry, generation);
+        *ctx.negotiated_capabilities.lock() = negotiated.iter().map(|s| s.to_string()).collect();
+        ctx.status = Box::leak(Box::new(StatusContext {
+            source: Arc::new(StatusSource {
+                write_policy: Arc::new(policy),
+                ..(*ctx.status.source).clone()
+            }),
+            operator_scope: ctx.status.operator_scope,
+        }));
+        ctx
     }
 
     #[tokio::test]
@@ -4386,6 +4640,421 @@ mod tests {
         )
         .await;
         assert!(matches!(result, OpResult::Err { error } if error.kind == ErrorKind::Unsupported));
+    }
+
+    // ---- write policy (U7) ----
+
+    fn test_char() -> CharRef {
+        CharRef {
+            service: "180d".into(),
+            characteristic: "2a39".into(),
+            instance: 0,
+        }
+    }
+
+    fn allowing_write(principal: &str) -> WritePolicy {
+        WritePolicy::decode(
+            &format!(
+                r#"{{"version":1,"principals":{{"{principal}":{{"writes":[
+                    {{"service":"180d","characteristic":"2a39","maximumBytes":1}}
+                ]}}}}}}"#
+            ),
+            &HashSet::from([principal.to_string()]),
+        )
+        .unwrap()
+    }
+
+    fn denying_everything(principal: &str) -> WritePolicy {
+        WritePolicy::decode(
+            &format!(r#"{{"version":1,"principals":{{"{principal}":{{"writes":[]}}}}}}"#),
+            &HashSet::from([principal.to_string()]),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn permissive_policy_allows_a_write_by_default() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01],
+                with_response: true,
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                WritePolicy::permissive(),
+                &[],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Ok { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_configured_policy_denies_an_unlisted_or_empty_principal() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        for policy in [
+            denying_everything("owner"),
+            // "owner" isn't in this policy at all — same outcome as an empty rule list.
+            WritePolicy::decode(
+                r#"{"version":1,"principals":{"someone-else":{"writes":[]}}}"#,
+                &HashSet::from(["owner".to_string(), "someone-else".to_string()]),
+            )
+            .unwrap(),
+        ] {
+            let result = AgentServer::execute_op(
+                Op::Write {
+                    device: DeviceHandle {
+                        value: "dev".into(),
+                    },
+                    char: test_char(),
+                    value: vec![0x01],
+                    with_response: true,
+                },
+                context_with_policy(
+                    "owner",
+                    &backend,
+                    &registry,
+                    1,
+                    policy,
+                    &[capabilities::WRITE_POLICY],
+                ),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_over_the_configured_byte_bound_is_denied() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01, 0x02], // the rule allows at most 1 byte
+                with_response: true,
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                allowing_write("owner"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+    }
+
+    #[tokio::test]
+    async fn policy_denied_requires_the_capability_otherwise_it_is_invalid_request() {
+        // The crux: an unknown ErrorKind name would break a v1 client's decode, so a client that
+        // never negotiated write.policy must not receive PolicyDenied at all.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let write = || Op::Write {
+            device: DeviceHandle {
+                value: "dev".into(),
+            },
+            char: test_char(),
+            value: vec![0xff], // exceeds the rule's 1-byte-of-a-different-value... still just over policy
+            with_response: true,
+        };
+
+        let with_capability = AgentServer::execute_op(
+            write(),
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                denying_everything("owner"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            with_capability,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+
+        let without_capability = AgentServer::execute_op(
+            write(),
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                denying_everything("owner"),
+                &[],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            without_capability,
+            OpResult::Err { error } if error.kind == ErrorKind::InvalidRequest
+        ));
+    }
+
+    #[tokio::test]
+    async fn peripheral_busy_is_answered_before_any_policy_check() {
+        // Ordering matters: a caller that doesn't own the lease must never learn whether policy
+        // would also have refused it — that would leak whether the policy permits a characteristic
+        // on a device this caller cannot even touch.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01],
+                with_response: true,
+            },
+            // "intruder" would also be denied by this policy, but must never find that out.
+            context_with_policy(
+                "intruder",
+                &backend,
+                &registry,
+                1,
+                denying_everything("intruder"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy
+        ));
+    }
+
+    #[tokio::test]
+    async fn descriptor_writes_are_gated_independently_of_characteristic_writes() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let allowed_descriptor = test_descriptor();
+        let policy = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"descriptorWrites":[{"service":"180d","characteristic":"2a37","descriptor":"2902","maximumBytes":2}]}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: allowed_descriptor.clone(),
+                value: vec![0x01, 0x00],
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                policy.clone(),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Ok { .. }));
+        assert_eq!(
+            *fake.descriptor_writes.lock(),
+            vec![(allowed_descriptor, vec![0x01, 0x00])]
+        );
+
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: DescRef {
+                    descriptor: "2901".into(),
+                    ..test_descriptor()
+                },
+                value: vec![0x01],
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                policy,
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+        assert_eq!(fake.descriptor_writes.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pair_and_unpair_are_gated_even_though_neither_is_implemented() {
+        // Pairing itself is unimplemented here (parity: neither JVM, Android, nor Rust advertises
+        // it today), so a policy that *allows* pairing still ends in UNSUPPORTED — but a policy
+        // that denies it must short-circuit before that answer, not after.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry.acquire_lease("dev", "owner").unwrap();
+        registry.on_connected("dev", "owner");
+
+        let denying = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"writes":[],"pairing":false}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        for op in [
+            Op::Pair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            Op::Unpair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+        ] {
+            let result = AgentServer::execute_op(
+                op,
+                context_with_policy(
+                    "owner",
+                    &backend,
+                    &registry,
+                    1,
+                    denying.clone(),
+                    &[capabilities::WRITE_POLICY],
+                ),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+        }
+
+        let allowing = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"writes":[],"pairing":true}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        let result = AgentServer::execute_op(
+            Op::Pair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                allowing,
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Err { error } if error.kind == ErrorKind::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn write_policy_enforced_reflects_whether_a_policy_is_configured() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+
+        let permissive_status = AgentServer::agent_status(
+            "owner",
+            &registry,
+            &Arc::new(HandleTranslator::new(
+                agent_identifier_format(),
+                Arc::new(AtomicBool::new(false)),
+            )),
+            ScanConcurrencyMode::Multiplexed,
+            &StatusContext {
+                source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: Arc::new(AtomicBool::new(false)),
+                    live_sessions: Arc::new(LiveSessionRegistry::default()),
+                    device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(WritePolicy::permissive()),
+                }),
+                operator_scope: false,
+            },
+        )
+        .await;
+        assert!(!permissive_status.settings.write_policy_enforced);
+
+        let enforced_status = AgentServer::agent_status(
+            "owner",
+            &registry,
+            &Arc::new(HandleTranslator::new(
+                agent_identifier_format(),
+                Arc::new(AtomicBool::new(false)),
+            )),
+            ScanConcurrencyMode::Multiplexed,
+            &StatusContext {
+                source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: Arc::new(AtomicBool::new(false)),
+                    live_sessions: Arc::new(LiveSessionRegistry::default()),
+                    device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(denying_everything("owner")),
+                }),
+                operator_scope: false,
+            },
+        )
+        .await;
+        assert!(enforced_status.settings.write_policy_enforced);
+        let _ = backend; // kept for symmetry with the rest of this module's tests
     }
 
     /// LEASE-DISCONNECT-01: `Op::Disconnect` releases the lease immediately, with no transport

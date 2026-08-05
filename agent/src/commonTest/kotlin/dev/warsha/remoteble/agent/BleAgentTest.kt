@@ -84,6 +84,7 @@ class BleAgentTest {
         clientKey: String = clientId.toString(),
         monitor: AgentMonitor? = null,
         operatorScope: Boolean = false,
+        writePolicy: WritePolicy = WritePolicy.permissive(),
     ) {
         private val codec = CborProtocolCodec()
         private val toAgent = Channel<ByteArray>(Channel.UNLIMITED)
@@ -138,6 +139,7 @@ class BleAgentTest {
                 clientKey = clientKey,
                 monitor = monitor,
                 operatorScope = operatorScope,
+                writePolicy = writePolicy,
             )
             agent.start()
         }
@@ -1303,5 +1305,194 @@ class BleAgentTest {
         // And it routes: addressing the peripheral by the handle status just returned works.
         h.send(3, Op.Read(DeviceHandle(reported), char))
         assertIs<OpResult.Ok>(h.frames.reply(3))
+    }
+
+    // ---- write policy (U7) ----
+
+    private fun allowingWrite(principal: String): WritePolicy = WritePolicy.decode(
+        """{"version":1,"principals":{"$principal":{"writes":[
+            {"service":"${char.service}","characteristic":"${char.characteristic}","maximumBytes":1}
+        ]}}}""",
+        knownPrincipals = setOf(principal),
+    )
+
+    private fun denyingEverything(principal: String): WritePolicy = WritePolicy.decode(
+        """{"version":1,"principals":{"$principal":{"writes":[]}}}""",
+        knownPrincipals = setOf(principal),
+    )
+
+    /** A harness whose backend (and negotiated set) already includes `write.policy`. */
+    private suspend fun policyAwareHarness(
+        scope: CoroutineScope,
+        backend: BleBackend,
+        clientKey: String,
+        writePolicy: WritePolicy,
+    ): Harness {
+        val h = Harness(
+            scope,
+            backend,
+            capabilities = setOf(Capabilities.WRITE_POLICY),
+            clientKey = clientKey,
+            writePolicy = writePolicy,
+        )
+        h.sendHello(setOf(Capabilities.WRITE_POLICY))
+        h.frames.filterIsInstance<ServerHello>().first()
+        return h
+    }
+
+    @Test
+    fun permissivePolicyAllowsAWriteByDefault() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend)
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+    }
+
+    @Test
+    fun aConfiguredPolicyDeniesAnUnlistedOrEmptyPrincipal() = runTest {
+        for (policy in listOf(
+            denyingEverything("owner"),
+            // "owner" isn't in this policy at all — same outcome as an empty rule list.
+            WritePolicy.decode(
+                """{"version":1,"principals":{"someone-else":{"writes":[]}}}""",
+                knownPrincipals = setOf("owner", "someone-else"),
+            ),
+        )) {
+            val backend = FakeBleBackend()
+            val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+            h.connect(1)
+
+            h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+            val err = assertIs<OpResult.Err>(h.frames.reply(2))
+            assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        }
+    }
+
+    @Test
+    fun aWriteOverTheConfiguredByteBoundIsDenied() = runTest {
+        val backend = FakeBleBackend()
+        val h = policyAwareHarness(backgroundScope, backend, "owner", allowingWrite("owner"))
+        h.connect(1)
+
+        // The rule allows at most 1 byte.
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01, 0x02), withResponse = true))
+        val err = assertIs<OpResult.Err>(h.frames.reply(2))
+        assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        assertNull(backend.lastWrite)
+    }
+
+    @Test
+    fun policyDeniedRequiresTheCapabilityOtherwiseItIsInvalidRequest() = runTest {
+        // The crux: an unknown ErrorKind name would break a v1 client's decode, so a client that
+        // never negotiated write.policy must not receive POLICY_DENIED at all.
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, clientKey = "owner", writePolicy = denyingEverything("owner"))
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+    }
+
+    @Test
+    fun policyDeniedIsSentOnceTheCapabilityIsNegotiated() = runTest {
+        val backend = FakeBleBackend()
+        val h = policyAwareHarness(backgroundScope, backend, "owner", denyingEverything("owner"))
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+    }
+
+    @Test
+    fun peripheralBusyIsAnsweredBeforeAnyPolicyCheck() = runTest {
+        // Ordering matters: a caller that doesn't own the lease must never learn whether policy
+        // would also have refused it — that would leak whether the policy permits a characteristic
+        // on a device this caller cannot even touch.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(backgroundScope, backend, registry = registry, clientKey = "owner")
+        owner.connect(1)
+
+        // "intruder" would also be denied by this policy, but must never find that out.
+        val intruder = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = "intruder",
+            writePolicy = denyingEverything("intruder"),
+        )
+        intruder.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        val err = assertIs<OpResult.Err>(intruder.frames.reply(2))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, err.error.kind)
+    }
+
+    @Test
+    fun descriptorWritesAreGatedIndependentlyOfCharacteristicWrites() = runTest {
+        val backend = FakeBleBackend()
+        val desc = DescRef(char.service, char.characteristic, "00002902-0000-1000-8000-00805f9b34fb")
+        val otherDesc = DescRef(char.service, char.characteristic, "00002901-0000-1000-8000-00805f9b34fb")
+        val policy = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"descriptorWrites":[
+                {"service":"${char.service}","characteristic":"${char.characteristic}","descriptor":"${desc.descriptor}","maximumBytes":2}
+            ]}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+        h.connect(1)
+
+        h.send(2, Op.WriteDescriptor(device, desc, byteArrayOf(0x01, 0x00)))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+        assertEquals(desc, backend.lastDescriptorWrite?.first)
+
+        h.send(3, Op.WriteDescriptor(device, otherDesc, byteArrayOf(0x01)))
+        val err = assertIs<OpResult.Err>(h.frames.reply(3))
+        assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        assertEquals(desc, backend.lastDescriptorWrite?.first)
+    }
+
+    @Test
+    fun pairAndUnpairAreGated() = runTest {
+        val backend = FakeBleBackend()
+
+        val denying = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[],"pairing":false}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val denied = policyAwareHarness(backgroundScope, backend, "owner", denying)
+        denied.connect(1)
+        denied.send(2, Op.Pair(device))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(denied.frames.reply(2)).error.kind)
+        denied.send(3, Op.Unpair(device))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(denied.frames.reply(3)).error.kind)
+        assertTrue(backend.pairCalls.isEmpty())
+        assertTrue(backend.unpairCalls.isEmpty())
+
+        val allowing = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[],"pairing":true}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val allowed = Harness(backgroundScope, backend, clientKey = "owner", writePolicy = allowing)
+        allowed.connect(4)
+        allowed.send(5, Op.Pair(device))
+        assertIs<OpResult.Ok>(allowed.frames.reply(5))
+        assertEquals(listOf(device), backend.pairCalls)
+    }
+
+    @Test
+    fun agentStatusReportsWhetherAPolicyIsConfigured() = runTest {
+        val permissive = Harness(backgroundScope, FakeBleBackend())
+        permissive.send(1, Op.AgentStatus)
+        assertFalse(permissive.frames.status(1).settings.writePolicyEnforced)
+
+        val enforced = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            clientKey = "owner",
+            writePolicy = denyingEverything("owner"),
+        )
+        enforced.send(1, Op.AgentStatus)
+        assertTrue(enforced.frames.status(1).settings.writePolicyEnforced)
     }
 }

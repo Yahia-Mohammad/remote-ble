@@ -94,6 +94,19 @@ object Capabilities {
      */
     const val AGENT_STATUS: String = "agent.status"
 
+    /**
+     * A per-principal write allowlist is enforced (`Op.Write` / `Op.WriteDescriptor` / `Op.Pair` /
+     * `Op.Unpair`). Agent-level (bookkeeping, not radio behaviour): every conforming agent
+     * implements the mechanism and advertises this unconditionally, whether or not an operator has
+     * actually configured a restrictive policy — [AgentStatusDto.settings]'s `writePolicyEnforced`
+     * reports that separately.
+     *
+     * Exists so [ErrorKind.POLICY_DENIED] can be sent at all: an unknown enum name would fail a v1
+     * client's decode (the same reason [RADIO_STATE] is gated), so a client that has not negotiated
+     * this receives [ErrorKind.INVALID_REQUEST] for a policy-denied write instead.
+     */
+    const val WRITE_POLICY: String = "write.policy"
+
     /** The agent multiplexes all logical scans through one physical scan. */
     const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"
 

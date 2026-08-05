@@ -40,6 +40,8 @@ class BleAgentBackend(
     // names). Read back off [observer] rather than taken as a second reference: in production they
     // are the same instance, and two references could drift into disagreeing about one agent.
     private val monitor: AgentMonitor? = observer as? AgentMonitor,
+    // Per-principal write allowlist (U7). Permissive by default, matching pre-U7 behaviour.
+    private val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) : AgentBackend {
     override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         BleAgent(
@@ -55,6 +57,7 @@ class BleAgentBackend(
             scanCoordinator = scanCoordinator,
             monitor = monitor,
             operatorScope = operatorScope,
+            writePolicy = writePolicy,
         ).start()
 }
 

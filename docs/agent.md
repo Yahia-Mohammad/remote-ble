@@ -576,6 +576,29 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080  # require a bearer token
 REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080
 ```
 
+### Per-principal write policy
+
+Set `REMOTE_BLE_POLICY_FILE` to a JSON file to enforce mutation permissions at the agent, keyed to
+the bearer credential principal. The file is read once before Koin, the BLE backend, or the
+WebSocket listener starts. An absent variable preserves the historical allow-all behavior. A blank
+or whitespace-only value is also treated as unconfigured, but logs a warning; once a nonblank file
+is configured, unlisted principals and empty rule lists deny all mutations.
+
+The parser is strict: malformed JSON, unknown fields, unknown principals, unsupported versions,
+and negative or out-of-range signed-32-bit `maximumBytes` values stop startup. Rules match the
+full wire-form UUIDs case-insensitively; `"*"` is the only wildcard. Descriptor rules must name a
+`descriptor` UUID as well as service and characteristic, so allowing one descriptor cannot permit
+another descriptor on the same characteristic. `maximumBytes: null` is unlimited, and `0` permits
+only an empty payload (the ordinary 512-byte operation limit still applies).
+
+Use unique JSON member names throughout a policy file. Duplicate names are invalid and unsupported:
+the Kotlin agent can retain a last value while Rust rejects duplicate DTO fields, so neither outcome
+is portable until duplicate-member rejection is hardened.
+
+See [`proposals/agent-write-policy.md`](proposals/agent-write-policy.md) for the complete schema,
+pairing behavior, and a full JSON example. `agent.status` reports whether a policy is currently
+configured through `settings.writePolicyEnforced`.
+
 > **Run it with `agent/run-agent.sh`, not `./gradlew :agent:jvmRun`.** A bare JVM process is
 > killed with `SIGABRT` the instant it touches CoreBluetooth: macOS **TCC** requires the
 > running process's main bundle to declare `NSBluetoothAlwaysUsageDescription`, and the

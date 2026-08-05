@@ -30,12 +30,7 @@ pub mod capabilities {
     /// Kotlin agent's `BleAgent.AGENT_CAPABILITIES`, and the reason it is a set rather than a
     /// per-capability decision — a client is entitled to the same answer from either agent on
     /// the same host, and an agent-level capability must not vary at all.
-    ///
-    /// `scan.batch` belongs here by nature but is deliberately absent: this agent does not yet
-    /// coalesce advertisements into `ScanResultBatch`, and advertising a capability it would not
-    /// honour is the one thing the conformance spec forbids outright. Add it here in the same
-    /// change that implements the emitter, never before.
-    pub const AGENT_CAPABILITIES: &[&str] = &[CONNECTION_SLOTS, IDENTIFIER_TRANSLATION];
+    pub const AGENT_CAPABILITIES: &[&str] = &[CONNECTION_SLOTS, IDENTIFIER_TRANSLATION, SCAN_BATCH];
 }
 
 #[derive(Debug, Clone, PartialEq)]

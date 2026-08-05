@@ -18,7 +18,7 @@ use crate::ble::backend::{BleBackend, StreamKey};
 use crate::protocol::{
     codec::{decode_cbor, encode_cbor},
     errors::{AgentError, ErrorKind},
-    events::{AgentEvent, BleConnState},
+    events::{AdvertisementDto, AgentEvent, BleConnState},
     frame::{Frame, capabilities},
     op::Op,
     results::OpResult,
@@ -50,6 +50,12 @@ const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_WRITE_BYTES: usize = 512;
 const MIN_MTU: i32 = 23;
 const MAX_MTU: i32 = 517;
+/// Longest an advertisement is held waiting for company under capability `scan.batch`, so a
+/// result is never delayed by more than this. Matches `BleAgent.DEFAULT_SCAN_BATCH_WINDOW`.
+const SCAN_BATCH_WINDOW: Duration = Duration::from_millis(100);
+/// Flush a batch early once a burst reaches this size, so a flood cannot grow the buffer
+/// unbounded between ticks. Matches `BleAgent.DEFAULT_SCAN_BATCH_MAX_SIZE`.
+const SCAN_BATCH_MAX_SIZE: usize = 16;
 /// How often the agent pings an otherwise-idle client to probe liveness.
 const PING_PERIOD: Duration = Duration::from_secs(15);
 /// Close a connection if nothing is heard from the peer for this long (covers a missed
@@ -932,21 +938,81 @@ impl AgentServer {
             let _ = terminal_tx.try_send(reason);
         });
 
+        let negotiated_capabilities =
+            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
+
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAP);
         let scan_arbiter = ScanArbiter::new(event_tx.clone());
         let frame_tx_event = frame_tx.clone();
         let translator_event = translator.clone();
+        let batch_capabilities = negotiated_capabilities.clone();
         let event_task = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                // Forward-translate the real handle the event carries into the client's format, then
-                // shed rather than block the radio when the client can't keep up.
+            // Advertisements held for coalescing under capability `scan.batch`, keyed by scan id.
+            // Batching lives here, at the one point both scan paths converge — the coordinator's
+            // arbiter and the uncontrolled backend path both feed this channel — rather than being
+            // implemented twice. Non-scan events pass straight through, as in the Kotlin agent,
+            // where batching is likewise internal to a scan and orders nothing else against it.
+            let mut pending: HashMap<i64, Vec<AdvertisementDto>> = HashMap::new();
+            let mut flush = tokio::time::interval(SCAN_BATCH_WINDOW);
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            // Forward-translate the real handle the event carries into the client's format, then
+            // shed rather than block the radio when the client can't keep up. `false` means the
+            // frame channel is gone and this pump is finished.
+            let deliver = |event: AgentEvent| -> bool {
                 let event = translator_event.to_client_event(event);
                 match frame_tx_event.try_send(Outbound::Frame(Frame::Event { event })) {
-                    Ok(()) => {}
+                    Ok(()) => true,
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!("outbound frame buffer full; dropping event")
+                        tracing::warn!("outbound frame buffer full; dropping event");
+                        true
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
+            };
+
+            'pump: loop {
+                tokio::select! {
+                    maybe_event = event_rx.recv() => {
+                        let Some(event) = maybe_event else { break };
+                        // Read live rather than latched, so a scan opened before the hello starts
+                        // batching once a later hello negotiates it — the same rule §5.3 states
+                        // for handle translation on an already-running stream.
+                        let batching = batch_capabilities.lock().contains(capabilities::SCAN_BATCH);
+                        match event {
+                            AgentEvent::ScanResult { scan_id, advertisement } if batching => {
+                                let full = {
+                                    let buffered = pending.entry(scan_id).or_default();
+                                    buffered.push(advertisement);
+                                    buffered.len() >= SCAN_BATCH_MAX_SIZE
+                                };
+                                if full
+                                    && let Some(advertisements) = pending.remove(&scan_id)
+                                    && !deliver(AgentEvent::ScanResultBatch { scan_id, advertisements })
+                                {
+                                    break 'pump;
+                                }
+                            }
+                            other => if !deliver(other) { break 'pump },
+                        }
+                    }
+                    _ = flush.tick() => {
+                        for (scan_id, advertisements) in pending.drain() {
+                            if !deliver(AgentEvent::ScanResultBatch { scan_id, advertisements }) {
+                                break 'pump;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A scan that ends mid-window must not strand the results already buffered for it.
+            for (scan_id, advertisements) in pending.drain() {
+                if !deliver(AgentEvent::ScanResultBatch {
+                    scan_id,
+                    advertisements,
+                }) {
+                    break;
                 }
             }
         });
@@ -955,8 +1021,6 @@ impl AgentServer {
         let mut negotiation = Negotiation::new();
         // Runs only for a client that negotiated `slots`; aborted with the other pumps on retire.
         let mut slot_feed: Option<tokio::task::JoinHandle<()>> = None;
-        let negotiated_capabilities =
-            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
         let mut closing_for_protocol = false;
 
         loop {
@@ -2614,6 +2678,145 @@ mod tests {
 
         watcher.close().await;
         holder.close().await;
+    }
+
+    /// The next `ScanResultBatch` for `scan_id`, as its device handles.
+    async fn recv_scan_batch(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        scan_id: i64,
+    ) -> Vec<String> {
+        loop {
+            if let Frame::Event {
+                event:
+                    AgentEvent::ScanResultBatch {
+                        scan_id: event_scan_id,
+                        advertisements,
+                    },
+            } = recv_frame(ws).await
+                && event_scan_id == scan_id
+            {
+                return advertisements.into_iter().map(|a| a.device.value).collect();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_batch_coalesces_a_window_into_one_event() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[capabilities::SCAN_BATCH],
+                &[capabilities::SCAN_BATCH],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        // Three advertisements inside one window arrive as one event rather than three, which is
+        // the whole point of the capability: one frame, one decode, one wakeup.
+        for device in ["hr", "battery", "thermo"] {
+            harness
+                .fake
+                .emit_scan(test_advertisement(device, None, None, -50))
+                .await;
+        }
+        assert_eq!(
+            recv_scan_batch(&mut client.ws, 1).await,
+            vec!["hr", "battery", "thermo"],
+            "order within a batch must follow arrival order"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_batch_flushes_early_once_a_burst_fills_the_buffer() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[capabilities::SCAN_BATCH],
+                &[capabilities::SCAN_BATCH],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        // A flood must not grow the buffer without bound between ticks, so the batch caps out and
+        // flushes on its own. Emitting one over the cap proves the flush was the size rule and not
+        // the timer: the first batch is exactly SCAN_BATCH_MAX_SIZE, with the remainder left over.
+        for index in 0..SCAN_BATCH_MAX_SIZE + 1 {
+            harness
+                .fake
+                .emit_scan(test_advertisement(&format!("dev-{index}"), None, None, -50))
+                .await;
+        }
+        let first = recv_scan_batch(&mut client.ws, 1).await;
+        assert_eq!(first.len(), SCAN_BATCH_MAX_SIZE);
+        assert_eq!(first[0], "dev-0");
+        assert_eq!(
+            recv_scan_batch(&mut client.ws, 1).await,
+            vec![format!("dev-{}", SCAN_BATCH_MAX_SIZE)],
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_results_are_unbatched_without_the_capability() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness.client("scan-a", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        harness
+            .fake
+            .emit_scan(test_advertisement("hr", None, None, -50))
+            .await;
+        // A batch is a capability-gated event type: sending one unnegotiated could break the
+        // client's decode loop, which is exactly what §5.3 forbids.
+        let batch = tokio::time::timeout(
+            Duration::from_millis(300),
+            recv_scan_batch(&mut client.ws, 1),
+        )
+        .await;
+        assert!(batch.is_err(), "unexpected batch: {batch:?}");
+        client.close().await;
     }
 
     #[tokio::test]

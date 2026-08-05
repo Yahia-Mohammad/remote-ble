@@ -18,6 +18,44 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+> Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
+> running one command per process. Nothing here changes the wire protocol: no new op, no new event,
+> no new capability string, and no change to any `@SerialName` discriminator.
+
+### Added
+
+- **A client can declare its identifier format.** `DefaultAgentSession` takes an optional
+  `identifierFormat`, still defaulting to the host's. A consumer that never constructs a Kable
+  `Identifier` should declare `IdentifierFormat.STRING`: the agent then passes its own handles
+  through untranslated, and those stay valid across that client's separate processes. Synthesized
+  handles do not — their reverse map is per connection, primed only from leases the client already
+  holds — so a handle scanned in one process previously reached the radio as a synthetic string in
+  the next. See [`docs/client-sdk.md`](docs/client-sdk.md).
+
+### Changed
+
+- **`transportGrace` now defaults to 120 s** on the JVM agent and `agent-rs` (`leaseGrace` is
+  unchanged at 10 s — that path's radio link is already down). Ten seconds is shorter than the gap
+  between two commands a human types or a model plans, so a process-per-command client paid a full
+  reconnect and rediscovery on nearly every step. The trade is contention: a peripheral stays
+  leased for up to the window after its holder walks away, so a shared rig should lower
+  `REMOTE_BLE_TRANSPORT_GRACE_MS` / `--transport-grace-ms`.
+- **Connection slots are counted agent-wide and lease-aware, and reported on negotiation.** The
+  count came from the caller's own connected set, so a fresh client read full capacity no matter
+  what other clients held, and never saw the peripheral it was itself holding between two
+  invocations. The cap moved to `PeripheralRegistry`, where it matches the constraint it models —
+  the host controller's, not one session's — and a lease counts as occupied until release,
+  including inside its grace window. A client that negotiates `slots` now receives the current
+  state at handshake instead of waiting for a connection count to move.
+
+### Fixed
+
+- **`PERIPHERAL_BUSY` names the holder.** Both agents apply one disclosure policy: the principal
+  always, the client id only when the caller shares that principal. The identity is escaped and
+  length-bounded at the point of disclosure, since half of it is text the holder chose and the
+  message is rendered in someone else's terminal, log, or model context. This also stops `agent-rs`
+  interpolating the raw session key, which leaked a foreign client id and the NUL separator.
+
 ## [0.10.0] - 2026-08-04
 
 > **The consolidated Maven Central release.** 0.8.1 through 0.9.1 shipped as GitHub-only agent

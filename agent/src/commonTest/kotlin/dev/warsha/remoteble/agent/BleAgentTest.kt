@@ -66,7 +66,9 @@ class BleAgentTest {
         maxConnections: Int = 4,
         maxActiveScans: Int = BleAgent.MAX_ACTIVE_SCANS,
         maxActiveObservations: Int = BleAgent.MAX_ACTIVE_OBSERVATIONS,
-        registry: PeripheralRegistry = PeripheralRegistry(scope),
+        // The slot cap lives in the registry (it is the host radio's, not one session's), so a
+        // harness asking for a smaller cap has to build the registry with it.
+        registry: PeripheralRegistry = PeripheralRegistry(scope, maxSlots = maxConnections),
         clientId: Long = 0L,
         capabilities: Set<String> = emptySet(),
         scanBatchWindow: Duration = BleAgent.DEFAULT_SCAN_BATCH_WINDOW,
@@ -494,7 +496,7 @@ class BleAgentTest {
     }
 
     @Test
-    fun emitsSlotStateOnConnectAndDisconnectWhenNegotiated() = runTest {
+    fun emitsSlotStateOnNegotiationThenOnEveryOccupancyChange() = runTest {
         val h = Harness(
             backgroundScope, FakeBleBackend(), maxConnections = 2,
             capabilities = setOf(Capabilities.CONNECTION_SLOTS),
@@ -507,9 +509,34 @@ class BleAgentTest {
         assertIs<OpResult.Ok>(h.frames.reply(2))
 
         val slots = h.frames.filterIsInstance<Event>().map { it.event }
-            .filterIsInstance<AgentEvent.SlotState>().take(2).toList()
-        assertEquals(listOf(1, 2), slots.map { it.free }) // 2-1 after connect, back to 2 after disconnect
+            .filterIsInstance<AgentEvent.SlotState>().take(3).toList()
+        // The first is the handshake snapshot: a client that negotiates `slots` and connects
+        // nothing still learns the current occupancy, instead of waiting for a change that a
+        // quiet agent may never produce.
+        assertEquals(listOf(2, 1, 2), slots.map { it.free })
         assertEquals(2, slots[0].total)
+    }
+
+    @Test
+    fun slotStateCountsAnotherClientsLease() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 2)
+        val other = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientId = 1L)
+        other.sendHello(emptySet())
+        other.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(other.frames.reply(1))
+
+        // A second client's very first slot report must already account for the peripheral the
+        // first client holds — the per-session count this replaced would have said "2 free".
+        val watcher = Harness(
+            backgroundScope, FakeBleBackend(), registry = registry, clientId = 2L,
+            capabilities = setOf(Capabilities.CONNECTION_SLOTS),
+        )
+        watcher.sendHello(setOf(Capabilities.CONNECTION_SLOTS))
+
+        val slot = watcher.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.SlotState>().first()
+        assertEquals(1, slot.free)
+        assertEquals(2, slot.total)
     }
 
     @Test
@@ -952,9 +979,11 @@ class BleAgentTest {
         )
         h.send(2, Op.Disconnect(device))
         assertIs<OpResult.Ok>(h.frames.reply(2))
-        val slotAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
-            .filterIsInstance<AgentEvent.SlotState>().first()
-        assertEquals(2, slotAfterHello.free) // both slots free again — and the event now flows
+        val slotsAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.SlotState>().take(2).toList()
+        // The event now flows: the handshake snapshot already accounts for the peripheral this
+        // client connected before negotiating, and the disconnect frees it.
+        assertEquals(listOf(1, 2), slotsAfterHello.map { it.free })
     }
 
     @Test

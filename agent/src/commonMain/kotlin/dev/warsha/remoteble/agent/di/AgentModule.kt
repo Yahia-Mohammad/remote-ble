@@ -113,6 +113,7 @@ fun agentModule(config: AgentConfig): Module = module {
             leaseGrace = config.leaseGrace,
             transportGrace = config.transportGrace,
             defaultExclusive = true,
+            maxSlots = config.maxConnections,
             onRelease = { handle -> backend.disconnect(DeviceHandle(handle)) },
         )
     }

@@ -29,6 +29,11 @@ object Capabilities {
     /**
      * Unsolicited `AgentEvent.SlotState` events reporting free/total connection slots.
      * Agent-level (radio-independent): the agent tracks slots itself.
+     *
+     * A client that negotiates this receives one event immediately, carrying the state at handshake
+     * time, and one on every later change. The count is **agent-global and lease-aware**: it spans
+     * every client, and a peripheral still leased inside its grace window counts as occupied,
+     * because that is the capacity the next `connect` will actually meet.
      */
     const val CONNECTION_SLOTS: String = "slots"
 

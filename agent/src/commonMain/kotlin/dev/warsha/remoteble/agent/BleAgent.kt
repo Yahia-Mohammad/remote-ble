@@ -90,7 +90,7 @@ class BleAgent(
     // Cross-client peripheral ownership. Defaults to a private per-instance registry so a
     // standalone agent (and single-client tests) is unconstrained; the shared agent injects
     // the one [PeripheralRegistry] every connection's BleAgent must agree on.
-    private val registry: PeripheralRegistry = PeripheralRegistry(scope),
+    private val registry: PeripheralRegistry = PeripheralRegistry(scope, maxSlots = maxConnections),
     // Stable client identity (survives reconnects) — the ownership key. Defaults to this
     // connection's id, so a client that sends no handshake id simply never resumes.
     private val clientKey: String = clientId.toString(),
@@ -257,7 +257,6 @@ class BleAgent(
                 emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED, reason = reason))
                 translator.evict(handle)
                 evictWriteChain(handle)
-                emitSlotsIfNegotiated()
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -530,23 +529,15 @@ class BleAgent(
                         message = LeaseDisclosure.busyMessage(acquisition.owner, clientKey),
                     ),
                 )
+            PeripheralRegistry.Acquisition.NoSlot ->
+                return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
             PeripheralRegistry.Acquisition.Granted -> Unit
         }
 
-        // Per-client slot reservation (the cap is per session, not the lease).
-        val reserved = state.withLock {
-            when {
-                connected.size >= maxConnections -> false
-                else -> {
-                    connected += device.value // reserve before the (slow) connect
-                    true
-                }
-            }
-        }
-        if (!reserved) {
-            registry.releaseNow(device.value, clientKey) // give the lease back; never connected
-            return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
-        }
+        // The slot was taken by the acquisition above — the cap is the host radio's, so it is the
+        // registry's to enforce. This set stays for *this* connection's bookkeeping (idempotent
+        // connect, teardown), not as a second, per-session capacity rule.
+        state.withLock { connected += device.value } // reserve before the (slow) connect
 
         try {
             backend.connect(device)
@@ -555,7 +546,6 @@ class BleAgent(
             registry.releaseNow(device.value, clientKey)
             observer.onClientLog(clientId, "connect failed: ${device.value} (${e.message})")
             Logger.warn(LogTags.ENGINE) { "connect failed [c=$clientId dev=${device.value}]: ${e.message}" }
-            emitSlotsIfNegotiated() // slot restored
             throw e
         }
         if (!registry.onConnected(device.value, clientKey) { connectionLive }) {
@@ -571,7 +561,6 @@ class BleAgent(
         observer.onClientLog(clientId, "connected ${device.value}")
         Logger.info(LogTags.ENGINE) { "device connected [c=$clientId dev=${device.value}]" }
         emit(AgentEvent.ConnectionState(device, BleConnState.CONNECTED))
-        emitSlotsIfNegotiated()
         return OpResult.Ok()
     }
 
@@ -586,7 +575,6 @@ class BleAgent(
         emit(AgentEvent.ConnectionState(device, BleConnState.DISCONNECTED))
         translator.evict(device.value)
         evictWriteChain(device.value)
-        emitSlotsIfNegotiated()
         return result.fold(onSuccess = { OpResult.Ok() }, onFailure = { throw it })
     }
 
@@ -944,7 +932,10 @@ class BleAgent(
             )
             Logger.warn(LogTags.SERVER) { "repeated hello ignored [c=$clientId]" }
         }
-        if (first) startRadioStateFeed()
+        if (first) {
+            startRadioStateFeed()
+            startSlotStateFeed()
+        }
     }
 
     /**
@@ -980,7 +971,7 @@ class BleAgent(
 
     /**
      * Emits a bond-state change — but only to a client that negotiated `pairing` (the same
-     * decode-loop rationale as [emitSlotsIfNegotiated]: an unnegotiated event type could break
+     * decode-loop rationale as [startSlotStateFeed]: an unnegotiated event type could break
      * the client's decode loop). The solicited reply payload carries the state either way.
      */
     private suspend fun emitBondStateIfNegotiated(device: DeviceHandle, state: BleBondState) {
@@ -988,11 +979,41 @@ class BleAgent(
         emit(AgentEvent.BondState(device, state))
     }
 
-    /** Reports free/total connection slots — but only to a client that negotiated `slots`. */
-    private suspend fun emitSlotsIfNegotiated() {
+    /**
+     * Streams free/total connection slots to a client that negotiated `slots`, starting with the
+     * current value.
+     *
+     * Two things this deliberately is not. It is not per session: the count comes from the
+     * registry, so it reflects every client's leases against the host's capacity, and a client
+     * learns that a peripheral is unavailable because *someone* holds it — including itself,
+     * between two invocations of a process-per-command tool. And it is not change-triggered from
+     * the connect/disconnect paths: a `StateFlow` replays its current value to a new collector, so
+     * a client that negotiates `slots` and asks nothing else still gets an answer instead of
+     * waiting for a connection count to move.
+     *
+     * Started from the handshake for the same reason as [startRadioStateFeed] — [negotiated] is
+     * only known once the hello lands.
+     */
+    private fun startSlotStateFeed() {
         if (Capabilities.CONNECTION_SLOTS !in negotiated) return
-        val free = state.withLock { maxConnections - connected.size }
-        emit(AgentEvent.SlotState(free = free, total = maxConnections))
+        scope.launch {
+            registry.occupiedSlots.collect { occupied ->
+                // Contained like [startRadioStateFeed]: a send that throws on an already-closing
+                // socket must not tear down the session scope on its way out.
+                try {
+                    emit(
+                        AgentEvent.SlotState(
+                            free = (registry.totalSlots - occupied).coerceAtLeast(0),
+                            total = registry.totalSlots,
+                        ),
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    observer.onClientLog(clientId, "failed to deliver slot state: ${t.message}")
+                }
+            }
+        }
     }
 
     private suspend fun reply(cid: Long, result: OpResult) = outgoing(codec.encode(Reply(cid, result)))

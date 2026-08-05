@@ -210,4 +210,45 @@ class PeripheralRegistryTest {
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // released by grace, not stuck connected
     }
+
+    @Test
+    fun theSlotCapIsHostWideRatherThanPerClient() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 2)
+
+        assertIs<Acquisition.Granted>(registry.acquire("dev-1", a))
+        assertIs<Acquisition.Granted>(registry.acquire("dev-2", b))
+        // Two different clients have exhausted the host radio's capacity between them, which the
+        // per-session cap this replaced could not express.
+        assertIs<Acquisition.NoSlot>(registry.acquire("dev-3", a))
+
+        registry.releaseNow("dev-1", a)
+        assertIs<Acquisition.Granted>(registry.acquire("dev-3", a))
+    }
+
+    @Test
+    fun reAcquiringAnOwnedLeaseConsumesNoFurtherSlot() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 1)
+
+        assertIs<Acquisition.Granted>(registry.acquire(p, a))
+        assertIs<Acquisition.Granted>(registry.acquire(p, a)) // the resume path, not a new lease
+        assertEquals(1, registry.occupiedSlots.value)
+    }
+
+    @Test
+    fun occupancyCountsALeaseUntilItsGraceExpires() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, transportGrace = 10.seconds, maxSlots = 4)
+        registry.acquire(p, a)
+        registry.onConnected(p, a)
+        assertEquals(1, registry.occupiedSlots.value)
+
+        registry.onTransportDropped(a)
+        runCurrent()
+        // The client is gone but its link is warm and the peripheral is nobody else's: reporting
+        // this slot as free is what would mislead a client whose next process is about to resume.
+        assertEquals(1, registry.occupiedSlots.value)
+
+        advanceTimeBy(11.seconds)
+        runCurrent()
+        assertEquals(0, registry.occupiedSlots.value)
+    }
 }

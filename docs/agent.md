@@ -264,7 +264,9 @@ private val observeJobs = mutableMapOf<Long, Job>()
   `ConnectionState(CONNECTED)` event. Connecting an already-connected device is an
   **idempotent success** (no re-emit). If the slot cap (`maxConnections`, default 4)
   is hit, it replies `Err(NO_CONNECTION_SLOT)`. A failed connect **releases the
-  reserved slot and the lease**.
+  reserved slot and the lease**. The cap is enforced by the registry and is therefore
+  **agent-wide**: the constraint is the host controller's, so two clients holding four
+  peripherals each exhaust the same radio as one client holding eight.
 - **`Disconnect`** disconnects via the backend, frees the slot, starts the lease's
   **release grace** (`leaseGrace`, default 10s — a quick reconnect keeps ownership),
   and emits `ConnectionState(DISCONNECTED)`.

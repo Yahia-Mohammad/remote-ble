@@ -240,7 +240,7 @@ is the body of an unsolicited `Event` frame:
 | `Notification` | `notification` | `subId: Long`, `value: ByteArray` | `subId` |
 | `ConnectionState` | `conn.state` | `device: DeviceHandle`, `state: BleConnState`, `reason: AgentError?` | `device` |
 | `BondState` | `bond.state` | `device: DeviceHandle`, `state: BleBondState`, `reason: AgentError?` | `device` — **capability: `pairing`** |
-| `SlotState` | `conn.slots` | `free: Int`, `total: Int` | session-global — **capability: `slots`** |
+| `SlotState` | `conn.slots` | `free: Int`, `total: Int` | agent-global — **capability: `slots`** |
 | `RadioState` | `radio.state` | `state: BleRadioState` | session-global — **capability: `radio.state`** |
 
 `RadioState` reports the **agent host's radio**, not any one link: `ON`, `OFF`, `UNAUTHORIZED`,

@@ -18,9 +18,14 @@ import kotlinx.coroutines.flow.Flow
 class BleAgentBackend(
     private val backend: BleBackend,
     private val lifecycleScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
-    private val registry: PeripheralRegistry =
-        PeripheralRegistry(lifecycleScope, onRelease = { backend.disconnect(DeviceHandle(it)) }),
+    // Declared before [registry] so a default registry inherits the same cap: the slot limit is the
+    // host radio's, and the registry is where it is enforced.
     private val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
+    private val registry: PeripheralRegistry = PeripheralRegistry(
+        lifecycleScope,
+        maxSlots = maxConnections,
+        onRelease = { backend.disconnect(DeviceHandle(it)) },
+    ),
     private val observer: AgentObserver = AgentObserver.None,
     private val scanCoordinator: ScanCoordinator? = null,
     // Optional features advertised in the handshake: the backend's own (radio-dependent,

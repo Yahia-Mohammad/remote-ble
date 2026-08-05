@@ -68,6 +68,23 @@ class LeaseDisclosureTest {
     }
 
     @Test
+    fun boundsTheRenderedLengthOfAnAllEscapedIdentity() {
+        // Every character escapes to six. The bound is on rendered length, not on characters
+        // consumed, so this stays short — and matches what `lease_disclosure.rs` produces for the
+        // same input, which is the point of having one policy across two agents.
+        //
+        // Built directly rather than through sessionKey for the same reason as
+        // [boundsAnOverlongIdentity]: ingress caps a client id at 128 bytes, and this asserts that
+        // the disclosure layer bounds its own output rather than inheriting that cap.
+        val message = LeaseDisclosure.busyMessage(
+            ownerKey = "lab-a" + SEPARATOR + "\u0007".repeat(200),
+            requesterKey = key("lab-a", "rble-ci"),
+        )
+        assertTrue(message.length < 100, "message was ${message.length} characters")
+        assertContains(message, "…")
+    }
+
+    @Test
     fun treatsAKeyWithNoClientIdAsABarePrincipal() {
         assertEquals(
             "peripheral in use by principal 'lab-a'",

@@ -51,6 +51,10 @@ fn sanitize(value: &str) -> String {
         return "<unnamed>".to_string();
     }
     let mut out = String::new();
+    // Counts *rendered* characters, not input ones: an escape costs six. Bounding the input
+    // instead would let 48 control characters expand to 288 characters of output — and would
+    // disagree with `LeaseDisclosure.kt`, which bounds its builder's length, so the same holder
+    // would be described differently depending on which agent refused the caller.
     let mut rendered = 0usize;
     for character in value.chars() {
         if rendered >= MAX_FRAGMENT_CHARS {
@@ -59,10 +63,11 @@ fn sanitize(value: &str) -> String {
         }
         if character.is_ascii_graphic() && character != '\'' || character == ' ' {
             out.push(character);
+            rendered += 1;
         } else {
             out.push_str(&format!("\\u{:04x}", character as u32));
+            rendered += 6;
         }
-        rendered += 1;
     }
     out
 }
@@ -91,20 +96,33 @@ mod tests {
 
     #[test]
     fn escapes_control_characters_and_the_delimiting_quote() {
-        let message = busy_message(
-            &key("lab-a", "evil\n free'-now"),
-            &key("lab-a", "rble-ci"),
-        );
+        let message = busy_message(&key("lab-a", "evil\n free'-now"), &key("lab-a", "rble-ci"));
         assert!(!message.contains('\n'), "{message}");
         assert!(message.contains("\\u000a"), "{message}");
         // Only the four quotes the message itself supplies.
-        assert_eq!(message.chars().filter(|c| *c == '\'').count(), 4, "{message}");
+        assert_eq!(
+            message.chars().filter(|c| *c == '\'').count(),
+            4,
+            "{message}"
+        );
     }
 
     #[test]
     fn bounds_an_overlong_identity() {
         let message = busy_message(&key("lab-a", &"c".repeat(500)), &key("lab-a", "rble-ci"));
         assert!(message.chars().count() < 200, "{message}");
+        assert!(message.contains('…'), "{message}");
+    }
+
+    #[test]
+    fn bounds_the_rendered_length_of_an_all_escaped_identity() {
+        // Every character escapes to six, so an input-character bound would emit ~288 characters
+        // here while the Kotlin agent emitted ~48. Same holder, same policy, same answer.
+        let message = busy_message(
+            &key("lab-a", &"\u{7}".repeat(200)),
+            &key("lab-a", "rble-ci"),
+        );
+        assert!(message.chars().count() < 100, "{message}");
         assert!(message.contains('…'), "{message}");
     }
 

@@ -76,4 +76,42 @@ class RustAgentInteropTest {
         "82656576656e74a1656576656e74826a636f6e6e2e736c6f7473a264667265650365746f74616c04",
         Event(AgentEvent.SlotState(free = 3, total = 4)),
     )
+
+    /**
+     * `scan.batch` became reachable in 0.10.1: `agent-rs` could always *decode* a batch but never
+     * sent one, so this direction had no coverage while it could not fail. It now emits them, and a
+     * batch is the frame where the definite-length difference compounds — a nested array of maps,
+     * each with an optional field the agent omits entirely rather than encoding as null.
+     *
+     * The second advertisement is deliberately the sparse one: no name, no service UUIDs, and
+     * manufacturer data with a high byte, so absent-vs-empty-vs-signed all appear in one vector.
+     */
+    @Test
+    fun eventScanResultBatch() = assertDecodes(
+        "82656576656e74a1656576656e74826a7363616e2e6261746368a2667363616e4964076e6164766572746973656d656e747382a5" +
+            "66646576696365a16576616c75657141413a42423a43433a44443a45453a4646646e616d656348524d64727373693836" +
+            "6c73657276696365557569647381782430303030313830642d303030302d313030302d383030302d3030383035663962" +
+            "3334666270" +
+            "6d616e75666163747572657244617461a0a466646576696365a16576616c75657131313a32323a33333a34343a35353a" +
+            "3636647273736938456c73657276696365557569647380706d616e75666163747572657244617461a1184c820120",
+        Event(
+            AgentEvent.ScanResultBatch(
+                scanId = 7,
+                advertisements = listOf(
+                    AdvertisementDto(
+                        device = dev,
+                        name = "HRM",
+                        rssi = -55,
+                        serviceUuids = listOf("0000180d-0000-1000-8000-00805f9b34fb"),
+                    ),
+                    AdvertisementDto(
+                        device = DeviceHandle("11:22:33:44:55:66"),
+                        name = null,
+                        rssi = -70,
+                        manufacturerData = mapOf(76 to byteArrayOf(0x01, -0x01)),
+                    ),
+                ),
+            ),
+        ),
+    )
 }

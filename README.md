@@ -21,6 +21,39 @@ interface (Bleak + Home Assistant there, Kable here) — RemoteBLE applies the s
 Kotlin Multiplatform and OS-class hosts for development, testing, and CI. Independent and
 not affiliated with the ESPHome or Home Assistant projects.
 
+## Quick look
+
+Start an agent once (see [Running the agent](#running-the-agent) for every option):
+
+```sh
+agent/run-agent.sh 8080   # ws://localhost:8080/agent, real CoreBluetooth/BlueZ/…
+```
+
+Then it's ordinary Kable code — the only RemoteBLE-specific part is how you get the
+`Peripheral`:
+
+```kotlin
+val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+val transport = WebSocketAgentTransport("ws://localhost:8080/agent", scope, defaultWebSocketHttpClient())
+val session = DefaultAgentSession(transport, CborProtocolCodec(), scope)
+
+// scan → pick a device → get a Kable Peripheral that happens to be remote
+val advertisement = RemoteScanner(session).advertisements.first()
+val peripheral = peripheralFor(BleMode.REMOTE, advertisement, session)
+
+// from here it's just Kable — identical to a local Peripheral
+peripheral.connect()
+val characteristic = peripheral.services.first()!!.first().characteristics.first()
+val value = peripheral.read(characteristic)
+peripheral.observe(characteristic).collect { /* notifications */ }
+```
+
+Swap `BleMode.REMOTE` for `BleMode.LOCAL` (and drop the `session`) and the exact same
+`peripheral` code runs against the local radio instead — that one-line factory choice is
+the whole point of RemoteBLE. Full walkthrough with expected output at every step in
+[getting-started.md](docs/getting-started.md); every public class in
+[client-sdk.md](docs/client-sdk.md).
+
 ## System at a glance
 
 RemoteBLE has three core parts:

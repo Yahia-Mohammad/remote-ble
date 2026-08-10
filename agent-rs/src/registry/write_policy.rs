@@ -16,6 +16,11 @@
 //! Exact, case-insensitive string equality against the wire form of `CharRef`/`DescRef` — the
 //! full 128-bit UUID, never the short form — or the wildcard `"*"`. `instance` is deliberately not
 //! part of matching. `maximum_bytes: None` is unlimited; `with_response: None` matches either type.
+//!
+//! `device` scopes a rule to one peripheral and defaults to `"*"`, so a policy file written without
+//! it keeps its previous meaning. It matches the device *handle* — the same value the registry
+//! leases and `agent.status` reports — so an operator writes the identity the agent already shows
+//! them rather than a second naming scheme.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -46,15 +51,26 @@ pub struct PrincipalPolicy {
 pub struct WriteRule {
     pub service: String,
     pub characteristic: String,
+    /// The peripheral this rule is about, as its device handle, or `"*"` for any. Optional and
+    /// wildcard by default, so a policy written before this field existed keeps its meaning.
+    #[serde(default = "any_device")]
+    pub device: String,
     #[serde(default, rename = "maximumBytes")]
     pub maximum_bytes: Option<i32>,
     #[serde(default, rename = "withResponse")]
     pub with_response: Option<bool>,
 }
 
+/// The `device` default: any peripheral.
+fn any_device() -> String {
+    "*".to_string()
+}
+
 impl WriteRule {
-    fn matches_char(&self, service: &str, characteristic: &str) -> bool {
-        matches_field(&self.service, service) && matches_field(&self.characteristic, characteristic)
+    fn matches_char(&self, device: &str, service: &str, characteristic: &str) -> bool {
+        matches_field(&self.device, device)
+            && matches_field(&self.service, service)
+            && matches_field(&self.characteristic, characteristic)
     }
 
     fn permits(&self, size: usize, with_response: bool) -> bool {
@@ -72,13 +88,23 @@ pub struct DescriptorWriteRule {
     pub service: String,
     pub characteristic: String,
     pub descriptor: String,
+    /// The peripheral this rule is about, or `"*"` for any — see [`WriteRule::device`].
+    #[serde(default = "any_device")]
+    pub device: String,
     #[serde(default, rename = "maximumBytes")]
     pub maximum_bytes: Option<i32>,
 }
 
 impl DescriptorWriteRule {
-    fn matches_desc(&self, service: &str, characteristic: &str, descriptor: &str) -> bool {
-        matches_field(&self.service, service)
+    fn matches_desc(
+        &self,
+        device: &str,
+        service: &str,
+        characteristic: &str,
+        descriptor: &str,
+    ) -> bool {
+        matches_field(&self.device, device)
+            && matches_field(&self.service, service)
             && matches_field(&self.characteristic, characteristic)
             && matches_field(&self.descriptor, descriptor)
     }
@@ -132,6 +158,7 @@ impl WritePolicy {
     pub fn authorizes_write(
         &self,
         principal: &str,
+        device: &str,
         service: &str,
         characteristic: &str,
         size: usize,
@@ -142,7 +169,8 @@ impl WritePolicy {
         };
         principals.get(principal).is_some_and(|policy| {
             policy.writes.iter().any(|rule| {
-                rule.matches_char(service, characteristic) && rule.permits(size, with_response)
+                rule.matches_char(device, service, characteristic)
+                    && rule.permits(size, with_response)
             })
         })
     }
@@ -150,6 +178,7 @@ impl WritePolicy {
     pub fn authorizes_descriptor_write(
         &self,
         principal: &str,
+        device: &str,
         service: &str,
         characteristic: &str,
         descriptor: &str,
@@ -160,7 +189,7 @@ impl WritePolicy {
         };
         principals.get(principal).is_some_and(|policy| {
             policy.descriptor_writes.iter().any(|rule| {
-                rule.matches_desc(service, characteristic, descriptor)
+                rule.matches_desc(device, service, characteristic, descriptor)
                     && rule
                         .maximum_bytes
                         .is_none_or(|max| max >= 0 && size <= max as usize)
@@ -240,6 +269,8 @@ fn validate_maximum_bytes(maximum_bytes: Option<i32>, rule: &str) -> Result<(), 
 mod tests {
     use super::*;
 
+    const DEV: &str = "AA:BB:CC:DD:EE:FF";
+    const OTHER_DEV: &str = "11:22:33:44:55:66";
     const HEART_RATE: &str = "0000180d-0000-1000-8000-00805f9b34fb";
     const CONTROL_POINT: &str = "00002a39-0000-1000-8000-00805f9b34fb";
     const BATTERY: &str = "0000180f-0000-1000-8000-00805f9b34fb";
@@ -254,9 +285,17 @@ mod tests {
     fn permissive_allows_every_write_and_is_not_enforced() {
         let policy = WritePolicy::permissive();
         assert!(!policy.enforced());
-        assert!(policy.authorizes_write("anyone", HEART_RATE, CONTROL_POINT, 1_000_000, false));
+        assert!(policy.authorizes_write(
+            "anyone",
+            DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            1_000_000,
+            false
+        ));
         assert!(policy.authorizes_descriptor_write(
             "anyone",
+            DEV,
             HEART_RATE,
             CONTROL_POINT,
             CCCD,
@@ -273,7 +312,7 @@ mod tests {
         )
         .unwrap();
         assert!(policy.enforced());
-        assert!(!policy.authorizes_write("lab-b", HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(!policy.authorizes_write("lab-b", DEV, HEART_RATE, CONTROL_POINT, 1, true));
     }
 
     #[test]
@@ -283,7 +322,7 @@ mod tests {
             &known(&["lab-a"]),
         )
         .unwrap();
-        assert!(!policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(!policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
     }
 
     #[test]
@@ -294,10 +333,88 @@ mod tests {
             ]}}}}}}"#
         );
         let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, true));
-        assert!(!policy.authorizes_write("lab-a", HEART_RATE, BATTERY, 1, true));
-        assert!(!policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 2, true));
-        assert!(!policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, false));
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(!policy.authorizes_write("lab-a", DEV, HEART_RATE, BATTERY, 1, true));
+        assert!(!policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 2, true));
+        assert!(!policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, false));
+    }
+
+    #[test]
+    fn an_omitted_device_matches_any_peripheral() {
+        // The compatibility guarantee: a policy written before `device` existed must keep meaning
+        // what it meant, on every device.
+        let raw = format!(
+            r#"{{"version":1,"principals":{{"lab-a":{{"writes":[
+                {{"service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}"}}
+            ]}}}}}}"#
+        );
+        let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(policy.authorizes_write("lab-a", OTHER_DEV, HEART_RATE, CONTROL_POINT, 1, true));
+    }
+
+    #[test]
+    fn an_explicit_device_scopes_the_rule_to_that_peripheral() {
+        let raw = format!(
+            r#"{{"version":1,"principals":{{"lab-a":{{"writes":[
+                {{"device":"{DEV}","service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}"}}
+            ]}}}}}}"#
+        );
+        let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
+        // The point of the field: same principal, same characteristic, different peripheral.
+        assert!(!policy.authorizes_write("lab-a", OTHER_DEV, HEART_RATE, CONTROL_POINT, 1, true));
+    }
+
+    #[test]
+    fn an_explicit_device_wildcard_is_the_same_as_omitting_it() {
+        let raw = format!(
+            r#"{{"version":1,"principals":{{"lab-a":{{"writes":[
+                {{"device":"*","service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}"}}
+            ]}}}}}}"#
+        );
+        let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
+        assert!(policy.authorizes_write("lab-a", OTHER_DEV, HEART_RATE, CONTROL_POINT, 1, true));
+    }
+
+    #[test]
+    fn a_device_scoped_descriptor_rule_does_not_reach_another_peripheral() {
+        let raw = format!(
+            r#"{{"version":1,"principals":{{"lab-a":{{"descriptorWrites":[
+                {{"device":"{DEV}","service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}","descriptor":"{CCCD}"}}
+            ]}}}}}}"#
+        );
+        let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
+        assert!(policy.authorizes_descriptor_write(
+            "lab-a",
+            DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            CCCD,
+            1
+        ));
+        assert!(!policy.authorizes_descriptor_write(
+            "lab-a",
+            OTHER_DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            CCCD,
+            1
+        ));
+    }
+
+    #[test]
+    fn device_matching_is_case_insensitive_like_every_other_field() {
+        // BLE handles are commonly rendered in either case depending on the platform, so an
+        // operator must not have to guess which one their agent will present.
+        let raw = format!(
+            r#"{{"version":1,"principals":{{"lab-a":{{"writes":[
+                {{"device":"{}","service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}"}}
+            ]}}}}}}"#,
+            DEV.to_lowercase()
+        );
+        let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
     }
 
     #[test]
@@ -310,7 +427,7 @@ mod tests {
             CONTROL_POINT.to_uppercase()
         );
         let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
     }
 
     #[test]
@@ -320,9 +437,9 @@ mod tests {
             &known(&["ci"]),
         )
         .unwrap();
-        assert!(policy.authorizes_write("ci", HEART_RATE, CONTROL_POINT, 20, false));
-        assert!(policy.authorizes_write("ci", BATTERY, "anything-at-all", 20, true));
-        assert!(!policy.authorizes_write("ci", BATTERY, "anything-at-all", 21, true));
+        assert!(policy.authorizes_write("ci", DEV, HEART_RATE, CONTROL_POINT, 20, false));
+        assert!(policy.authorizes_write("ci", DEV, BATTERY, "anything-at-all", 20, true));
+        assert!(!policy.authorizes_write("ci", DEV, BATTERY, "anything-at-all", 21, true));
     }
 
     #[test]
@@ -331,8 +448,8 @@ mod tests {
             r#"{{"version":1,"principals":{{"lab-a":{{"writes":[{{"service":"{HEART_RATE}","characteristic":"{CONTROL_POINT}","maximumBytes":null,"withResponse":null}}]}}}}}}"#
         );
         let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 10_000, true));
-        assert!(policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 10_000, false));
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 10_000, true));
+        assert!(policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 10_000, false));
     }
 
     #[test]
@@ -344,11 +461,26 @@ mod tests {
             }}}}}}"#
         );
         let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(!policy.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, true));
-        assert!(policy.authorizes_descriptor_write("lab-a", HEART_RATE, CONTROL_POINT, CCCD, 2));
-        assert!(!policy.authorizes_descriptor_write("lab-a", HEART_RATE, CONTROL_POINT, CCCD, 3));
+        assert!(!policy.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(policy.authorizes_descriptor_write(
+            "lab-a",
+            DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            CCCD,
+            2
+        ));
         assert!(!policy.authorizes_descriptor_write(
             "lab-a",
+            DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            CCCD,
+            3
+        ));
+        assert!(!policy.authorizes_descriptor_write(
+            "lab-a",
+            DEV,
             HEART_RATE,
             CONTROL_POINT,
             USER_DESCRIPTION,
@@ -364,9 +496,17 @@ mod tests {
             ]}}}}}}"#
         );
         let policy = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(policy.authorizes_descriptor_write("lab-a", HEART_RATE, CONTROL_POINT, CCCD, 1));
         assert!(policy.authorizes_descriptor_write(
             "lab-a",
+            DEV,
+            HEART_RATE,
+            CONTROL_POINT,
+            CCCD,
+            1
+        ));
+        assert!(policy.authorizes_descriptor_write(
+            "lab-a",
+            DEV,
             HEART_RATE,
             CONTROL_POINT,
             USER_DESCRIPTION,
@@ -382,8 +522,8 @@ mod tests {
             ]}}}}}}"#
         );
         let zero = WritePolicy::decode(&raw, &known(&["lab-a"])).unwrap();
-        assert!(zero.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 0, true));
-        assert!(!zero.authorizes_write("lab-a", HEART_RATE, CONTROL_POINT, 1, true));
+        assert!(zero.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 0, true));
+        assert!(!zero.authorizes_write("lab-a", DEV, HEART_RATE, CONTROL_POINT, 1, true));
         for invalid in [
             r#"{"version":1,"principals":{"lab-a":{"writes":[{"service":"*","characteristic":"*","maximumBytes":-1}]}}}"#,
             r#"{"version":1,"principals":{"lab-a":{"descriptorWrites":[{"service":"*","characteristic":"*","descriptor":"*","maximumBytes":-1}]}}}"#,

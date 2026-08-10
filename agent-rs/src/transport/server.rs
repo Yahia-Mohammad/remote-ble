@@ -1840,6 +1840,7 @@ impl AgentServer {
                 let principal = write_policy::principal_of(client_id);
                 if !status.source.write_policy.authorizes_write(
                     principal,
+                    &device.value,
                     &char.service,
                     &char.characteristic,
                     value.len(),
@@ -1869,6 +1870,7 @@ impl AgentServer {
                 let principal = write_policy::principal_of(client_id);
                 if !status.source.write_policy.authorizes_descriptor_write(
                     principal,
+                    &device.value,
                     &desc.service,
                     &desc.characteristic,
                     &desc.descriptor,

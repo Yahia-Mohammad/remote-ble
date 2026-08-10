@@ -47,6 +47,10 @@ limit"* after the image had already built; the third, ~90 minutes later, succeed
 build was never at fault. Worth knowing for the next release: buildx exports its cache only on
 success, so each failed push discarded a ~23-minute emulated arm64 rebuild.
 
+**0.11.0** pushed cleanly on the first attempt — no rate-limit retry was needed. Tags `0.11.0`,
+`0.11`, `0`, `latest`, `sha-1b7df09`; OCI index digest
+`sha256:d91bb3c329a681c0e601411d80b4a8e977854bfd1b03435016e73270a674e2cd`.
+
 ### Maven Central
 
 Published and released by [`release.yml`](../.github/workflows/release.yml) (run `30943065249`) —
@@ -79,6 +83,25 @@ as CI runs them, all three would have resolved locally and passed while proving 
 run with `-Dmaven.repo.local` pointed at an empty directory and `--refresh-dependencies`; every
 artifact came from `repo.maven.apache.org` and the logs contain zero local-`.m2` references. Anyone
 repeating this check must neutralize `mavenLocal()` the same way or the result is meaningless.
+
+### Post-publish consumer resolution — 0.11.0
+
+Repeated 2026-08-10 against the released `0.11.0` coordinates, by the same method — all three pass:
+
+| Fixture | Task | Result |
+|---|---|---|
+| `consumer-tests/jvm` | `clean check` | ✅ |
+| `consumer-tests/android` | `clean compileDebugKotlin` | ✅ |
+| `consumer-tests/kmp` | `clean compileKotlinIosArm64`, `…SimulatorArm64` | ✅ |
+
+`mavenLocal()` was neutralized with `-Dmaven.repo.local` on an empty directory plus
+`--refresh-dependencies`, per the warning above. The empty repository stayed empty, which is the
+positive evidence that resolution came from Central rather than from any local cache. The full
+closure was also confirmed explicitly rather than inferred from a green build —
+`dependencies --configuration runtimeClasspath` resolves `client-sdk:0.11.0` →
+`client-sdk-jvm:0.11.0` → `protocol`/`protocol-jvm` + `log`/`log-jvm`, all at `0.11.0`.
+
+All 15 published coordinates were verified present on `repo1.maven.org` before the fixtures ran.
 
 ## Artifact inventory
 

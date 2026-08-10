@@ -209,7 +209,7 @@ assembled honestly:
 
 `identifierFormat` is the one change a CLI consumes directly from the published SDK, and
 `client-sdk:0.10.0` predates it. Until a release carries it, a consumer needs a composite build,
-which the CLI's own release gates forbid. So U1 stays open until 0.10.1 ships.
+which the CLI's own release gates forbid. So U1 stays open until 0.11.0 ships.
 
 Publishing is deliberately **last** in the sequence. The risk to watch is that it gets forgotten as
 the final blocker once everything else looks done.

@@ -77,6 +77,10 @@ object Capabilities {
     const val SCAN_CONCURRENCY_SINGLE = "scan.concurrency.single"
     const val SCAN_CONCURRENCY_UNCONTROLLED = "scan.concurrency.uncontrolled"
     const val RADIO_STATE      = "radio.state"   // AgentEvent.RadioState + ErrorKind.RADIO_OFF (backend-level, Android/Apple)
+    const val IDENTIFIER_TRANSLATION = "identifier.translate" // handles minted in the client's format (agent-level)
+    const val AGENT_STATUS     = "agent.status"  // Op.AgentStatus caller-scoped snapshot (agent-level)
+    const val WRITE_POLICY     = "write.policy"  // per-principal allowlist + ErrorKind.POLICY_DENIED (agent-level)
+    const val LEASE_HOLDER     = "lease.holder"  // AgentError.holder on PERIPHERAL_BUSY (agent-level)
 }
 ```
 
@@ -135,6 +139,7 @@ GATT / scanning surface 1:1.
 | `RequestConnectionPriority` | `conn.priority` | `device: DeviceHandle`, `priority: ConnPriority` | none — **capability: `conn.priority`** |
 | `ReadRssi` | `rssi` | `device: DeviceHandle` | `ResultPayload.Rssi` (dBm, connected) — **capability: `rssi`** |
 | `SetConnParams` | `conn.params` | `device: DeviceHandle`, `profile: ConnProfile`, `hint: ConnParamHint?` | none — **capability: `conn.params`** |
+| `AgentStatus` | `agent.status` | none (a `data object`; encodes as an empty map) | `ResultPayload.Status` — **capability: `agent.status`** |
 
 The descriptor, pairing, RSSI, and connection-parameter ops are gated behind their capabilities (see
 [Handshake & capability negotiation](#handshake--capability-negotiation)); an agent that
@@ -193,8 +198,7 @@ sealed interface OpResult {
 }
 ```
 
-Most ops succeed with `Ok(payload = null)`. The three ops that return data use
-`ResultPayload`:
+Most ops succeed with `Ok(payload = null)`. The ops that return data use `ResultPayload`:
 
 | `ResultPayload` | `@SerialName` | Carries | Produced by |
 |---|---|---|---|
@@ -202,6 +206,16 @@ Most ops succeed with `Ok(payload = null)`. The three ops that return data use
 | `Services` | `services` | `services: List<ServiceNode>` | `Discover` |
 | `Mtu` | `mtu` | `mtu: Int` | `RequestMtu` (and conceptually `Connect`) |
 | `Bond` | `bond` | `state: BleBondState` | `Pair` |
+| `Rssi` | `rssi` | `rssi: Int` (dBm) | `ReadRssi` |
+| `Status` | `agent.status` | `status: AgentStatusDto` | `AgentStatus` |
+
+`AgentStatusDto` carries the agent's identity and uptime, its effective ownership settings
+(`leaseGraceMs`, `transportGraceMs`, `writePolicyEnforced`, …), agent-global slot occupancy,
+connected-client count, and the leases this caller is entitled to see — each with its handle,
+last-seen name, holder, connected/in-grace state, and `remainingGraceMs`. Everything a caller may
+not see collapses to the `otherLeases` count, so the reply answers "can I connect?" without naming
+another tenant. Full field list and the disclosure rules are in
+[agent-conformance-spec.md §6.2](agent-conformance-spec.md).
 
 The GATT table shape returned by `Discover`:
 
@@ -296,7 +310,9 @@ The client wraps this in a Kable `Advertisement` (`RemoteAdvertisement`) and pul
     val kind: ErrorKind,
     val gattStatus: Int? = null,   // raw status when the radio actually answered
     val message: String? = null,
+    val holder: LeaseHolder? = null, // PERIPHERAL_BUSY only — capability: lease.holder
 )
+@Serializable data class LeaseHolder(val principal: String, val clientId: String? = null)
 class AgentException(val error: AgentError) : Exception(error.message ?: error.kind.name)
 ```
 
@@ -323,6 +339,7 @@ change. This is the *error* half of the retry decision — the *operation* half 
 | | | `INCOMPATIBLE_PROTOCOL` | permanent |
 | | | `RADIO_OFF` | transient |
 | | | `SCAN_UNAVAILABLE` | transient |
+| | | `POLICY_DENIED` | permanent |
 
 `gattStatus` carries the raw BLE-stack status when the radio answered. `TIMEOUT` and
 `TRANSPORT_LOST` are minted **client-side** by the session (the agent never sends
@@ -347,6 +364,20 @@ source; a backend or radio failure is not an admission decision and keeps its ex
 cannot help. It is transient because the slot really can free up — the incumbent may stop, or its
 grace may expire — which is also the honest admission that `single` makes scanning a contended
 global resource. See [scanning.md](scanning.md) for the consumer-facing handling.
+
+`POLICY_DENIED` answers `Write`, `WriteDescriptor`, `Pair`, and `Unpair` when the agent's
+per-principal allowlist refuses the operation. Gated on `write.policy` for the third time in the
+same pattern: a client that did not negotiate it receives `INVALID_REQUEST`, already the answer for
+an over-limit write. It is permanent — an allowlist does not change because you asked twice.
+
+`AgentError.holder` is the one place the wire carries a *field* under the same reasoning rather than
+an enum name, and it is the sharper version of the hazard. `AgentError` decodes under `Cbor.Default`,
+which does **not** ignore unknown keys, so an ungated `holder` does not degrade gracefully on an old
+client — it fails the decode of the entire error frame. It is therefore populated only for a client
+that negotiated `lease.holder`; everyone else reads the holder out of `message`, as before.
+`ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode` pins that, so the gate cannot be removed on
+the assumption that adding a field is always safe. Disclosure is scoped to the caller — see
+[agent-conformance-spec.md §5.5](agent-conformance-spec.md).
 
 ### Retryability: `transient` × `isIdempotent`
 

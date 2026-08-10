@@ -591,6 +591,12 @@ full wire-form UUIDs case-insensitively; `"*"` is the only wildcard. Descriptor 
 another descriptor on the same characteristic. `maximumBytes: null` is unlimited, and `0` permits
 only an empty payload (the ordinary 512-byte operation limit still applies).
 
+Both rule kinds also take an optional `device`, defaulting to `"*"` and matched case-insensitively
+against the peripheral's device handle — the same value the registry leases and `agent.status`
+reports. Omitting it matches every peripheral, so a policy written before the field existed is
+unchanged. Supplying it is what separates "this principal may write this control point" from
+"…on the peripheral it leased", which on shared hardware is the boundary that matters.
+
 Use unique JSON member names throughout a policy file. Duplicate names are invalid and unsupported:
 the Kotlin agent can retain a last value while Rust rejects duplicate DTO fields, so neither outcome
 is portable until duplicate-member rejection is hardened.
@@ -622,6 +628,30 @@ an absent or wrong value is not a connection failure: the session proceeds at no
 so in `operatorScope`. `agent-rs` accepts the same header (`--operator-token` /
 `REMOTE_BLE_OPERATOR_TOKEN`), which is what lets one status command work against every reference
 agent rather than only the one that serves HTTP. See §6.2 of the
+[conformance spec](agent-conformance-spec.md).
+
+### Diagnosing a lease denial
+
+`PERIPHERAL_BUSY` names the holder rather than saying only "peripheral in use", which would leave
+the refused caller with no next action but to read agent logs or ask a human. The message always
+carries it; a client that negotiates `lease.holder` also gets it as structured fields
+(`AgentError.holder.principal` / `.clientId`), so contention can be attributed without parsing a
+sentence.
+
+Who sees what is scoped to the caller. The principal is always disclosed — it is operator-assigned
+and already shared context between tenants of one agent. The client id is disclosed only to a caller
+sharing that principal, or holding operator scope, because it is chosen by the client and can carry
+a hostname or username it never intended to publish.
+
+Both halves cross the wire from the holder, so the agent length-bounds them and escapes control
+characters — including the bidirectional overrides and line separators a naive check misses — before
+they land in someone else's terminal, log, or coding-agent context. A holder cannot name itself
+something that reformats the line it appears on. The structured field gets the identical treatment:
+being machine-readable makes it *more* likely to be forwarded verbatim, not less.
+
+The structured field is capability-gated for a reason worth knowing if you write an agent: an
+unrecognized key fails a v1 client's decode of the whole error frame rather than being ignored, so
+sending it unconditionally would turn a refused lease into a broken session. See §5.5 of the
 [conformance spec](agent-conformance-spec.md).
 
 The object graph (`AgentMonitor`, `EngineBleBackend` → `BleAgentBackend` →

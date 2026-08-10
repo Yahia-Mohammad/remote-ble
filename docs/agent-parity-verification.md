@@ -41,7 +41,7 @@ the JVM Kotlin agent advertises `descriptors` on — truthfully, so rule 3 is no
 
 So the split is:
 
-- **`desc.read` / `desc.write` — implemented in 0.10.1.** `BleBackend` gained the two methods,
+- **`desc.read` / `desc.write` — implemented in 0.11.0.** `BleBackend` gained the two methods,
   `btleplug_impl` resolves a `DescRef` exactly as it resolves a `CharRef`, and `execute_op`
   dispatches both — authorizing first, so moving them out of the catch-all arm did not reopen the
   cross-client hole Rig A case 3 closed. Discovery now reports each characteristic's descriptor
@@ -69,12 +69,13 @@ JVM Kotlin agent does not advertise either.
 
 | Capability | Level | Kotlin (Android) | Kotlin (JVM) | Rust | Notes |
 |---|---|---|---|---|---|
-| `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — agent-global and lease-aware in both |
+| `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — agent-global and lease-aware in both |
 | `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
-| `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same 100 ms window and 16-result cap |
-| `agent.status` | agent | ✅ | ✅ | ✅ | **Match** since 0.10.1 — same DTO, same disclosure rules, same skipped defaults on the wire |
-| `write.policy` | agent | ✅ | ✅ | ✅ | **Match for valid unique-key policies** — blank paths warn and remain permissive; duplicate-member rejection is a documented deferred portability gap |
-| `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.10.1 — see §1 |
+| `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same 100 ms window and 16-result cap |
+| `agent.status` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same DTO, same disclosure rules, same skipped defaults on the wire |
+| `write.policy` | agent | ✅ | ✅ | ✅ | **Match for valid unique-key policies** — including the optional `device` rule; blank paths warn and remain permissive; duplicate-member rejection is a documented deferred portability gap |
+| `lease.holder` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same disclosure policy, same sanitizing bound, and the structured field gated identically on both |
+| `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.11.0 — see §1 |
 | `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
 | `conn.params` | backend | ✅ | ❌ | ❌ | Match on JVM: no interval control |
@@ -296,17 +297,22 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - Native unsolicited-drop detection
 - Wire protocol codec (CBOR byte-parity verified by interop tests)
 - **Logging levels and taxonomy** (0.9.0 scope — both emit the same story at the same levels)
-- **Agent-level capability set** (0.10.1 — `slots`, `identifier.translate`, `scan.batch`, and
-  `agent.status` advertised unconditionally by both, and complete: every agent-level capability
-  now matches)
-- **`agent.status`** (0.10.1 — identical DTO from both agents, including which fields are omitted
+- **Agent-level capability set** (0.11.0 — `slots`, `identifier.translate`, `scan.batch`,
+  `agent.status`, `write.policy`, and `lease.holder` advertised unconditionally by both, and
+  complete: every agent-level capability now matches)
+- **`agent.status`** (0.11.0 — identical DTO from both agents, including which fields are omitted
   when they equal their defaults, so diffing one agent's status against the other's is meaningful
   rather than merely both-parse-fine. The Rust agent grew a bounded advertised-name cache for it,
   since btleplug offers the name only on the scan path and nothing else retained it)
-- **`slots` accounting and delivery** (0.10.1 — global, lease-aware, delivered at handshake and on
+- **`slots` accounting and delivery** (0.11.0 — global, lease-aware, delivered at handshake and on
   every occupancy change in both agents)
-- **Lease-denial disclosure** (0.10.1 — one policy, and now one *bound*: both cap the rendered
-  message rather than the characters consumed, so an all-escaped identity is described identically)
+- **Lease-denial disclosure** (0.11.0 — one policy, and now one *bound*: both cap the rendered
+  message rather than the characters consumed, so an all-escaped identity is described identically.
+  Both also render the prose message and the structured `lease.holder` field from a single policy
+  point, so the two cannot disagree about the same holder, and both widen disclosure under operator
+  scope)
+- **Write-policy rule shape** (0.11.0 — including the optional `device` field and its `"*"` default,
+  so the same policy file authorizes identically on either agent)
 
 ### Previously recorded differences
 - 5 ops Unsupported in Rust for genuine btleplug limitations: `pair`, `unpair`, `conn.priority`,
@@ -314,7 +320,7 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - No HTTP dashboard in Rust (architecture — raw `tokio-tungstenite`, no HTTP framework)
 - No cheap 1s `isConnected` poll in Rust
 
-### Resolved in 0.10.1
+### Resolved in 0.11.0
 - Default max slots (was 4 vs 8, now 8 in both) — see §7
 - `descriptors` (`desc.read` / `desc.write`) implemented in `agent-rs`, closing the last same-host
   divergence — see §1. Recorded as a btleplug limitation until 2026-08-05; btleplug has the API

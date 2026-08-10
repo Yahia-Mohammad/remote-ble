@@ -116,13 +116,14 @@ breaking `authToken` provider change for applications upgrading from an earlier 
    publish, and treat a failure there as a `0.10.1` trigger. **This is a real reduction in
    assurance** — a broken POM or metadata closure would now be caught after Central has the
    artifacts rather than before — and it is accepted deliberately rather than overlooked. Closing it
-   properly means publishing to a resolvable staging repository (GitHub Packages) first; that is
-   0.10.1 work.
+   properly means publishing to a resolvable staging repository (GitHub Packages) first; that work
+   is **still open** (it did not land in 0.11.0 either).
 
    **The post-publish re-run was done 2026-08-04 and all three fixtures pass** — see [Post-publish
    consumer resolution](#post-publish-consumer-resolution). That discharges the check for this
    release, but *not* the underlying gap: the assurance is still after-the-fact, and the staging
-   repository remains 0.10.1 work.
+   repository remains open work. The same post-publish re-run is therefore required for every
+   subsequent release, 0.11.0 included.
 4. ~~Complete the real-radio, iOS, TLS-proxy, Ubuntu, and Pi evidence.~~ **All four rigs are run
    (25/25) as of 2026-08-03** — see [validation-plan.md](validation-plan.md). Rig D passed
    6/6 on **one amd64 Linux host** under the option-1 relaxation, *not* on the Ubuntu and Pi hosts

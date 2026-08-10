@@ -44,9 +44,24 @@ The top-level shape is:
   big-endian integers (`start`, `step`, `widthBytes` 1–4). `notify` supplies an `intervalMs` and a
   value source. `write` supplies `accept` and optional `storesValue` readback behavior.
 
-The simulator currently advertises only the capability it actually models beyond the v1 baseline:
-connected RSSI. Descriptor, pairing, and connection-parameter operations remain unsupported. There
-is no scripting language, record/replay, or Rust profile interpreter in 0.10.0.
+**Backend-level**, the simulator models exactly one capability beyond the v1 baseline: connected
+RSSI. Descriptor, pairing, and connection-parameter operations remain unsupported, so those surfaces
+cannot be validated this way.
+
+**Agent-level capabilities are a different matter, and they are all present.** They are
+radio-independent, so `advertisedCapabilities()` unions `BleAgent.AGENT_CAPABILITIES` into every
+backend's set — the simulator included. A simulated agent therefore advertises `slots`,
+`scan.batch`, `identifier.translate`, `agent.status`, `write.policy`, and `lease.holder`, plus its
+one `scan.concurrency.*` mode. That is deliberate rather than incidental: those capabilities are
+bookkeeping, and an agent that could not answer them would be non-conforming (see
+[agent-conformance-spec.md §5.3](agent-conformance-spec.md)).
+
+The practical consequence is that lease contention, holder disclosure, write-policy enforcement,
+slot accounting, and the status contract are all exercisable with **no Bluetooth hardware at all** —
+which is the whole point of having a scriptable agent, and the reason a hostile advertised name can
+be a CI fixture rather than a thought experiment.
+
+There is no scripting language, record/replay, or Rust profile interpreter as of 0.11.0.
 
 The profile parser rejects unknown fields, duplicate handles/services/characteristics, invalid UUIDs
 or hex, unsupported property combinations, unsafe cardinalities, and excessive schedules. See

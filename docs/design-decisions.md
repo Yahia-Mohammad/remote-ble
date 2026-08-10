@@ -87,6 +87,33 @@ never sent by the agent — because by definition they describe the agent being
 unreachable, so the agent couldn't have reported them. Everything else originates at
 the agent/backend.
 
+### Anything new on a strictly-decoded type is capability-gated
+
+The wire types decode under `Cbor.Default`, which rejects unknown enum names **and** unknown map
+keys. So the intuition that "adding a value is backward compatible" is false here, in both
+directions, and the rule is the same either way: an addition reaches only clients that negotiated
+the capability naming it.
+
+It has now been applied four times, and the fourth is the one that shows why the rule is worth
+stating rather than rediscovering:
+
+| Addition | Gate | Un-negotiated client sees |
+|---|---|---|
+| `RADIO_OFF` | `radio.state` | scan succeeds, finds nothing (pre-0.10.0 behaviour) |
+| `SCAN_UNAVAILABLE` | `scan.concurrency.single` | `AGENT_BUSY` |
+| `POLICY_DENIED` | `write.policy` | `INVALID_REQUEST` |
+| `AgentError.holder` | `lease.holder` | the holder in `message`, as prose |
+
+The first three are enum names, where the failure mode is at least legible — a decoder meets a
+constant it doesn't know. The fourth is a *field*, which looks like the safest possible addition and
+is actually the worst: an unknown key fails the decode of the **entire frame**, so an ungated
+`holder` would turn every lease refusal into a broken session rather than a missing detail. That is
+pinned by `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode` precisely so the gate cannot be
+removed later by someone reasoning that optional fields are always safe.
+
+Each gated addition also needs an **ungated fallback that is already in the vocabulary** — the third
+column above. A gate without one just moves the breakage from the decoder to the caller.
+
 ## Two state machines, never conflated
 
 The single subtlest correctness property. There is an **IP transport** state
@@ -285,6 +312,15 @@ Transport loss and radio loss are resumable grace cases; an explicit disconnect 
 
 - **Acquire on connect.** A second client's `connect` to an owned peripheral is rejected
   with `PERIPHERAL_BUSY` before any radio call. Re-connecting as the owner is idempotent.
+- **The refusal names the holder.** "Peripheral in use" alone leaves the caller with nothing to do
+  but read agent logs or ask a human, which is a poor answer on a shared rig and a useless one to an
+  automated caller. The principal is always disclosed; the client id only to a caller sharing that
+  principal or holding operator scope, because the principal is operator-assigned shared context
+  while a client id is self-chosen and can leak a hostname. A client negotiating `lease.holder` gets
+  the same decision as structured fields instead of prose — gated because an unknown key would fail
+  a v1 client's decode of the whole frame. Both halves are escaped and length-bounded at the point of
+  disclosure: they are text the *holder* chose, rendered in someone else's terminal or model context,
+  which makes a lease denial an injection surface if left raw.
 - **Explicit disconnect → immediate release.** `Disconnect` disconnects the radio and drops the
   lease at once; a later connect is a new connection.
 - **Unsolicited BLE disconnect → `leaseGrace` (10s).** A drop caught by `ConnectionWatcher`

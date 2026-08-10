@@ -169,4 +169,27 @@ class RustAgentInteropTest {
             ),
         ),
     )
+
+    /**
+     * The `lease.holder` field as `agent-rs` actually emits it.
+     *
+     * Worth pinning because the two agents spell the field differently in source — Rust's
+     * `client_id` carries a `#[serde(rename = "clientId")]` — so a dropped rename would produce a
+     * frame that still decodes into an [AgentError] with a silently absent holder, which is exactly
+     * the failure the structured field exists to remove.
+     */
+    @Test
+    fun replyErrPeripheralBusyCarriesTheHolder() = assertDecodes(
+        "82657265706c79a2636369640966726573756c748263657272a1656572726f72a3646b696e646f5045524950484552414c5f42555359676d657373616765783c7065726970686572616c20696e20757365206279207072696e636970616c20276c61622d61272c20636c69656e74202772626c652d6c6170746f702766686f6c646572a2697072696e636970616c656c61622d6168636c69656e7449646b72626c652d6c6170746f70",
+        Reply(
+            9,
+            OpResult.Err(
+                AgentError(
+                    kind = ErrorKind.PERIPHERAL_BUSY,
+                    message = "peripheral in use by principal 'lab-a', client 'rble-laptop'",
+                    holder = LeaseHolder(principal = "lab-a", clientId = "rble-laptop"),
+                ),
+            ),
+        ),
+    )
 }

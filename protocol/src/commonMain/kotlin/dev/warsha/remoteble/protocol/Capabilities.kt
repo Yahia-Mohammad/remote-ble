@@ -107,6 +107,25 @@ object Capabilities {
      */
     const val WRITE_POLICY: String = "write.policy"
 
+    /**
+     * Structured holder details on [ErrorKind.PERIPHERAL_BUSY]: [AgentError.holder] names the
+     * principal, and the client id where the caller is entitled to see it. Agent-level (the
+     * registry already knows the owner), so every conforming agent advertises it.
+     *
+     * Gated for two reasons, and the first is the binding one. [AgentError] is decoded with
+     * `Cbor.Default`, which does **not** ignore unknown keys, so an added field is not a
+     * backward-compatible addition the way a new optional field is under a lenient codec: a v1
+     * client that never heard of `holder` fails to decode the whole error frame. That is the same
+     * hazard that keeps [RADIO_OFF] and [WRITE_POLICY] gated, reached through an unknown *key*
+     * rather than an unknown enum name — `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode`
+     * pins it. A client without this capability keeps the pre-0.11.0 behaviour: the holder is named
+     * in [AgentError.message] only.
+     *
+     * Second, it makes disclosure opt-in. A caller that never asked for another tenant's identity
+     * does not receive it in a machine-readable field it might log or forward.
+     */
+    const val LEASE_HOLDER: String = "lease.holder"
+
     /** The agent multiplexes all logical scans through one physical scan. */
     const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"
 

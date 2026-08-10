@@ -1,7 +1,15 @@
 package dev.warsha.remoteble.protocol
 
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.cbor.Cbor
+import kotlinx.serialization.decodeFromByteArray
+import kotlinx.serialization.encodeToByteArray
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -419,6 +427,63 @@ class ProtocolCodecTest {
     }
 
     // ---- Cross-cutting ----
+
+    @Test
+    fun holderRoundTripsOnPeripheralBusy() {
+        assertRoundTrips(
+            Reply(
+                20,
+                OpResult.Err(
+                    AgentError(
+                        ErrorKind.PERIPHERAL_BUSY,
+                        message = "peripheral in use by principal 'lab-a'",
+                        holder = LeaseHolder(principal = "lab-a", clientId = "rble-laptop"),
+                    ),
+                ),
+            ),
+        )
+        // The withheld-client-id shape: the field is absent, not an empty string.
+        assertRoundTrips(
+            Reply(21, OpResult.Err(AgentError(ErrorKind.PERIPHERAL_BUSY, holder = LeaseHolder("lab-a")))),
+        )
+    }
+
+    /**
+     * Pins the reason [Capabilities.LEASE_HOLDER] is capability-gated rather than sent to everyone.
+     *
+     * `Cbor.Default` does not ignore unknown keys, so `holder` is *not* the backward-compatible
+     * addition an optional field would be under a lenient codec: a v1 client that never heard of it
+     * fails to decode the entire error frame, turning a refused lease into a broken session. If this
+     * test ever starts passing, the codec has become lenient and the gate could be reconsidered —
+     * until then, removing the gate breaks every older client.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @Test
+    fun anUngatedHolderFieldBreaksAV1Decode() {
+        val bytes = Cbor.Default.encodeToByteArray(
+            AgentError.serializer(),
+            AgentError(ErrorKind.PERIPHERAL_BUSY, message = "busy", holder = LeaseHolder("lab-a")),
+        )
+        // Decoding the same bytes as a v1 client, whose AgentError has no `holder` member.
+        assertFailsWith<SerializationException> {
+            Cbor.Default.decodeFromByteArray(V1AgentError.serializer(), bytes)
+        }
+        // ...and the gated shape a v1 client actually receives still decodes cleanly.
+        val gated = Cbor.Default.encodeToByteArray(
+            AgentError.serializer(),
+            AgentError(ErrorKind.PERIPHERAL_BUSY, message = "busy"),
+        )
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, Cbor.Default.decodeFromByteArray(V1AgentError.serializer(), gated).kind)
+    }
+
+    /** `AgentError` as it stood before `lease.holder` — a stand-in for a 0.10.0 client's decoder. */
+    @Serializable
+    @SerialName("AgentError")
+    private data class V1AgentError(
+        val kind: ErrorKind,
+        val gattStatus: Int? = null,
+        val message: String? = null,
+    )
 
     @Test
     fun cborIsMoreCompactThanJson_forBinaryHeavyFrame() {

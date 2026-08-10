@@ -407,7 +407,15 @@ class BleAgent(
                         // Inside the turn, not before it: a denial still runs the `finally` below,
                         // so a policy-refused write cannot wedge the next write to this device the
                         // way throwing ahead of this block would.
-                        if (!writePolicy.authorizesWrite(principal, op.char.service, op.char.characteristic, op.value.size, op.withResponse)) {
+                        if (!writePolicy.authorizesWrite(
+                                principal,
+                                op.device.value,
+                                op.char.service,
+                                op.char.characteristic,
+                                op.value.size,
+                                op.withResponse,
+                            )
+                        ) {
                             throw AgentException(policyDeniedError("write not permitted for this principal"))
                         }
                         backend.write(op.device, op.char, op.value, op.withResponse)
@@ -432,6 +440,7 @@ class BleAgent(
                     authorizeConnected(op.device)
                     if (!writePolicy.authorizesDescriptorWrite(
                             principal,
+                            op.device.value,
                             op.desc.service,
                             op.desc.characteristic,
                             op.desc.descriptor,

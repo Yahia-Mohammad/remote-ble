@@ -31,23 +31,36 @@ import kotlinx.serialization.json.Json
  * `instance` (the duplicate-UUID disambiguator) is deliberately not part of matching: a rule is
  * about the characteristic, not which duplicate. `maximumBytes = null` means unlimited;
  * `withResponse = null` matches either write type.
+ *
+ * [WriteRule.device] scopes a rule to one peripheral and defaults to `"*"`, so a policy file
+ * written without it keeps its previous meaning. It matches against the device *handle* — the same
+ * value the registry leases and `agent.status` reports — so an operator writes the identity the
+ * agent already shows them rather than a second naming scheme.
  */
 class WritePolicy private constructor(private val principals: Map<String, PrincipalPolicy>?) {
 
     /** Whether this agent enforces a policy at all — surfaced in `agent.status`. */
     val enforced: Boolean get() = principals != null
 
-    /** Whether [principal] may write [size] bytes to `service`/`characteristic` as requested. */
-    fun authorizesWrite(principal: String, service: String, characteristic: String, size: Int, withResponse: Boolean): Boolean {
+    /** Whether [principal] may write [size] bytes to `service`/`characteristic` on [device]. */
+    fun authorizesWrite(
+        principal: String,
+        device: String,
+        service: String,
+        characteristic: String,
+        size: Int,
+        withResponse: Boolean,
+    ): Boolean {
         val rules = principals ?: return true
         return rules[principal]?.writes.orEmpty().any {
-            it.matchesChar(service, characteristic) && it.permits(size, withResponse)
+            it.matchesChar(device, service, characteristic) && it.permits(size, withResponse)
         }
     }
 
-    /** Whether [principal] may write [size] bytes to the descriptor at `service`/`characteristic`. */
+    /** Whether [principal] may write [size] bytes to the descriptor at `service`/`characteristic` on [device]. */
     fun authorizesDescriptorWrite(
         principal: String,
+        device: String,
         service: String,
         characteristic: String,
         descriptor: String,
@@ -55,7 +68,8 @@ class WritePolicy private constructor(private val principals: Map<String, Princi
     ): Boolean {
         val rules = principals ?: return true
         return rules[principal]?.descriptorWrites.orEmpty().any {
-            it.matchesDesc(service, characteristic, descriptor) && (it.maximumBytes == null || size <= it.maximumBytes)
+            it.matchesDesc(device, service, characteristic, descriptor) &&
+                (it.maximumBytes == null || size <= it.maximumBytes)
         }
     }
 
@@ -134,11 +148,20 @@ data class PrincipalPolicy(
 data class WriteRule(
     val service: String,
     val characteristic: String,
+    /**
+     * The peripheral this rule is about, as its device handle, or `"*"` for any. Optional and
+     * wildcard by default, so a policy written before this field existed keeps meaning exactly what
+     * it meant — but on a shared rig it is the difference between "lab-a may write this control
+     * point" and "lab-a may write this control point *on its own device*".
+     */
+    val device: String = "*",
     val maximumBytes: Int? = null,
     val withResponse: Boolean? = null,
 ) {
-    fun matchesChar(service: String, characteristic: String): Boolean =
-        matchesField(this.service, service) && matchesField(this.characteristic, characteristic)
+    fun matchesChar(device: String, service: String, characteristic: String): Boolean =
+        matchesField(this.device, device) &&
+            matchesField(this.service, service) &&
+            matchesField(this.characteristic, characteristic)
 
     fun permits(size: Int, withResponse: Boolean): Boolean =
         (maximumBytes == null || size <= maximumBytes) &&
@@ -150,10 +173,13 @@ data class DescriptorWriteRule(
     val service: String,
     val characteristic: String,
     val descriptor: String,
+    /** The peripheral this rule is about, or `"*"` for any — see [WriteRule.device]. */
+    val device: String = "*",
     val maximumBytes: Int? = null,
 ) {
-    fun matchesDesc(service: String, characteristic: String, descriptor: String): Boolean =
-        matchesField(this.service, service) &&
+    fun matchesDesc(device: String, service: String, characteristic: String, descriptor: String): Boolean =
+        matchesField(this.device, device) &&
+            matchesField(this.service, service) &&
             matchesField(this.characteristic, characteristic) &&
             matchesField(this.descriptor, descriptor)
 }

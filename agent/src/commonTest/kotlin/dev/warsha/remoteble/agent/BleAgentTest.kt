@@ -1430,6 +1430,31 @@ class BleAgentTest {
     }
 
     @Test
+    fun aDeviceScopedRuleIsEnforcedAtDispatch() = runTest {
+        // The policy object's own matching is unit-tested; this proves the dispatch point actually
+        // passes the device it is operating on, rather than a wildcard that would make the field
+        // decorative.
+        val backend = FakeBleBackend()
+        val otherDevice = DeviceHandle("FA:KE:0B")
+        val policy = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[
+                {"device":"${device.value}","service":"${char.service}","characteristic":"${char.characteristic}"}
+            ]}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+        h.connect(1)
+        h.connect(2, otherDevice)
+
+        h.send(3, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+
+        // Same principal, same characteristic, the peripheral the rule does not name.
+        h.send(4, Op.Write(otherDevice, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(h.frames.reply(4)).error.kind)
+    }
+
+    @Test
     fun structuredHolderRidesOnPeripheralBusyOnlyForANegotiatedClient() = runTest {
         val backend = FakeBleBackend()
         val registry = PeripheralRegistry(backgroundScope)

@@ -27,6 +27,7 @@ import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -1426,6 +1427,76 @@ class BleAgentTest {
         intruder.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
         val err = assertIs<OpResult.Err>(intruder.frames.reply(2))
         assertEquals(ErrorKind.PERIPHERAL_BUSY, err.error.kind)
+    }
+
+    @Test
+    fun structuredHolderRidesOnPeripheralBusyOnlyForANegotiatedClient() = runTest {
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-laptop"),
+        )
+        owner.connect(1)
+
+        // A client that negotiated nothing: the prose names the holder, the field stays absent —
+        // sending it would fail its decode of the whole frame, not merely be ignored.
+        val ungated = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-ci"),
+        )
+        ungated.send(2, Op.Connect(device))
+        val plain = assertIs<OpResult.Err>(ungated.frames.reply(2))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, plain.error.kind)
+        assertNull(plain.error.holder)
+        assertContains(plain.error.message!!, "rble-laptop")
+
+        // A client that negotiated `lease.holder` gets the same decision as fields.
+        val gated = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-agent"),
+            capabilities = setOf(Capabilities.LEASE_HOLDER),
+        )
+        gated.sendHello(wanted = setOf(Capabilities.LEASE_HOLDER))
+        gated.send(3, Op.Connect(device))
+        val structured = assertIs<OpResult.Err>(gated.frames.reply(3))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, structured.error.kind)
+        assertEquals("lab-a", structured.error.holder?.principal)
+        assertEquals("rble-laptop", structured.error.holder?.clientId)
+    }
+
+    @Test
+    fun theStructuredHolderWithholdsAnotherPrincipalsClientId() = runTest {
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-laptop"),
+        )
+        owner.connect(1)
+
+        val other = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-b", "rble-ci"),
+            capabilities = setOf(Capabilities.LEASE_HOLDER),
+        )
+        other.sendHello(wanted = setOf(Capabilities.LEASE_HOLDER))
+        other.send(2, Op.Connect(device))
+        val err = assertIs<OpResult.Err>(other.frames.reply(2))
+        // Enough to diagnose contention ("lab-a has it"), without publishing another tenant's
+        // client id — which can carry a hostname or username it never meant to share.
+        assertEquals("lab-a", err.error.holder?.principal)
+        assertNull(err.error.holder?.clientId)
     }
 
     @Test

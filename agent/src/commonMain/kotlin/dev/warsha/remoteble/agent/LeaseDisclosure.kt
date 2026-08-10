@@ -1,5 +1,7 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.LeaseHolder
+
 /**
  * Turns a lease owner's session key into a message another client is allowed to read.
  *
@@ -37,17 +39,36 @@ internal object LeaseDisclosure {
     /**
      * A `PERIPHERAL_BUSY` message describing who holds the peripheral, addressed to [requesterKey].
      * Both arguments are session keys; a key with no separator is treated as a bare principal.
+     *
+     * [operatorScope] widens disclosure exactly as it does in [holderLabel]: a caller that
+     * presented the operator credential sees another principal's client id here too. Without it
+     * the two disclosure paths would disagree — an operator would be told less by the error that
+     * refused it than by the `agent.status` row describing the same lease.
      */
-    fun busyMessage(ownerKey: String, requesterKey: String): String {
+    fun busyMessage(ownerKey: String, requesterKey: String, operatorScope: Boolean = false): String {
+        val holder = holder(ownerKey, requesterKey, operatorScope)
+        return when (holder.clientId) {
+            null -> "peripheral in use by principal '${holder.principal}'"
+            else -> "peripheral in use by principal '${holder.principal}', client '${holder.clientId}'"
+        }
+    }
+
+    /**
+     * The same disclosure decision as [busyMessage], as fields rather than prose — what
+     * `AgentError.holder` carries for a client that negotiated `lease.holder`.
+     *
+     * This is the single point where the policy is applied; [busyMessage] and [holderLabel] both
+     * render *this* result, so a client cannot be told one thing by the sentence and another by the
+     * structured field. Both halves are sanitized here, because both are rendered downstream.
+     */
+    fun holder(ownerKey: String, requesterKey: String, operatorScope: Boolean): LeaseHolder {
         val (ownerPrincipal, ownerClientId) = split(ownerKey)
         val (requesterPrincipal, _) = split(requesterKey)
-        val principal = sanitize(ownerPrincipal)
-        return when {
-            ownerClientId == null || ownerPrincipal != requesterPrincipal ->
-                "peripheral in use by principal '$principal'"
-            else ->
-                "peripheral in use by principal '$principal', client '${sanitize(ownerClientId)}'"
-        }
+        val maySeeClientId = ownerClientId != null && (operatorScope || ownerPrincipal == requesterPrincipal)
+        return LeaseHolder(
+            principal = sanitize(ownerPrincipal),
+            clientId = if (maySeeClientId) sanitize(ownerClientId!!) else null,
+        )
     }
 
     /**
@@ -67,11 +88,8 @@ internal object LeaseDisclosure {
      * lands in a terminal, a log, or a coding agent's context just the same.
      */
     fun holderLabel(ownerKey: String, requesterKey: String, operatorScope: Boolean): String {
-        val (ownerPrincipal, ownerClientId) = split(ownerKey)
-        val (requesterPrincipal, _) = split(requesterKey)
-        val principal = sanitize(ownerPrincipal)
-        val maySeeClientId = ownerClientId != null && (operatorScope || ownerPrincipal == requesterPrincipal)
-        return if (maySeeClientId) "$principal/${sanitize(ownerClientId!!)}" else principal
+        val holder = holder(ownerKey, requesterKey, operatorScope)
+        return holder.clientId?.let { "${holder.principal}/$it" } ?: holder.principal
     }
 
     private fun split(key: String): Pair<String, String?> {

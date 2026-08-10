@@ -556,17 +556,31 @@ class BleAgent(
         )
     }
 
+    /**
+     * The `PERIPHERAL_BUSY` error for a lease held by [ownerKey], as this caller may see it.
+     *
+     * One builder for both refusal sites, so the disclosure decision cannot drift between them.
+     * The structured holder rides along only for a client that negotiated
+     * [Capabilities.LEASE_HOLDER]; every other client gets the prose message alone, because an
+     * unknown key would fail its decode of the whole frame rather than being ignored.
+     */
+    private fun peripheralBusy(ownerKey: String): AgentError =
+        AgentError(
+            ErrorKind.PERIPHERAL_BUSY,
+            message = LeaseDisclosure.busyMessage(ownerKey, clientKey, operatorScope),
+            holder = if (Capabilities.LEASE_HOLDER in negotiated) {
+                LeaseDisclosure.holder(ownerKey, clientKey, operatorScope)
+            } else {
+                null
+            },
+        )
+
     /** Rejects every device-bearing operation unless this connection owns a live lease. */
     private suspend fun authorizeConnected(device: DeviceHandle) {
         when (val authorization = registry.authorizeConnected(device.value, clientKey)) {
             PeripheralRegistry.Authorization.Granted -> Unit
             is PeripheralRegistry.Authorization.PeripheralBusy ->
-                throw AgentException(
-                    AgentError(
-                        ErrorKind.PERIPHERAL_BUSY,
-                        message = LeaseDisclosure.busyMessage(authorization.owner, clientKey),
-                    ),
-                )
+                throw AgentException(peripheralBusy(authorization.owner))
             PeripheralRegistry.Authorization.NotConnected ->
                 throw AgentException(AgentError(ErrorKind.NOT_CONNECTED, message = "peripheral is not connected"))
         }
@@ -637,12 +651,7 @@ class BleAgent(
         // Cross-client ownership gate: another client holds an exclusive peripheral.
         val resumedWarmLink = when (val acquisition = registry.acquire(device.value, clientKey)) {
             is PeripheralRegistry.Acquisition.Denied ->
-                return OpResult.Err(
-                    AgentError(
-                        ErrorKind.PERIPHERAL_BUSY,
-                        message = LeaseDisclosure.busyMessage(acquisition.owner, clientKey),
-                    ),
-                )
+                return OpResult.Err(peripheralBusy(acquisition.owner))
             PeripheralRegistry.Acquisition.NoSlot ->
                 return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
             is PeripheralRegistry.Acquisition.Granted -> acquisition.linkAlreadyLive
@@ -1209,6 +1218,7 @@ class BleAgent(
             Capabilities.IDENTIFIER_TRANSLATION,
             Capabilities.AGENT_STATUS,
             Capabilities.WRITE_POLICY,
+            Capabilities.LEASE_HOLDER,
         )
     }
 }

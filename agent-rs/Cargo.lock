@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-rs"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -14,6 +14,7 @@ dependencies = [
  "http",
  "parking_lot",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",

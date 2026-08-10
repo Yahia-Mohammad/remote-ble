@@ -23,7 +23,9 @@ import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.agent.FakeAgent
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
@@ -35,6 +37,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.Assume
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
@@ -110,8 +113,27 @@ class WebSocketEndToEndTest {
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
-    private fun String.isLoopbackLiteral(): Boolean =
-        this == "localhost" || this == "::1" || startsWith("127.")
+    /**
+     * A non-loopback IPv4 address of this host, or null when it has none.
+     *
+     * Deliberately **not** `InetAddress.getLocalHost()`, which resolves the machine's *hostname* and
+     * therefore answers `127.0.0.1` whenever that name maps to loopback. On macOS a `.local` name
+     * does exactly that after a network change, sleep/wake, or a VPN connect — so the test using it
+     * failed on an unmodified tree, minutes after passing, with nothing in the repository changed.
+     * The interfaces are the ground truth for "can a request reach this process from off-device";
+     * the hostname is a lookup that happens to usually agree.
+     *
+     * Link-local (169.254/16) is excluded because that is precisely the address an interface holds
+     * when it has *no* usable network, so binding the "remote" leg of the test to it would prove
+     * nothing.
+     */
+    private fun lanAddress(): String? =
+        NetworkInterface.getNetworkInterfaces().asSequence()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.asSequence() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+            ?.hostAddress
 
     private fun incompatibleProtocolServer(port: Int): EmbeddedServer<*, *> =
         embeddedServer(CIO, port = port) {
@@ -467,8 +489,16 @@ class WebSocketEndToEndTest {
         // log — and it travels over unencrypted HTTP, so by default it answers only this machine.
         // Binding a non-loopback host is what makes the test meaningful: connecting to 127.0.0.1 would
         // be a loopback request whatever the policy, so it could never fail.
-        val lanHost = java.net.InetAddress.getLocalHost().hostAddress
-        assertTrue(!lanHost.isLoopbackLiteral(), "test needs a non-loopback local address, got $lanHost")
+        // A host with no non-loopback interface at all (a container run with no network) cannot
+        // exercise the off-device leg in either direction, so there is nothing here to assert.
+        // Skipped rather than failed, and rather than weakened: a "pass" on such a host would say
+        // the policy holds when nothing tested it. Every assertion below stays exactly as strict.
+        val lanHost = lanAddress()
+        Assume.assumeTrue(
+            "no non-loopback IPv4 interface; cannot issue an off-device request to test the policy",
+            lanHost != null,
+        )
+        checkNotNull(lanHost)
 
         val port = freePort()
         val server = AgentWebSocketServer(
@@ -627,7 +657,7 @@ class WebSocketEndToEndTest {
         // activeSubscriptionResumesAfterServerRestart proves observe.start replay via the resumed
         // notification stream.
         val received = Channel<Op.SetConnParams>(Channel.UNLIMITED)
-        fun spyBackend() = AgentBackend { incoming, outgoing, backendScope, _, _ ->
+        fun spyBackend() = AgentBackend { incoming, outgoing, backendScope, _, _, _ ->
             val codec = CborProtocolCodec()
             val tapped = incoming.onEach { bytes ->
                 val frame = codec.decode(bytes)

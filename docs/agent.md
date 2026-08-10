@@ -211,7 +211,7 @@ class BleAgent(
     scope: CoroutineScope,
     backend: BleBackend,
     codec: ProtocolCodec = CborProtocolCodec(),
-    maxConnections: Int = DEFAULT_MAX_CONNECTIONS,   // 4
+    maxConnections: Int = DEFAULT_MAX_CONNECTIONS,   // 8, agent-wide
     clientId: Long = 0L,                             // for monitor attribution
     observer: AgentObserver = AgentObserver.None,    // device/scan/activity hooks
 ) {
@@ -262,9 +262,11 @@ private val observeJobs = mutableMapOf<Long, Job>()
   under the mutex *before* the (slow) `backend.connect()` so the cap is honored despite
   concurrency; on success it marks the lease connected and emits a
   `ConnectionState(CONNECTED)` event. Connecting an already-connected device is an
-  **idempotent success** (no re-emit). If the slot cap (`maxConnections`, default 4)
+  **idempotent success** (no re-emit). If the slot cap (`maxConnections`, default 8)
   is hit, it replies `Err(NO_CONNECTION_SLOT)`. A failed connect **releases the
-  reserved slot and the lease**.
+  reserved slot and the lease**. The cap is enforced by the registry and is therefore
+  **agent-wide**: the constraint is the host controller's, so two clients holding four
+  peripherals each exhaust the same radio as one client holding eight.
 - **`Disconnect`** disconnects via the backend, frees the slot, starts the lease's
   **release grace** (`leaseGrace`, default 10s — a quick reconnect keeps ownership),
   and emits `ConnectionState(DISCONNECTED)`.
@@ -574,6 +576,35 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080  # require a bearer token
 REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 8080
 ```
 
+### Per-principal write policy
+
+Set `REMOTE_BLE_POLICY_FILE` to a JSON file to enforce mutation permissions at the agent, keyed to
+the bearer credential principal. The file is read once before Koin, the BLE backend, or the
+WebSocket listener starts. An absent variable preserves the historical allow-all behavior. A blank
+or whitespace-only value is also treated as unconfigured, but logs a warning; once a nonblank file
+is configured, unlisted principals and empty rule lists deny all mutations.
+
+The parser is strict: malformed JSON, unknown fields, unknown principals, unsupported versions,
+and negative or out-of-range signed-32-bit `maximumBytes` values stop startup. Rules match the
+full wire-form UUIDs case-insensitively; `"*"` is the only wildcard. Descriptor rules must name a
+`descriptor` UUID as well as service and characteristic, so allowing one descriptor cannot permit
+another descriptor on the same characteristic. `maximumBytes: null` is unlimited, and `0` permits
+only an empty payload (the ordinary 512-byte operation limit still applies).
+
+Both rule kinds also take an optional `device`, defaulting to `"*"` and matched case-insensitively
+against the peripheral's device handle — the same value the registry leases and `agent.status`
+reports. Omitting it matches every peripheral, so a policy written before the field existed is
+unchanged. Supplying it is what separates "this principal may write this control point" from
+"…on the peripheral it leased", which on shared hardware is the boundary that matters.
+
+Use unique JSON member names throughout a policy file. Duplicate names are invalid and unsupported:
+the Kotlin agent can retain a last value while Rust rejects duplicate DTO fields, so neither outcome
+is portable until duplicate-member rejection is hardened.
+
+See [`proposals/agent-write-policy.md`](proposals/agent-write-policy.md) for the complete schema,
+pairing behavior, and a full JSON example. `agent.status` reports whether a policy is currently
+configured through `settings.writePolicyEnforced`.
+
 > **Run it with `agent/run-agent.sh`, not `./gradlew :agent:jvmRun`.** A bare JVM process is
 > killed with `SIGABRT` the instant it touches CoreBluetooth: macOS **TCC** requires the
 > running process's main bundle to declare `NSBluetoothAlwaysUsageDescription`, and the
@@ -589,6 +620,39 @@ REMOTE_BLE_TOKEN=client REMOTE_BLE_OPERATOR_TOKEN=operator agent/run-agent.sh 80
 The endpoint and optional **status dashboard** share the port: `ws://<host>:8080/agent` for
 clients and `http://<host>:8080/` for the dashboard. The dashboard is disabled unless the
 separate `REMOTE_BLE_OPERATOR_TOKEN` is configured; it must not reuse any client credential.
+
+That same operator credential has a second, transport-independent use: a client may present it on
+the WebSocket upgrade as `X-RemoteBle-Operator: Bearer <secret>` to widen what an `agent.status`
+reply discloses — every lease and its holder, rather than only its own. It grants nothing else, and
+an absent or wrong value is not a connection failure: the session proceeds at normal scope and says
+so in `operatorScope`. `agent-rs` accepts the same header (`--operator-token` /
+`REMOTE_BLE_OPERATOR_TOKEN`), which is what lets one status command work against every reference
+agent rather than only the one that serves HTTP. See §6.2 of the
+[conformance spec](agent-conformance-spec.md).
+
+### Diagnosing a lease denial
+
+`PERIPHERAL_BUSY` names the holder rather than saying only "peripheral in use", which would leave
+the refused caller with no next action but to read agent logs or ask a human. The message always
+carries it; a client that negotiates `lease.holder` also gets it as structured fields
+(`AgentError.holder.principal` / `.clientId`), so contention can be attributed without parsing a
+sentence.
+
+Who sees what is scoped to the caller. The principal is always disclosed — it is operator-assigned
+and already shared context between tenants of one agent. The client id is disclosed only to a caller
+sharing that principal, or holding operator scope, because it is chosen by the client and can carry
+a hostname or username it never intended to publish.
+
+Both halves cross the wire from the holder, so the agent length-bounds them and escapes control
+characters — including the bidirectional overrides and line separators a naive check misses — before
+they land in someone else's terminal, log, or coding-agent context. A holder cannot name itself
+something that reformats the line it appears on. The structured field gets the identical treatment:
+being machine-readable makes it *more* likely to be forwarded verbatim, not less.
+
+The structured field is capability-gated for a reason worth knowing if you write an agent: an
+unrecognized key fails a v1 client's decode of the whole error frame rather than being ignored, so
+sending it unconditionally would turn a refused lease into a broken session. See §5.5 of the
+[conformance spec](agent-conformance-spec.md).
 
 The object graph (`AgentMonitor`, `EngineBleBackend` → `BleAgentBackend` →
 `AgentWebSocketServer`, plus `ConnectionWatcher`) is assembled by Koin in

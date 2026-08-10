@@ -8,12 +8,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.testTimeSource
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PeripheralRegistryTest {
@@ -62,6 +64,46 @@ class PeripheralRegistryTest {
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // freed after it elapses
         assertEquals(listOf(p), released)
+    }
+
+    @Test
+    fun snapshotReportsRemainingGraceAndClearsItOnResume() = runTest {
+        // testTimeSource advances with the scheduler, so "how much grace is left" is measured
+        // against the same virtual clock the release timer sleeps on.
+        val registry = PeripheralRegistry(
+            backgroundScope,
+            transportGrace = 10.seconds,
+            timeSource = testTimeSource,
+        )
+        registry.acquire(p, a)
+        registry.onConnected(p, a)
+
+        // No timer running: in-grace is false and there is no deadline to report.
+        registry.snapshot().single().let {
+            assertFalse(it.inGrace)
+            assertNull(it.remainingGraceMs)
+        }
+
+        registry.onTransportDropped(a)
+        runCurrent()
+        assertEquals(10_000, registry.snapshot().single().remainingGraceMs)
+
+        // It counts down rather than merely existing — the number a process-per-command client
+        // uses to decide whether its next invocation will resume or reconnect.
+        advanceTimeBy(6.seconds)
+        runCurrent()
+        registry.snapshot().single().let {
+            assertTrue(it.inGrace)
+            assertEquals(4_000, it.remainingGraceMs)
+        }
+
+        // Resuming cancels the timer, so the deadline must go with it: a stale one would report
+        // a release that is no longer coming.
+        assertIs<Acquisition.Granted>(registry.acquire(p, a))
+        registry.snapshot().single().let {
+            assertFalse(it.inGrace)
+            assertNull(it.remainingGraceMs)
+        }
     }
 
     @Test
@@ -209,5 +251,46 @@ class PeripheralRegistryTest {
         advanceTimeBy(6.seconds)
         runCurrent()
         assertIs<Acquisition.Granted>(registry.acquire(p, b)) // released by grace, not stuck connected
+    }
+
+    @Test
+    fun theSlotCapIsHostWideRatherThanPerClient() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 2)
+
+        assertIs<Acquisition.Granted>(registry.acquire("dev-1", a))
+        assertIs<Acquisition.Granted>(registry.acquire("dev-2", b))
+        // Two different clients have exhausted the host radio's capacity between them, which the
+        // per-session cap this replaced could not express.
+        assertIs<Acquisition.NoSlot>(registry.acquire("dev-3", a))
+
+        registry.releaseNow("dev-1", a)
+        assertIs<Acquisition.Granted>(registry.acquire("dev-3", a))
+    }
+
+    @Test
+    fun reAcquiringAnOwnedLeaseConsumesNoFurtherSlot() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 1)
+
+        assertIs<Acquisition.Granted>(registry.acquire(p, a))
+        assertIs<Acquisition.Granted>(registry.acquire(p, a)) // the resume path, not a new lease
+        assertEquals(1, registry.occupiedSlots.value)
+    }
+
+    @Test
+    fun occupancyCountsALeaseUntilItsGraceExpires() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, transportGrace = 10.seconds, maxSlots = 4)
+        registry.acquire(p, a)
+        registry.onConnected(p, a)
+        assertEquals(1, registry.occupiedSlots.value)
+
+        registry.onTransportDropped(a)
+        runCurrent()
+        // The client is gone but its link is warm and the peripheral is nobody else's: reporting
+        // this slot as free is what would mislead a client whose next process is about to resume.
+        assertEquals(1, registry.occupiedSlots.value)
+
+        advanceTimeBy(11.seconds)
+        runCurrent()
+        assertEquals(0, registry.occupiedSlots.value)
     }
 }

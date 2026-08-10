@@ -13,7 +13,30 @@ data class AgentError(
     val kind: ErrorKind,
     val gattStatus: Int? = null,
     val message: String? = null,
+    /**
+     * Who holds the peripheral, on [ErrorKind.PERIPHERAL_BUSY]. Populated only for a client that
+     * negotiated [Capabilities.LEASE_HOLDER] — see that capability for why the field is gated
+     * rather than always sent. Null on every other kind, and for a client without it, which keeps
+     * reading [message].
+     */
+    val holder: LeaseHolder? = null,
 )
+
+/**
+ * A lease holder's identity, split into the two halves a caller can act on separately.
+ *
+ * [message] already names the holder in prose, but prose is not a contract: a client that wants to
+ * say "retry when lab-a is done" or attribute contention in structured output would have to parse
+ * a human sentence back apart. This is the same information addressed as fields.
+ *
+ * Disclosure is scoped to the caller, so [clientId] is null where the caller is not entitled to it
+ * — another principal's client id can carry a hostname or username it never meant to publish. Both
+ * halves are text the *holder* chose, and they are rendered by whatever client was refused (a
+ * terminal, a log, a coding agent's context), so they arrive length-bounded and
+ * control-character escaped, exactly as the prose message does.
+ */
+@Serializable
+data class LeaseHolder(val principal: String, val clientId: String? = null)
 
 /**
  * [transient] answers "could an identical retry, later, plausibly succeed?" — it is about the
@@ -47,6 +70,7 @@ enum class ErrorKind(val transient: Boolean) {
     TRANSPORT_LOST(transient = true),      // the IP link may reconnect
     INCOMPATIBLE_PROTOCOL(transient = false), // the peer has no mutually supported wire version
     RADIO_OFF(transient = true),           // the agent host's radio is off; it can be switched back on
+    POLICY_DENIED(transient = false),      // the per-principal write allowlist refused this op
     ;
 
     companion object {

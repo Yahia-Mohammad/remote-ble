@@ -5,6 +5,7 @@ import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
 import dev.warsha.remoteble.protocol.AgentException
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.BleRadioState
@@ -16,6 +17,7 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
 import dev.warsha.remoteble.protocol.IdentifierFormat
+import dev.warsha.remoteble.protocol.LeaseStatusDto
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.mapDevice
@@ -25,6 +27,8 @@ import dev.warsha.remoteble.protocol.ProtocolCodec
 import dev.warsha.remoteble.protocol.Reply
 import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
+import dev.warsha.remoteble.protocol.StatusSettingsDto
+import dev.warsha.remoteble.protocol.StatusSlotsDto
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.coroutineContext
@@ -90,7 +94,7 @@ class BleAgent(
     // Cross-client peripheral ownership. Defaults to a private per-instance registry so a
     // standalone agent (and single-client tests) is unconstrained; the shared agent injects
     // the one [PeripheralRegistry] every connection's BleAgent must agree on.
-    private val registry: PeripheralRegistry = PeripheralRegistry(scope),
+    private val registry: PeripheralRegistry = PeripheralRegistry(scope, maxSlots = maxConnections),
     // Stable client identity (survives reconnects) — the ownership key. Defaults to this
     // connection's id, so a client that sends no handshake id simply never resumes.
     private val clientKey: String = clientId.toString(),
@@ -105,6 +109,17 @@ class BleAgent(
     // Shared by every socket only in the guaranteed modes. Null preserves the standalone/test
     // agent's historical connection-local scan behaviour.
     private val scanCoordinator: ScanCoordinator? = null,
+    // Agent-wide observations `agent.status` reports but no single connection owns: uptime, the
+    // cross-client connection count, and last-seen advertised names. Null in a standalone/test agent
+    // that runs no monitor, which narrows the status reply rather than failing it.
+    private val monitor: AgentMonitor? = null,
+    // Whether this connection presented a valid operator credential on the upgrade (OPERATOR_HEADER).
+    // Widens `agent.status` disclosure to every lease and its holder; nothing else consults it.
+    private val operatorScope: Boolean = false,
+    // Per-principal write allowlist (U7): the only real control on writes, since CLI-side policy is
+    // advisory (it lives in a file the calling agent can edit). Permissive by default so nothing
+    // changes for a consumer that never configures one.
+    private val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) {
     init {
         require(maxActiveScans in 1..MAX_ACTIVE_SCANS) { "maxActiveScans must be 1..$MAX_ACTIVE_SCANS" }
@@ -112,6 +127,10 @@ class BleAgent(
             "maxActiveObservations must be 1..$MAX_ACTIVE_OBSERVATIONS"
         }
     }
+
+    // The principal half of [clientKey], for write-policy lookups — computed once since clientKey
+    // never changes for this connection's lifetime.
+    private val principal: String by lazy { ClientCredentials.principalOf(clientKey) }
 
     private val state = Mutex()
     private val commandLimiter = Semaphore(maxInFlightCommands)
@@ -257,7 +276,6 @@ class BleAgent(
                 emit(AgentEvent.ConnectionState(DeviceHandle(handle), BleConnState.DISCONNECTED, reason = reason))
                 translator.evict(handle)
                 evictWriteChain(handle)
-                emitSlotsIfNegotiated()
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -386,6 +404,20 @@ class BleAgent(
                     // a rejected write never wedges the chain. See [reserveWriteTurn].
                     try {
                         writeTurn?.predecessor?.await()
+                        // Inside the turn, not before it: a denial still runs the `finally` below,
+                        // so a policy-refused write cannot wedge the next write to this device the
+                        // way throwing ahead of this block would.
+                        if (!writePolicy.authorizesWrite(
+                                principal,
+                                op.device.value,
+                                op.char.service,
+                                op.char.characteristic,
+                                op.value.size,
+                                op.withResponse,
+                            )
+                        ) {
+                            throw AgentException(policyDeniedError("write not permitted for this principal"))
+                        }
                         backend.write(op.device, op.char, op.value, op.withResponse)
                         reply(cmd.cid, OpResult.Ok())
                     } finally {
@@ -406,17 +438,34 @@ class BleAgent(
                 }
                 is Op.WriteDescriptor -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesDescriptorWrite(
+                            principal,
+                            op.device.value,
+                            op.desc.service,
+                            op.desc.characteristic,
+                            op.desc.descriptor,
+                            op.value.size,
+                        )
+                    ) {
+                        throw AgentException(policyDeniedError("descriptor write not permitted for this principal"))
+                    }
                     backend.writeDescriptor(op.device, op.desc, op.value)
                     reply(cmd.cid, OpResult.Ok())
                 }
                 is Op.Pair -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesPairing(principal)) {
+                        throw AgentException(policyDeniedError("pairing not permitted for this principal"))
+                    }
                     val state = backend.pair(op.device)
                     emitBondStateIfNegotiated(op.device, state)
                     reply(cmd.cid, OpResult.Ok(ResultPayload.Bond(state)))
                 }
                 is Op.Unpair -> {
                     authorizeConnected(op.device)
+                    if (!writePolicy.authorizesPairing(principal)) {
+                        throw AgentException(policyDeniedError("pairing not permitted for this principal"))
+                    }
                     backend.unpair(op.device)
                     emitBondStateIfNegotiated(op.device, BleBondState.NONE)
                     reply(cmd.cid, OpResult.Ok())
@@ -444,6 +493,9 @@ class BleAgent(
                     stopObserve(op.subId)
                     reply(cmd.cid, OpResult.Ok())
                 }
+                // Names no device, so there is nothing to authorize against a lease: what a caller
+                // may see is decided inside, by who it is.
+                Op.AgentStatus -> reply(cmd.cid, OpResult.Ok(ResultPayload.Status(agentStatus())))
             }
         } catch (e: CancellationException) {
             throw e
@@ -457,16 +509,105 @@ class BleAgent(
         }
     }
 
+    /**
+     * Builds this caller's view of the agent for [Op.AgentStatus].
+     *
+     * Disclosure is decided here rather than at the client, because only the agent knows who is
+     * asking: an ordinary caller sees the leases its own session key holds, and everything else
+     * becomes `otherLeases` plus the aggregate slot count — enough to answer "can I connect?"
+     * without naming another tenant. A caller that presented operator scope sees every lease and its
+     * holder, the same plane the dashboard serves over HTTP.
+     *
+     * Lease handles go out through [translator], so a handle read here is routable in the caller's
+     * next op without a scan first — the whole point of U6.
+     */
+    private suspend fun agentStatus(): AgentStatusDto {
+        val settings = registry.settings()
+        val leases = registry.snapshot()
+        val visible = if (operatorScope) leases else leases.filter { it.owner == clientKey }
+        return AgentStatusDto(
+            agentInfo = agentInfo,
+            uptimeMs = monitor?.uptimeMs() ?: 0L,
+            settings = StatusSettingsDto(
+                leaseGraceMs = settings.leaseGraceMs,
+                transportGraceMs = settings.transportGraceMs,
+                exclusiveByDefault = settings.defaultExclusive,
+                // The mode is already pinned by the single `scan.concurrency.*` capability this
+                // agent advertises, so it is read back from there rather than threading the config
+                // through a second path that could disagree with what the handshake said.
+                scanConcurrency = ScanConcurrencyMode.entries
+                    .firstOrNull { it.capability in capabilities }
+                    ?.name?.lowercase()
+                    ?: ScanConcurrencyMode.UNCONTROLLED.name.lowercase(),
+                strictIdentifiers = strictMode.enabled,
+                writePolicyEnforced = writePolicy.enforced,
+            ),
+            slots = StatusSlotsDto(
+                free = (registry.totalSlots - registry.occupiedSlots.value).coerceAtLeast(0),
+                total = registry.totalSlots,
+            ),
+            // With no monitor there is no cross-client view; this connection is the one client the
+            // agent can account for, and reporting it is honest where reporting zero would not be.
+            connectedClients = monitor?.connectedClients() ?: 1,
+            leases = visible.map { lease ->
+                LeaseStatusDto(
+                    handle = translator.toClient(lease.handle),
+                    name = monitor?.nameOf(lease.handle),
+                    holder = LeaseDisclosure.holderLabel(lease.owner, clientKey, operatorScope),
+                    mine = lease.owner == clientKey,
+                    connected = lease.connected,
+                    inGrace = lease.inGrace,
+                    remainingGraceMs = lease.remainingGraceMs,
+                )
+            },
+            otherLeases = leases.size - visible.size,
+            operatorScope = operatorScope,
+        )
+    }
+
+    /**
+     * The `PERIPHERAL_BUSY` error for a lease held by [ownerKey], as this caller may see it.
+     *
+     * One builder for both refusal sites, so the disclosure decision cannot drift between them.
+     * The structured holder rides along only for a client that negotiated
+     * [Capabilities.LEASE_HOLDER]; every other client gets the prose message alone, because an
+     * unknown key would fail its decode of the whole frame rather than being ignored.
+     */
+    private fun peripheralBusy(ownerKey: String): AgentError =
+        AgentError(
+            ErrorKind.PERIPHERAL_BUSY,
+            message = LeaseDisclosure.busyMessage(ownerKey, clientKey, operatorScope),
+            holder = if (Capabilities.LEASE_HOLDER in negotiated) {
+                LeaseDisclosure.holder(ownerKey, clientKey, operatorScope)
+            } else {
+                null
+            },
+        )
+
     /** Rejects every device-bearing operation unless this connection owns a live lease. */
     private suspend fun authorizeConnected(device: DeviceHandle) {
-        when (registry.authorizeConnected(device.value, clientKey)) {
+        when (val authorization = registry.authorizeConnected(device.value, clientKey)) {
             PeripheralRegistry.Authorization.Granted -> Unit
-            PeripheralRegistry.Authorization.PeripheralBusy ->
-                throw AgentException(AgentError(ErrorKind.PERIPHERAL_BUSY, message = "peripheral in use"))
+            is PeripheralRegistry.Authorization.PeripheralBusy ->
+                throw AgentException(peripheralBusy(authorization.owner))
             PeripheralRegistry.Authorization.NotConnected ->
                 throw AgentException(AgentError(ErrorKind.NOT_CONNECTED, message = "peripheral is not connected"))
         }
     }
+
+    /**
+     * The error for a write the policy refused. Never enumerates the policy — a refused caller
+     * learns that it was refused, not the shape of the allowlist.
+     *
+     * Gated on [Capabilities.WRITE_POLICY] for the same reason [radioUnavailableError] gates
+     * [ErrorKind.RADIO_OFF]: [ErrorKind] serializes by name, and an unknown name would fail a v1
+     * client's decode. A client that has not negotiated this receives [ErrorKind.INVALID_REQUEST]
+     * instead — the same kind an over-limit write already returns.
+     */
+    private fun policyDeniedError(message: String): AgentError = AgentError(
+        if (Capabilities.WRITE_POLICY in negotiated) ErrorKind.POLICY_DENIED else ErrorKind.INVALID_REQUEST,
+        message = message,
+    )
 
     private fun operationLimitError(op: Op): AgentError? = when (op) {
         is Op.ScanStart -> op.filters.takeIf { it.size > MAX_SCAN_FILTERS }?.let {
@@ -517,25 +658,29 @@ class BleAgent(
         if (state.withLock { device.value in connected }) return OpResult.Ok()
 
         // Cross-client ownership gate: another client holds an exclusive peripheral.
-        when (registry.acquire(device.value, clientKey)) {
+        val resumedWarmLink = when (val acquisition = registry.acquire(device.value, clientKey)) {
             is PeripheralRegistry.Acquisition.Denied ->
-                return OpResult.Err(AgentError(ErrorKind.PERIPHERAL_BUSY, message = "peripheral in use"))
-            PeripheralRegistry.Acquisition.Granted -> Unit
+                return OpResult.Err(peripheralBusy(acquisition.owner))
+            PeripheralRegistry.Acquisition.NoSlot ->
+                return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
+            is PeripheralRegistry.Acquisition.Granted -> acquisition.linkAlreadyLive
         }
 
-        // Per-client slot reservation (the cap is per session, not the lease).
-        val reserved = state.withLock {
-            when {
-                connected.size >= maxConnections -> false
-                else -> {
-                    connected += device.value // reserve before the (slow) connect
-                    true
-                }
-            }
-        }
-        if (!reserved) {
-            registry.releaseNow(device.value, clientKey) // give the lease back; never connected
-            return OpResult.Err(AgentError(ErrorKind.NO_CONNECTION_SLOT))
+        // The slot was taken by the acquisition above — the cap is the host radio's, so it is the
+        // registry's to enforce. This set stays for *this* connection's bookkeeping (idempotent
+        // connect, teardown), not as a second, per-session capacity rule.
+        state.withLock { connected += device.value } // reserve before the (slow) connect
+
+        // Resuming a lease whose radio link never dropped: the peripheral is already connected, so
+        // calling the backend again would be a second physical connect for a link that is up.
+        // `connected` above is per *connection*, and a resuming client is by definition a new one,
+        // so it cannot answer this — only the registry, which outlives the transport, can. This is
+        // the path every invocation of a process-per-command client takes after its first.
+        if (resumedWarmLink) {
+            observer.onClientLog(clientId, "resumed warm link ${device.value}")
+            Logger.info(LogTags.ENGINE) { "warm lease resumed, skipping connect [c=$clientId dev=${device.value}]" }
+            emit(AgentEvent.ConnectionState(device, BleConnState.CONNECTED))
+            return OpResult.Ok()
         }
 
         try {
@@ -545,7 +690,6 @@ class BleAgent(
             registry.releaseNow(device.value, clientKey)
             observer.onClientLog(clientId, "connect failed: ${device.value} (${e.message})")
             Logger.warn(LogTags.ENGINE) { "connect failed [c=$clientId dev=${device.value}]: ${e.message}" }
-            emitSlotsIfNegotiated() // slot restored
             throw e
         }
         if (!registry.onConnected(device.value, clientKey) { connectionLive }) {
@@ -561,7 +705,6 @@ class BleAgent(
         observer.onClientLog(clientId, "connected ${device.value}")
         Logger.info(LogTags.ENGINE) { "device connected [c=$clientId dev=${device.value}]" }
         emit(AgentEvent.ConnectionState(device, BleConnState.CONNECTED))
-        emitSlotsIfNegotiated()
         return OpResult.Ok()
     }
 
@@ -576,7 +719,6 @@ class BleAgent(
         emit(AgentEvent.ConnectionState(device, BleConnState.DISCONNECTED))
         translator.evict(device.value)
         evictWriteChain(device.value)
-        emitSlotsIfNegotiated()
         return result.fold(onSuccess = { OpResult.Ok() }, onFailure = { throw it })
     }
 
@@ -934,7 +1076,10 @@ class BleAgent(
             )
             Logger.warn(LogTags.SERVER) { "repeated hello ignored [c=$clientId]" }
         }
-        if (first) startRadioStateFeed()
+        if (first) {
+            startRadioStateFeed()
+            startSlotStateFeed()
+        }
     }
 
     /**
@@ -970,7 +1115,7 @@ class BleAgent(
 
     /**
      * Emits a bond-state change — but only to a client that negotiated `pairing` (the same
-     * decode-loop rationale as [emitSlotsIfNegotiated]: an unnegotiated event type could break
+     * decode-loop rationale as [startSlotStateFeed]: an unnegotiated event type could break
      * the client's decode loop). The solicited reply payload carries the state either way.
      */
     private suspend fun emitBondStateIfNegotiated(device: DeviceHandle, state: BleBondState) {
@@ -978,11 +1123,41 @@ class BleAgent(
         emit(AgentEvent.BondState(device, state))
     }
 
-    /** Reports free/total connection slots — but only to a client that negotiated `slots`. */
-    private suspend fun emitSlotsIfNegotiated() {
+    /**
+     * Streams free/total connection slots to a client that negotiated `slots`, starting with the
+     * current value.
+     *
+     * Two things this deliberately is not. It is not per session: the count comes from the
+     * registry, so it reflects every client's leases against the host's capacity, and a client
+     * learns that a peripheral is unavailable because *someone* holds it — including itself,
+     * between two invocations of a process-per-command tool. And it is not change-triggered from
+     * the connect/disconnect paths: a `StateFlow` replays its current value to a new collector, so
+     * a client that negotiates `slots` and asks nothing else still gets an answer instead of
+     * waiting for a connection count to move.
+     *
+     * Started from the handshake for the same reason as [startRadioStateFeed] — [negotiated] is
+     * only known once the hello lands.
+     */
+    private fun startSlotStateFeed() {
         if (Capabilities.CONNECTION_SLOTS !in negotiated) return
-        val free = state.withLock { maxConnections - connected.size }
-        emit(AgentEvent.SlotState(free = free, total = maxConnections))
+        scope.launch {
+            registry.occupiedSlots.collect { occupied ->
+                // Contained like [startRadioStateFeed]: a send that throws on an already-closing
+                // socket must not tear down the session scope on its way out.
+                try {
+                    emit(
+                        AgentEvent.SlotState(
+                            free = (registry.totalSlots - occupied).coerceAtLeast(0),
+                            total = registry.totalSlots,
+                        ),
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    observer.onClientLog(clientId, "failed to deliver slot state: ${t.message}")
+                }
+            }
+        }
     }
 
     private suspend fun reply(cid: Long, result: OpResult) = outgoing(codec.encode(Reply(cid, result)))
@@ -1015,7 +1190,21 @@ class BleAgent(
     private class NotificationOverflowException : Exception()
 
     companion object {
-        const val DEFAULT_MAX_CONNECTIONS: Int = 4
+        /**
+         * Peripherals this agent host will hold at once, across **every** client. Enforced by
+         * `PeripheralRegistry`, because the constraint it models is the host controller's.
+         *
+         * Eight, matching `agent-rs`. Neither Kable nor btleplug exposes the controller's real
+         * limit, so any fixed number is a guess, and the useful property of a guess here is that it
+         * not be the binding constraint on a healthy host: a cap below the radio's own ceiling
+         * silently wastes capacity, while one above it merely means a refusal arrives from the
+         * radio instead of from us. An operator running a shared rig sets a real policy explicitly.
+         *
+         * It was 4, and per session rather than agent-wide, which made it *effectively* 4×clients.
+         * Making it agent-wide without raising it would have tightened every existing multi-client
+         * deployment; a client that needs a hard reservation should be leasing, not counting slots.
+         */
+        const val DEFAULT_MAX_CONNECTIONS: Int = 8
         const val DEFAULT_MAX_INFLIGHT_COMMANDS: Int = 64
         const val MAX_SCAN_FILTERS: Int = 64
         const val MAX_ACTIVE_SCANS: Int = 16
@@ -1032,7 +1221,13 @@ class BleAgent(
          * (the backend contributes its own — descriptors, pairing). Unioned into the
          * advertised set by [BleAgentBackend].
          */
-        val AGENT_CAPABILITIES: Set<String> =
-            setOf(Capabilities.CONNECTION_SLOTS, Capabilities.SCAN_BATCH, Capabilities.IDENTIFIER_TRANSLATION)
+        val AGENT_CAPABILITIES: Set<String> = setOf(
+            Capabilities.CONNECTION_SLOTS,
+            Capabilities.SCAN_BATCH,
+            Capabilities.IDENTIFIER_TRANSLATION,
+            Capabilities.AGENT_STATUS,
+            Capabilities.WRITE_POLICY,
+            Capabilities.LEASE_HOLDER,
+        )
     }
 }

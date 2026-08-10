@@ -29,6 +29,11 @@ object Capabilities {
     /**
      * Unsolicited `AgentEvent.SlotState` events reporting free/total connection slots.
      * Agent-level (radio-independent): the agent tracks slots itself.
+     *
+     * A client that negotiates this receives one event immediately, carrying the state at handshake
+     * time, and one on every later change. The count is **agent-global and lease-aware**: it spans
+     * every client, and a peripheral still leased inside its grace window counts as occupied,
+     * because that is the capacity the next `connect` will actually meet.
      */
     const val CONNECTION_SLOTS: String = "slots"
 
@@ -77,6 +82,49 @@ object Capabilities {
      * scan with the radio off completes normally and yields nothing.
      */
     const val RADIO_STATE: String = "radio.state"
+
+    /**
+     * The `agent.status` op ([Op.AgentStatus] → [ResultPayload.Status]): a caller-scoped snapshot of
+     * the agent's identity, uptime, effective ownership settings, slot occupancy and leases.
+     * Agent-level (radio-independent): every field comes from bookkeeping the agent already keeps.
+     *
+     * Disclosure is scoped to the caller — see [AgentStatusDto]. A caller that presented operator
+     * scope on the upgrade (`OPERATOR_HEADER`) sees every lease and its holder; every other caller
+     * sees its own leases plus aggregate counts.
+     */
+    const val AGENT_STATUS: String = "agent.status"
+
+    /**
+     * A per-principal write allowlist is enforced (`Op.Write` / `Op.WriteDescriptor` / `Op.Pair` /
+     * `Op.Unpair`). Agent-level (bookkeeping, not radio behaviour): every conforming agent
+     * implements the mechanism and advertises this unconditionally, whether or not an operator has
+     * actually configured a restrictive policy — [AgentStatusDto.settings]'s `writePolicyEnforced`
+     * reports that separately.
+     *
+     * Exists so [ErrorKind.POLICY_DENIED] can be sent at all: an unknown enum name would fail a v1
+     * client's decode (the same reason [RADIO_STATE] is gated), so a client that has not negotiated
+     * this receives [ErrorKind.INVALID_REQUEST] for a policy-denied write instead.
+     */
+    const val WRITE_POLICY: String = "write.policy"
+
+    /**
+     * Structured holder details on [ErrorKind.PERIPHERAL_BUSY]: [AgentError.holder] names the
+     * principal, and the client id where the caller is entitled to see it. Agent-level (the
+     * registry already knows the owner), so every conforming agent advertises it.
+     *
+     * Gated for two reasons, and the first is the binding one. [AgentError] is decoded with
+     * `Cbor.Default`, which does **not** ignore unknown keys, so an added field is not a
+     * backward-compatible addition the way a new optional field is under a lenient codec: a v1
+     * client that never heard of `holder` fails to decode the whole error frame. That is the same
+     * hazard that keeps [RADIO_OFF] and [WRITE_POLICY] gated, reached through an unknown *key*
+     * rather than an unknown enum name — `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode`
+     * pins it. A client without this capability keeps the pre-0.11.0 behaviour: the holder is named
+     * in [AgentError.message] only.
+     *
+     * Second, it makes disclosure opt-in. A caller that never asked for another tenant's identity
+     * does not receive it in a machine-readable field it might log or forward.
+     */
+    const val LEASE_HOLDER: String = "lease.holder"
 
     /** The agent multiplexes all logical scans through one physical scan. */
     const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"

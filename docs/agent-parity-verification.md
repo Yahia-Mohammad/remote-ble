@@ -21,18 +21,38 @@ The dispatch tables differ:
 | read / write | ✅ | ✅ |
 | observe.start / observe.stop | ✅ | ✅ |
 | requestMtu | ✅ | ✅ |
-| desc.read | ✅ | ❌ → `Unsupported` |
-| desc.write | ✅ | ❌ → `Unsupported` |
+| desc.read | ✅ | ✅ |
+| desc.write | ✅ | ✅ |
 | pair | ✅ | ❌ → `Unsupported` |
 | unpair | ✅ | ❌ → `Unsupported` |
 | conn.priority | ✅ | ❌ → `Unsupported` |
 | rssi | ✅ | ❌ → `Unsupported` |
 | conn.params | ✅ | ❌ → `Unsupported` |
 
-**Root cause:** `btleplug` (the Rust BLE library) exposes no APIs for descriptors,
-pairing, connection priority, connected RSSI, or connection parameters. The Rust
-`BleBackend` trait doesn't declare those methods at all. These 7 ops are CBOR-decoded
-correctly but answered `Unsupported` at dispatch.
+**Root cause — corrected 2026-08-05.** This previously read "btleplug exposes no APIs for
+descriptors, pairing, connection priority, connected RSSI, or connection parameters." That is
+wrong for descriptors, and the error mattered: it moved `desc.read`/`desc.write` from "not built
+yet" into "cannot be built", where nothing would revisit them.
+
+`btleplug` 0.11.8 declares `Peripheral::read_descriptor` and `Peripheral::write_descriptor`, and
+exposes `Characteristic.descriptors`. Kable's JVM backend is btleplug too and binds both
+(`PeripheralInterface.readDescriptor` / `writeDescriptor` in `kable-btleplug-ffi`), which is what
+the JVM Kotlin agent advertises `descriptors` on — truthfully, so rule 3 is not violated there.
+
+So the split is:
+
+- **`desc.read` / `desc.write` — implemented in 0.11.0.** `BleBackend` gained the two methods,
+  `btleplug_impl` resolves a `DescRef` exactly as it resolves a `CharRef`, and `execute_op`
+  dispatches both — authorizing first, so moving them out of the catch-all arm did not reopen the
+  cross-client hole Rig A case 3 closed. Discovery now reports each characteristic's descriptor
+  UUIDs too: that list was hard-coded empty, which would have left the capability advertised but
+  unreachable, since a client discovers the tree to learn what it may address.
+- **`pair` / `unpair` / `conn.priority` / `rssi` / `conn.params` — genuinely unavailable.**
+  btleplug has no pairing, connection-priority, or interval control, and its RSSI is the cached
+  advertisement value rather than a connected read.
+
+The remaining five are CBOR-decoded correctly and answered `Unsupported` at dispatch, which stays
+truthful.
 
 **Origin:** Pre-existing and not introduced by logging. Release handling is capability-specific;
 the 0.9.0 addendum requires truthful `UNSUPPORTED` behavior wherever Rust cannot comply.
@@ -41,18 +61,39 @@ the 0.9.0 addendum requires truthful `UNSUPPORTED` behavior wherever Rust cannot
 
 ## 2. Capabilities Advertised
 
-| Capability | Kotlin | Rust | Notes |
-|---|---|---|---|
-| `descriptors` | ✅ (Kable, all platforms) | ❌ | btleplug has no descriptor API |
-| `pairing` | ❌ (not advertised) | ❌ | Match — neither advertises |
-| `slots` | ✅ (`AGENT_CAPABILITIES`) | ❌ | Rust has helpers but never emits `SlotState` |
-| `conn.priority` | ✅ (Android only) | ❌ | btleplug has no priority API |
-| `rssi` | ✅ (Android/Apple) | ❌ | btleplug has no connected RSSI read |
-| `scan.batch` | ✅ (`AGENT_CAPABILITIES`) | ❌ | Rust never emits `ScanResultBatch` |
-| `conn.params` | ✅ (Android only) | ❌ | btleplug has no interval control |
-| `identifier.translate` | ✅ | ✅ | **Match** — both implement |
+Compare **like hosts**. The Kotlin column below is Kable's Android backend, which is the most
+capable one; the JVM column is the fair comparison for `agent-rs`, because Kable's JVM target is
+itself btleplug. Reading the Android column as the standard makes Rust look four capabilities
+poorer than it is — `rssi`, `conn.priority`, and `conn.params` are Android radio features that the
+JVM Kotlin agent does not advertise either.
 
-**Pre-existing:** Yes. btleplug limitation.
+| Capability | Level | Kotlin (Android) | Kotlin (JVM) | Rust | Notes |
+|---|---|---|---|---|---|
+| `slots` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — agent-global and lease-aware in both |
+| `identifier.translate` | agent | ✅ | ✅ | ✅ | **Match** — both implement |
+| `scan.batch` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same 100 ms window and 16-result cap |
+| `agent.status` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same DTO, same disclosure rules, same skipped defaults on the wire |
+| `write.policy` | agent | ✅ | ✅ | ✅ | **Match for valid unique-key policies** — including the optional `device` rule; blank paths warn and remain permissive; duplicate-member rejection is a documented deferred portability gap |
+| `lease.holder` | agent | ✅ | ✅ | ✅ | **Match** since 0.11.0 — same disclosure policy, same sanitizing bound, and the structured field gated identically on both |
+| `descriptors` | backend | ✅ | ✅ | ✅ | **Match** since 0.11.0 — see §1 |
+| `rssi` | backend | ✅ | ❌ | ❌ | Match on JVM: btleplug reports cached advertisement RSSI, not a connected read |
+| `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
+| `conn.params` | backend | ✅ | ❌ | ❌ | Match on JVM: no interval control |
+| `pairing` | backend | ❌ | ❌ | ❌ | Match — neither advertises |
+| `radio.state` | backend | ✅ | ❌ | ❌ | Match on JVM: neither observes adapter state there |
+
+See the conformance spec, §5.3, for what "agent" and "backend" level oblige. Agent-level
+capabilities are advertised unconditionally by both agents — in Rust via
+`capabilities::AGENT_CAPABILITIES`, applied in `Negotiation::on_hello` where no backend answer can
+narrow it; in Kotlin via `BleAgent.AGENT_CAPABILITIES`.
+
+**No same-host divergence remains.** Every capability above either matches on a given host, or
+differs only where the host's radio genuinely differs.
+
+One caveat worth carrying: the simulator does not model descriptors and the real-agent descriptor
+tests are kept separate, so **neither** agent's descriptor path is exercised by the default CI
+matrix. The Rust implementation is covered by dispatch and authorization tests against a fake
+backend; that it works over a real radio is unproven on either agent and wants a rig run.
 
 ---
 
@@ -147,19 +188,28 @@ interop tests in `protocol/interop_tests.rs`).
 |---|---|---|
 | Acquire with exclusive/shared | ✅ | ✅ |
 | Re-acquire cancels grace | ✅ | ✅ |
-| Lease grace / transport grace | ✅ (10s/10s) | ✅ (10s/10s) |
+| Lease grace / transport grace | ✅ (10s/120s) | ✅ (10s/120s) |
 | Warm-link teardown on expiry | ✅ | ✅ |
 | `heldBy(clientKey)` for priming | ✅ | ✅ |
 | `onTransportDropped` | ✅ | ✅ |
 | Race-safe grace vs. resume | `Job.cancel()` | epoch comparison |
-| Default max slots | 4 (per-session cap) | 8 (global) |
+| Slot cap scope | global (registry) | global (registry) |
+| Default max slots | 8 | 8 | 
+| Occupancy change signal | `StateFlow<Int>` | `watch::Sender<usize>` |
+| `SlotState` at handshake + on change | ✅ | ✅ |
 | Registry-level client-notifier map | ✅ | ❌ (backend handles notify) |
 | Dashboard lease snapshot / exclusive toggle | ✅ | ❌ (no dashboard) |
 
-**Pre-existing differences:** The max-slots divergence (4 vs 8) is a behavioral
-difference a client could observe if it negotiates `slots`. The notifier architecture
-differs (Kotlin: registry owns the client→notifier map; Rust: the backend itself sends
-the disconnect event on the device's `event_tx`). Both are functionally equivalent for
+**The max-slots divergence is resolved at 8.** It was tolerable while the Kotlin cap was per
+session and `agent-rs` emitted no `SlotState` at all — a client could not compare the two numbers
+because it only ever saw one of them. Once both agents began reporting a global, lease-aware count
+over the same capability, the same client on the same host would have got 4 from one and 8 from the
+other. Kotlin moved, because 8 is the more permissive of the two: aligning downward would have
+tightened `agent-rs` for its existing users *and* left the Kotlin per-session→agent-wide conversion
+at its most restrictive, turning an effective 4×clients into 4 total.
+
+The notifier architecture differs (Kotlin: registry owns the client→notifier map; Rust: the backend
+itself sends the disconnect event on the device's `event_tx`). Both are functionally equivalent for
 the client-facing behavior.
 
 ---
@@ -169,11 +219,22 @@ the client-facing behavior.
 | Feature | Kotlin | Rust |
 |---|---|---|
 | Per-advertisement `ScanResult` | ✅ | ✅ |
-| Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ❌ |
+| Coalesced `ScanResultBatch` | ✅ (100ms / 16) | ✅ (100ms / 16) |
+| Where batching lives | per scan job | the connection's event pump, where both scan paths converge |
 | Name/UUID coalescing | ✅ coordinator-owned, before matching | ✅ coordinator-owned in guaranteed modes; bounded legacy backend coalescer in `uncontrolled` |
 | Concurrent-scan handling | ✅ configured coordinator, explicit uncontrolled escape hatch | ✅ configured coordinator, explicit uncontrolled escape hatch |
 
-**Pre-existing:** Yes. Rust never implemented scan batching.
+**Closed 2026-08-05.** Rust batches in its per-connection event pump rather than inside each scan
+job: the coordinator's arbiter and the uncontrolled backend path both feed that one channel, so a
+single implementation covers both instead of the two the Kotlin agent carries. The observable
+contract is the same — flush every 100 ms or early at 16 results, never an empty batch, arrival
+order preserved within a batch — and the capability is read live, so a scan already running when a
+late hello negotiates `scan.batch` starts batching, matching §5.3's rule for handle translation on
+an in-flight stream.
+
+The wire form is now covered in the direction that can fail: `agent-rs` could always decode a batch
+but never sent one, so `RustAgentInteropTest.eventScanResultBatch` pins a Kotlin client's decode of
+the definite-length CBOR the Rust agent actually emits.
 
 **Gap 21 — closed 2026-08-03, parity confirmed on hardware.** Both reference agents route guaranteed
 modes through an agent-lifetime coordinator keyed by stable client key and scan ID, with
@@ -236,15 +297,33 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 - Native unsolicited-drop detection
 - Wire protocol codec (CBOR byte-parity verified by interop tests)
 - **Logging levels and taxonomy** (0.9.0 scope — both emit the same story at the same levels)
+- **Agent-level capability set** (0.11.0 — `slots`, `identifier.translate`, `scan.batch`,
+  `agent.status`, `write.policy`, and `lease.holder` advertised unconditionally by both, and
+  complete: every agent-level capability now matches)
+- **`agent.status`** (0.11.0 — identical DTO from both agents, including which fields are omitted
+  when they equal their defaults, so diffing one agent's status against the other's is meaningful
+  rather than merely both-parse-fine. The Rust agent grew a bounded advertised-name cache for it,
+  since btleplug offers the name only on the scan path and nothing else retained it)
+- **`slots` accounting and delivery** (0.11.0 — global, lease-aware, delivered at handshake and on
+  every occupancy change in both agents)
+- **Lease-denial disclosure** (0.11.0 — one policy, and now one *bound*: both cap the rendered
+  message rather than the characters consumed, so an all-escaped identity is described identically.
+  Both also render the prose message and the structured `lease.holder` field from a single policy
+  point, so the two cannot disagree about the same holder, and both widen disclosure under operator
+  scope)
+- **Write-policy rule shape** (0.11.0 — including the optional `device` field and its `"*"` default,
+  so the same policy file authorizes identically on either agent)
 
 ### Previously recorded differences
-- 7 ops Unsupported in Rust (btleplug limitation — ROADMAP: "blocked upstream")
-- 6 capabilities not advertised in Rust (btleplug limitation)
+- 5 ops Unsupported in Rust for genuine btleplug limitations: `pair`, `unpair`, `conn.priority`,
+  `rssi`, `conn.params` (ROADMAP: "blocked upstream")
 - No HTTP dashboard in Rust (architecture — raw `tokio-tungstenite`, no HTTP framework)
-- No scan batching in Rust
-- No `slots` SlotState events in Rust
 - No cheap 1s `isConnected` poll in Rust
-- Default max slots divergence (4 vs 8)
+
+### Resolved in 0.11.0
+- Default max slots (was 4 vs 8, now 8 in both) — see §7
+- `descriptors` (`desc.read` / `desc.write`) implemented in `agent-rs`, closing the last same-host
+  divergence — see §1. Recorded as a btleplug limitation until 2026-08-05; btleplug has the API
 
 ### Runtime differences found by the 2026-07-15 review, now fixed
 
@@ -272,6 +351,8 @@ agents. These supersede the stale specifics above where they conflict.
 | Principal-scoped ownership key | ✅ | ✅ | `(principal, stable client id)`; `X-RemoteBle-Client` never crosses principals |
 | Loopback-default bind + policy | ✅ | ✅ | non-loopback needs a credential or the explicit insecure-LAN override |
 | Failed-auth rate limiting | ✅ (client + operator planes) | ✅ (client plane) | fixed-memory per-peer/global limiter, LRU eviction, `429` |
+| Operator credential | ✅ (`REMOTE_BLE_OPERATOR_TOKEN`) | ✅ (`--operator-token` / `REMOTE_BLE_OPERATOR_TOKEN`) | Must be distinct from every client credential; both fail startup otherwise. Grants the HTTP dashboard (Kotlin only — Rust serves no HTTP) and, on both, `agent.status` holder disclosure via `X-RemoteBle-Operator` |
+| Write policy | ✅ (`REMOTE_BLE_POLICY_FILE`) | ✅ (`--policy-file` / `REMOTE_BLE_POLICY_FILE`) | Read once before backend/listener startup. Unset or blank = permissive (blank warns); configured policy is strict and per principal. Unique JSON keys are required pending duplicate-member hardening. |
 | Duplicate live session refused | ✅ (post-upgrade `1008`) | ✅ (handshake `409`) | `LEASE-DUPLICATE-01`; transport signal is implementation-specific |
 | 1 MiB inbound frame cap | ✅ | ✅ | framing-layer enforcement before decode |
 | Argument ceilings → `INVALID_REQUEST` | ✅ | ✅ | ≤64 filters, ≤512-byte writes/descriptors, **MTU 23–517** |

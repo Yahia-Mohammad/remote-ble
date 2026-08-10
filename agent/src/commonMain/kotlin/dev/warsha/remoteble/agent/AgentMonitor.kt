@@ -22,7 +22,18 @@ private fun epochMillis(): Long = Clock.System.now().toEpochMilliseconds()
 class AgentMonitor : AgentObserver {
 
     private val lock = SynchronizedObject()
-    private val startedAtMs = epochMillis()
+
+    /** When this agent process began serving, as epoch milliseconds. Also the base of [uptimeMs]. */
+    val startedAtMs: Long = epochMillis()
+
+    /** How long this agent has been serving. What `agent.status` reports. */
+    fun uptimeMs(): Long = epochMillis() - startedAtMs
+
+    /** How many client sessions are connected right now, across every principal. */
+    fun connectedClients(): Int = synchronized(lock) { clients.size }
+
+    /** The last advertised name seen for [handle], or null if the agent has never scanned it. */
+    fun nameOf(handle: String): String? = synchronized(lock) { names[handle] }
     private val clients = LinkedHashMap<Long, ClientRow>()
     private val devices = LinkedHashMap<String, DeviceRow>() // handle -> row (connected only)
     private val names = HashMap<String, String>()            // handle -> last-seen advertised name

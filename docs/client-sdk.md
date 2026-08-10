@@ -627,6 +627,28 @@ Covered by `RemoteAdvertisementIdentifierTest` (portable `.handle`), `RemoteIden
 (host-specific `.identifier`), and the agent's `HandleTranslatorTest` / `BleAgentTest` translation
 e2e.
 
+**Opting out: non-Kable consumers should declare `STRING`.** Translation exists to serve
+`.identifier`, so a consumer that never constructs a Kable `Identifier` — a CLI, a test harness,
+anything treating a handle as an opaque routing token — gains nothing from it and inherits a sharp
+edge. Synthesis is deterministic, but the reverse map that routes a synthesized handle back to the
+radio is **per connection**, primed on handshake only from the leases that client still holds. A
+handle learned by scanning in one connection is therefore unroutable in the next one, which is the
+normal case for a client whose processes are short-lived: scan in one process, connect in the next,
+and the op reaches the radio as the synthetic string instead of the peripheral it names.
+
+```kotlin
+val session = DefaultAgentSession(
+    transport, codec, scope,
+    identifierFormat = IdentifierFormat.STRING, // "any string fits" → no synthesis
+)
+```
+
+`STRING` means the client can hold any handle, so the agent passes its own through untranslated.
+Those handles then address the same peripheral from any process, and match what the agent's
+dashboard and logs show. The default stays the host format, which is what a Kable-facing consumer
+needs. Covered by `DeclaredIdentifierFormatTest` and the two `BleAgentTest` cases that pin the
+routable and non-routable halves against each other.
+
 ### `peripheralFor` and `RemotePeripheralFactory` — the decision point
 
 [`RemotePeripheralFactory.kt`](../client-sdk/src/commonMain/kotlin/dev/warsha/remoteble/client/RemotePeripheralFactory.kt) —

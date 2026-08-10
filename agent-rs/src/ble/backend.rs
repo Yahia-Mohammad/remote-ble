@@ -1,7 +1,7 @@
 use crate::protocol::{
     errors::AgentError,
     events::AgentEvent,
-    op::{CharRef, DeviceHandle, ScanFilter},
+    op::{CharRef, DescRef, DeviceHandle, ScanFilter},
     results::ResultPayload,
 };
 use async_trait::async_trait;
@@ -59,6 +59,19 @@ pub trait BleBackend: Send + Sync {
         device: &DeviceHandle,
         mtu: i32,
     ) -> Result<ResultPayload, AgentError>;
+    /// Reads a descriptor. Gated by capability `descriptors`, which a backend advertises only if
+    /// it implements both this and [BleBackend::write_descriptor].
+    async fn read_descriptor(
+        &self,
+        device: &DeviceHandle,
+        desc_ref: &DescRef,
+    ) -> Result<ResultPayload, AgentError>;
+    async fn write_descriptor(
+        &self,
+        device: &DeviceHandle,
+        desc_ref: &DescRef,
+        value: &[u8],
+    ) -> Result<(), AgentError>;
     async fn start_observe(
         &self,
         stream: StreamKey,

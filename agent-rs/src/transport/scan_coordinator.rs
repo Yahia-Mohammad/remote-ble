@@ -36,6 +36,16 @@ impl ScanConcurrencyMode {
             }
         }
     }
+
+    /// The mode's lowercased name, as `agent.status` reports it and `--scan-concurrency` accepts
+    /// it. Matches the Kotlin agent's `ScanConcurrencyMode.name.lowercase()`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Multiplexed => "multiplexed",
+            Self::Single => "single",
+            Self::Uncontrolled => "uncontrolled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -756,6 +766,23 @@ mod tests {
             _mtu: i32,
         ) -> Result<ResultPayload, AgentError> {
             Ok(ResultPayload::Mtu { mtu: 23 })
+        }
+
+        async fn read_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            _desc_ref: &crate::protocol::op::DescRef,
+        ) -> Result<ResultPayload, AgentError> {
+            Ok(ResultPayload::Bytes { value: vec![] })
+        }
+
+        async fn write_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            _desc_ref: &crate::protocol::op::DescRef,
+            _value: &[u8],
+        ) -> Result<(), AgentError> {
+            Ok(())
         }
 
         async fn start_observe(

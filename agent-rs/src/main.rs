@@ -5,7 +5,7 @@ mod translate;
 mod transport;
 
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use ble::backend::BleBackend;
 use ble::btleplug_impl::BtleplugBackend;
 use protocol::op::DeviceHandle;
 use registry::peripheral_lease::{LeaseConfig, PeripheralRegistry};
+use registry::write_policy::WritePolicy;
 use transport::server::{AgentServer, ScanConcurrencyMode, ServerConfig};
 
 #[derive(Parser, Debug)]
@@ -36,6 +37,18 @@ struct Args {
     #[arg(long, env = "REMOTE_BLE_TOKENS")]
     tokens: Option<String>,
 
+    /// Operator credential, presented as `X-RemoteBle-Operator: Bearer <secret>` on the upgrade.
+    /// Widens what `agent.status` discloses to that session — every lease and its holder — and
+    /// grants nothing else. Must be distinct from every client credential, so a normal bearer
+    /// token cannot quietly acquire operator reach.
+    #[arg(long, env = "REMOTE_BLE_OPERATOR_TOKEN")]
+    operator_token: Option<String>,
+
+    /// Path to a per-principal write policy file (U7). Absent means every write is allowed,
+    /// matching pre-U7 behaviour; see docs/proposals/agent-write-policy.md for the schema.
+    #[arg(long, env = "REMOTE_BLE_POLICY_FILE")]
+    policy_file: Option<String>,
+
     /// Permit an unauthenticated non-loopback listener for local development only.
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_INSECURE_LAN")]
     allow_insecure_lan: bool,
@@ -44,8 +57,11 @@ struct Args {
     #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_LEASE_GRACE_MS")]
     lease_grace_ms: u64,
 
-    /// Transport-drop grace window in milliseconds
-    #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_TRANSPORT_GRACE_MS")]
+    /// Transport-drop grace window in milliseconds. Two minutes by default: the binding case is a
+    /// client with a process-per-command lifecycle (a CLI, a script, a coding agent) whose next
+    /// command must resume the same warm link. Lower it on a shared rig, where the trade is that a
+    /// peripheral stays leased for the whole window after its holder walks away.
+    #[arg(long, default_value_t = 120_000, env = "REMOTE_BLE_TRANSPORT_GRACE_MS")]
     transport_grace_ms: u64,
 
     /// How often the active (real GATT round-trip) liveness probe runs, in milliseconds
@@ -114,7 +130,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         subscriber.init();
     }
     let credentials = parse_credentials(args.token.as_deref(), args.tokens.as_deref())?;
+    validate_operator_token(args.operator_token.as_deref(), &credentials)?;
     validate_bind(&args, !credentials.is_empty())?;
+
+    // Mirrors `authenticate()`'s own resolution: with no credentials configured at all, every
+    // connection is the anonymous principal; otherwise it's a named credential. A policy naming
+    // anyone else is a typo the agent should refuse to boot on, not silently tolerate.
+    let known_principals: HashSet<String> = if credentials.is_empty() {
+        HashSet::from(["anonymous".to_string()])
+    } else {
+        credentials.keys().cloned().collect()
+    };
+    let write_policy = load_write_policy(args.policy_file.as_deref(), &known_principals)?;
 
     tracing::info!(
         "Starting RemoteBLE Agent (Rust) v{} | log level: {}",
@@ -170,6 +197,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
         scan_concurrency: args.scan_concurrency,
         transport_grace: Duration::from_millis(args.transport_grace_ms),
+        operator_token: args.operator_token.clone(),
+        write_policy,
     };
 
     let backend_for_shutdown = ble_backend.clone();
@@ -185,6 +214,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// The operator secret must not be one of the client secrets.
+///
+/// Without this a deployment could hand out one token that authenticates a client *and* carries
+/// operator disclosure, which is exactly the "a normal bearer token must not silently gain operator
+/// access" rule the status contract is built on. Fails startup rather than warning: a
+/// misconfiguration here is invisible in normal operation and only shows up as one tenant reading
+/// another's client ids. Mirrors the same check in the Kotlin agent's `AgentWebSocketServer`.
+fn validate_operator_token(
+    operator_token: Option<&str>,
+    credentials: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(token) = operator_token else {
+        return Ok(());
+    };
+    if token.trim().is_empty() {
+        return Err("operator token must not be blank".into());
+    }
+    if credentials.values().any(|secret| secret == token) {
+        return Err("operator token must be distinct from every client credential".into());
+    }
     Ok(())
 }
 
@@ -247,6 +299,27 @@ fn parse_credentials(
         credentials.insert("default".to_string(), token.to_string());
     }
     Ok(credentials)
+}
+
+/// Resolve the policy before the backend or listener starts: a nonblank unreadable or malformed
+/// policy must fail the process closed rather than accidentally booting permissive.
+fn load_write_policy(
+    path: Option<&str>,
+    known_principals: &HashSet<String>,
+) -> Result<WritePolicy, std::io::Error> {
+    match path {
+        Some(path) if path.trim().is_empty() => {
+            tracing::warn!(
+                "write policy path is blank; treating it as unconfigured (write policy is permissive)"
+            );
+            Ok(WritePolicy::permissive())
+        }
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)?;
+            WritePolicy::decode(&raw, known_principals).map_err(std::io::Error::other)
+        }
+        None => Ok(WritePolicy::permissive()),
+    }
 }
 
 fn validate_bind_policy(
@@ -316,5 +389,34 @@ mod tests {
         assert_eq!(credentials.len(), 3);
         assert!(parse_credentials(Some("legacy"), Some("default=other")).is_err());
         assert!(parse_credentials(None, Some("alpha=same,beta=same")).is_err());
+    }
+
+    #[test]
+    fn policy_file_loader_is_permissive_only_when_absent_and_fails_closed_otherwise() {
+        let known = HashSet::from(["lab-a".to_string()]);
+        assert!(!load_write_policy(None, &known).unwrap().enforced());
+        assert!(!load_write_policy(Some(""), &known).unwrap().enforced());
+        assert!(!load_write_policy(Some(" \t "), &known).unwrap().enforced());
+
+        let missing =
+            std::env::temp_dir().join(format!("remoteble-missing-policy-{}", std::process::id()));
+        assert!(load_write_policy(missing.to_str(), &known).is_err());
+
+        let malformed =
+            std::env::temp_dir().join(format!("remoteble-invalid-policy-{}", std::process::id()));
+        std::fs::write(
+            &malformed,
+            r#"{"version":1,"principals":{"lab-a":{"writes":[]}}}"#,
+        )
+        .unwrap();
+        assert!(
+            load_write_policy(malformed.to_str(), &known)
+                .unwrap()
+                .enforced()
+        );
+        std::fs::write(&malformed, "not json").unwrap();
+        let result = load_write_policy(malformed.to_str(), &known);
+        let _ = std::fs::remove_file(malformed);
+        assert!(result.is_err());
     }
 }

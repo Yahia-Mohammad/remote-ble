@@ -18,6 +18,170 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-10
+
+> Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
+> running one command per process. The wire protocol version is unchanged at **1** and no existing
+> `@SerialName` discriminator moved; the additions are one new op (`agent.status`) with its result
+> payload and capability string, plus one capability-gated additive field (`AgentError.holder`
+> behind `lease.holder`), gated so they reach only clients that negotiate them. This release
+> also adds a capability-gated per-principal write policy. `agent-rs`
+> also begins advertising and emitting capabilities and events that already existed (`slots`,
+> `scan.batch`, and their `SlotState` / `ScanResultBatch` events).
+>
+> **No source change is required of a client.** Two *agent* defaults move, though — `transportGrace`
+> 10 s → 120 s and the slot cap from 4-per-session to 8-agent-wide — and the second changes what is
+> counted, not just the number. Upgrade guidance is in
+> [`docs/migrate-to-0.11.0.md`](docs/migrate-to-0.11.0.md).
+>
+> This is a **minor**, not a patch, release: it adds three capability strings, an op, public DTOs,
+> and a new `ErrorKind` member (`POLICY_DENIED`) that an exhaustive `when` in a consumer would not
+> have covered.
+
+### Added
+
+- **`agent.status`: a status contract that works remotely, on every reference agent.** A new
+  capability-gated op returning the agent's identity, uptime, effective ownership settings, slot
+  occupancy and leases — over the same authenticated session as every other op. The existing
+  `/api/state` could not serve this: it is loopback-gated plaintext HTTP whose JSON is a dashboard
+  feed rather than a compatibility surface, and `agent-rs` runs no HTTP server at all, so a status
+  command built on it would work against localhost on one of three agents.
+
+  Disclosure is scoped to the caller. An ordinary caller sees the leases its own session key holds
+  plus an aggregate count of everything else — enough to answer "can I connect?" without naming
+  another tenant. A caller presenting the agent's **operator** credential on the upgrade
+  (`X-RemoteBle-Operator: Bearer …`) sees every lease and its holder, under the same policy
+  `PERIPHERAL_BUSY` already uses. A missing or wrong operator credential is deliberately not a
+  connection failure — the session proceeds at normal scope and says so, so a caller can tell that
+  apart from an unreachable agent. `agent-rs` gained `--operator-token` /
+  `REMOTE_BLE_OPERATOR_TOKEN` for this; like the JVM agent's, it must be distinct from every client
+  credential, and startup fails otherwise.
+
+  `StatusSettingsDto.writePolicyEnforced` reports whether this agent has a configured
+  per-principal write policy — see [`docs/proposals/agent-write-policy.md`](docs/proposals/agent-write-policy.md).
+
+- **Per-principal write policy at the agent boundary.** `REMOTE_BLE_POLICY_FILE` (and Rust's
+  `--policy-file`) loads a strict, read-once JSON allowlist before the backend or listener starts.
+  It covers characteristic writes, descriptor writes (including their descriptor UUID), and
+  pair/unpair. An absent or blank path preserves allow-all behavior (a blank path logs a warning);
+  a configured file denies unlisted principals. Both agents reject malformed, unknown-field,
+  unknown-principal, and invalid-bound configuration rather than silently broadening access.
+  Portable policies must use unique JSON member names; complete duplicate-member rejection remains
+  deferred. The agent-level `write.policy` capability
+  gates the new non-transient `POLICY_DENIED` error; clients that did not negotiate it receive the
+  wire-safe `INVALID_REQUEST` fallback instead.
+
+- **`lease.holder`: structured holder details on `PERIPHERAL_BUSY`.** A new agent-level capability
+  adds `AgentError.holder` (`principal`, optional `clientId`) alongside the human message, so a
+  client can attribute contention without parsing a sentence back apart. It is gated rather than
+  sent unconditionally because `AgentError` is decoded strictly: an unrecognized key fails a v1
+  client's decode of the whole error frame, so this is not the compatible addition an optional field
+  would be under a lenient codec. `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode` pins that.
+  The structured field and the message render one disclosure decision, and both are escaped and
+  length-bounded — a machine-readable field is more likely to be forwarded verbatim, not less.
+
+- **Write rules can name a device.** `WriteRule` and `DescriptorWriteRule` take an optional `device`
+  matching the peripheral's handle, defaulting to `"*"`, so an existing policy file keeps its
+  meaning. Without it a policy was device-blind: an operator could permit a principal to write a
+  control point, but not to write it only on that principal's own peripheral — the distinction that
+  matters on a shared rig.
+
+- **A client can declare its identifier format.** `DefaultAgentSession` takes an optional
+  `identifierFormat`, still defaulting to the host's. A consumer that never constructs a Kable
+  `Identifier` should declare `IdentifierFormat.STRING`: the agent then passes its own handles
+  through untranslated, and those stay valid across that client's separate processes. Synthesized
+  handles do not — their reverse map is per connection, primed only from leases the client already
+  holds — so a handle scanned in one process previously reached the radio as a synthetic string in
+  the next. See [`docs/client-sdk.md`](docs/client-sdk.md).
+
+### Changed
+
+- **`transportGrace` now defaults to 120 s** on the JVM agent and `agent-rs` (`leaseGrace` is
+  unchanged at 10 s — that path's radio link is already down). Ten seconds is shorter than the gap
+  between two commands a human types or a model plans, so a process-per-command client paid a full
+  reconnect and rediscovery on nearly every step. The trade is contention: a peripheral stays
+  leased for up to the window after its holder walks away, so a shared rig should lower
+  `REMOTE_BLE_TRANSPORT_GRACE_MS` / `--transport-grace-ms`.
+- **Connection slots are counted agent-wide and lease-aware, and reported on negotiation.** The
+  count came from the caller's own connected set, so a fresh client read full capacity no matter
+  what other clients held, and never saw the peripheral it was itself holding between two
+  invocations. The cap moved to `PeripheralRegistry`, where it matches the constraint it models —
+  the host controller's, not one session's — and a lease counts as occupied until release,
+  including inside its grace window. A client that negotiates `slots` now receives the current
+  state at handshake instead of waiting for a connection count to move.
+- **`agent-rs` now supports `slots`, and agent-level capabilities are unconditional in both
+  agents.** The Rust agent computed slot occupancy but advertised nothing and emitted no
+  `SlotState`: its only capability source was the *backend*, which reports what the radio can do,
+  so a radio-independent capability had no way to reach a client. It now applies
+  `capabilities::AGENT_CAPABILITIES` in `Negotiation::on_hello`, where no backend answer can narrow
+  it, and streams `SlotState` from a registry `watch` — current value at handshake, then every
+  change, spanning every client's leases exactly as the Kotlin agent does.
+- **`agent-rs` batches scan results** under capability `scan.batch`, completing the agent-level set
+  on both agents. Same observable contract as the Kotlin agent — flush every 100 ms or early at 16
+  results, never an empty batch, arrival order preserved — but implemented once, in the connection's
+  event pump where the coordinator and uncontrolled scan paths converge, rather than in each scan
+  job. The capability is read live, so a scan already running when a late hello negotiates it starts
+  batching. `RustAgentInteropTest` now pins a Kotlin client's decode of the batch CBOR the Rust
+  agent emits; that direction had no coverage while `agent-rs` could only decode batches, never send
+  them.
+- **`agent-rs` implements descriptor read and write**, closing the last capability divergence
+  between two agents on the same host. `BleBackend` gained the two methods, `btleplug_impl`
+  resolves a `DescRef` the same way it resolves a `CharRef`, and both ops authorize before
+  dispatching — moving them out of the catch-all arm must not reopen the cross-client hole that arm
+  was fixed to close. Discovery also reports each characteristic's descriptor UUIDs, which it had
+  hard-coded to an empty list: without that a client could never learn what to address, and the
+  capability would have been advertised but unreachable. Neither agent's descriptor path is
+  exercised by CI (the simulator does not model descriptors), so real-radio behaviour is still
+  unproven on both.
+- **The default connection-slot cap is 8 on both agents** (`BleAgent.DEFAULT_MAX_CONNECTIONS`, was
+  4). The two agents had always differed here, but it was unobservable while only one of them
+  reported a number; now that both answer the same question over `slots`, the same client on the
+  same host would have got two different capacities. Kotlin moved because 8 is the more permissive:
+  aligning downward would have tightened `agent-rs` for its existing users, and would have left the
+  per-session→agent-wide change above at its most restrictive — turning an effective 4×clients into
+  4 in total. Operators who need a real policy should set the cap explicitly rather than rely on a
+  default that no agent can derive, since neither Kable nor btleplug exposes the controller's own
+  limit.
+
+### Fixed
+
+- **Resuming a warm lease no longer reconnects the radio.** Both agents replayed `connect` straight
+  through to the backend, because the "already connected?" check read per-connection state — and a
+  resuming client is by definition a new connection, so that state was always empty. Every
+  invocation of a process-per-command client therefore paid a physical reconnect and rediscovery,
+  which is precisely the cost `transportGrace` exists to avoid: the window kept the lease while
+  silently discarding its benefit, and the client could not tell, because a slow `Ok` looks like a
+  fast one. The lease itself knows whether the link is up, so acquisition now reports it and
+  `connect` returns an idempotent `Ok` with `ConnectionState(CONNECTED)`. A lease whose radio link
+  *did* drop still reconnects. Written into the conformance spec at §10.4.
+
+- **`PERIPHERAL_BUSY` names the holder.** Both agents apply one disclosure policy: the principal
+  always, the client id only when the caller shares that principal — or presents operator scope.
+  The identity is escaped and
+  length-bounded at the point of disclosure, since half of it is text the holder chose and the
+  message is rendered in someone else's terminal, log, or model context. This also stops `agent-rs`
+  interpolating the raw session key, which leaked a foreign client id and the NUL separator.
+- **The two agents bound a disclosed identity the same way.** `agent-rs` capped the *characters
+  consumed* while the Kotlin agent capped the *rendered length*, so an identity of control
+  characters — each escaping to six — produced roughly 48 characters from one agent and 288 from
+  the other, for the same holder under the same policy. Both now bound the rendered message.
+
+### Documentation
+
+- **The conformance spec distinguishes agent-level from backend-level capabilities**
+  ([§5.3](docs/agent-conformance-spec.md)). Agent-level capabilities are radio-independent and MUST
+  be advertised unconditionally by every conforming agent; backend-level ones may differ across
+  hosts, but two agents on the **same** host MUST advertise the same set. The second rule is the
+  one the parity record was missing — it is why a same-host divergence sat filed under "btleplug
+  limitation" beside genuine ones.
+- **Corrected: descriptors are not blocked by btleplug.** The parity record attributed seven
+  `UNSUPPORTED` ops in `agent-rs` to library limitations. Five are real; `desc.read` and
+  `desc.write` are not. btleplug 0.11.8 declares `read_descriptor`/`write_descriptor`, and Kable's
+  JVM backend — btleplug as well — binds both, which is what the Kotlin agent truthfully advertises
+  `descriptors` on. The Rust agent simply has not implemented them, so two agents on one Linux host
+  answer a client differently. The wrong root cause is the part worth flagging: it had moved a
+  buildable feature into the "cannot be built" column, where nothing would revisit it.
+
 ## [0.10.0] - 2026-08-04
 
 > **The consolidated Maven Central release.** 0.8.1 through 0.9.1 shipped as GitHub-only agent
@@ -484,6 +648,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0
 [0.8.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.8.0
 [0.7.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.7.0

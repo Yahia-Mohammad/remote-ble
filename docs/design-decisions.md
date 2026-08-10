@@ -87,6 +87,33 @@ never sent by the agent — because by definition they describe the agent being
 unreachable, so the agent couldn't have reported them. Everything else originates at
 the agent/backend.
 
+### Anything new on a strictly-decoded type is capability-gated
+
+The wire types decode under `Cbor.Default`, which rejects unknown enum names **and** unknown map
+keys. So the intuition that "adding a value is backward compatible" is false here, in both
+directions, and the rule is the same either way: an addition reaches only clients that negotiated
+the capability naming it.
+
+It has now been applied four times, and the fourth is the one that shows why the rule is worth
+stating rather than rediscovering:
+
+| Addition | Gate | Un-negotiated client sees |
+|---|---|---|
+| `RADIO_OFF` | `radio.state` | scan succeeds, finds nothing (pre-0.10.0 behaviour) |
+| `SCAN_UNAVAILABLE` | `scan.concurrency.single` | `AGENT_BUSY` |
+| `POLICY_DENIED` | `write.policy` | `INVALID_REQUEST` |
+| `AgentError.holder` | `lease.holder` | the holder in `message`, as prose |
+
+The first three are enum names, where the failure mode is at least legible — a decoder meets a
+constant it doesn't know. The fourth is a *field*, which looks like the safest possible addition and
+is actually the worst: an unknown key fails the decode of the **entire frame**, so an ungated
+`holder` would turn every lease refusal into a broken session rather than a missing detail. That is
+pinned by `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode` precisely so the gate cannot be
+removed later by someone reasoning that optional fields are always safe.
+
+Each gated addition also needs an **ungated fallback that is already in the vocabulary** — the third
+column above. A gate without one just moves the breakage from the decoder to the caller.
+
 ## Two state machines, never conflated
 
 The single subtlest correctness property. There is an **IP transport** state
@@ -160,14 +187,21 @@ self-heals once the agent appears, rather than the first attempt being one-shot.
   coroutine so it can't block the state watcher. Pending-slot cleanup uses
   `NonCancellable` so a cancelled caller still tidies up.
 - **Agent.** One coroutine per command (`scope.launch { handle(cmd) }`) so a slow read
-  can't head-of-line-block an `observe.stop`. All per-session maps/sets (connected slots,
-  scan jobs, observe jobs) are guarded by one `Mutex`. A connection slot is reserved
+  can't head-of-line-block an `observe.stop`. All per-session maps/sets (connected
+  devices, scan jobs, observe jobs) are guarded by one `Mutex`. The slot is taken
   *before* the slow native connect so the cap holds under concurrency, and released on
   failure.
 - **Cross-client ownership.** The per-session `BleAgent`s share one `PeripheralRegistry`
-  (the radio is shared, so ownership must be too). `connect` acquires the lease *before*
-  the per-session slot, so a peripheral another client owns is rejected with
-  `PERIPHERAL_BUSY` (see *Peripheral ownership*).
+  (the radio is shared, so ownership must be too). `connect` acquires the lease there, and
+  a peripheral another client owns is rejected with `PERIPHERAL_BUSY` (see *Peripheral
+  ownership*).
+- **The slot cap is agent-wide, not per session.** It lives in the registry, alongside the
+  leases, because the constraint it models is the host controller's: two clients holding
+  four peripherals each exhaust the same radio as one client holding eight. Acquiring a
+  lease *is* taking the slot — there is no second, per-session capacity rule to disagree
+  with it — so a lease inside its grace window keeps occupying capacity, which is the
+  honest answer for anyone asking whether the next `connect` will succeed. It was per
+  session through 0.10.0, which meant a client's `slots` reading described only itself.
 - **Streams.** Both sides express scans/subscriptions as cold `Flow`s opened on
   collect and torn down on cancel (`channelFlow` + `awaitClose`), so lifecycle is tied
   to collection — no manual bookkeeping leaks.
@@ -278,15 +312,29 @@ Transport loss and radio loss are resumable grace cases; an explicit disconnect 
 
 - **Acquire on connect.** A second client's `connect` to an owned peripheral is rejected
   with `PERIPHERAL_BUSY` before any radio call. Re-connecting as the owner is idempotent.
+- **The refusal names the holder.** "Peripheral in use" alone leaves the caller with nothing to do
+  but read agent logs or ask a human, which is a poor answer on a shared rig and a useless one to an
+  automated caller. The principal is always disclosed; the client id only to a caller sharing that
+  principal or holding operator scope, because the principal is operator-assigned shared context
+  while a client id is self-chosen and can leak a hostname. A client negotiating `lease.holder` gets
+  the same decision as structured fields instead of prose — gated because an unknown key would fail
+  a v1 client's decode of the whole frame. Both halves are escaped and length-bounded at the point of
+  disclosure: they are text the *holder* chose, rendered in someone else's terminal or model context,
+  which makes a lease denial an injection surface if left raw.
 - **Explicit disconnect → immediate release.** `Disconnect` disconnects the radio and drops the
   lease at once; a later connect is a new connection.
 - **Unsolicited BLE disconnect → `leaseGrace` (10s).** A drop caught by `ConnectionWatcher`
   schedules release, debouncing radio flaps without treating an operator disconnect as resumable.
-- **Transport drop → `transportGrace` (10s), link kept warm.** When a client's WebSocket
+- **Transport drop → `transportGrace` (120s), link kept warm.** When a client's WebSocket
   drops, `BleAgent`'s job-completion teardown hands off to the registry, which leaves the
   radio link **up** and schedules release. A reconnect within the window **resumes** with no
   re-pair/rediscover; on expiry `onRelease` tears the warm link down. This is why a brief IP
-  blip no longer costs the BLE connection.
+  blip no longer costs the BLE connection. The window is two minutes rather than ten seconds
+  because the binding case is not a network blip but a **process-per-command client** — a CLI, a
+  script, or a coding agent — whose next command has to resume the same warm link, and the gap
+  between two such commands is a human or model thinking. The trade is contention: a peripheral
+  stays leased for up to the window after its holder walks away, so a shared rig should lower
+  `REMOTE_BLE_TRANSPORT_GRACE_MS`.
 - **Resume needs authenticated identity.** Each socket gets a fresh monotonic id; ownership is
   keyed by the verified credential principal plus the stable client id the SDK sends on every
   reconnect (`CLIENT_ID_HEADER`). A stable ID never crosses a principal boundary.

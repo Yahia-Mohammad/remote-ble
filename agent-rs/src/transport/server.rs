@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,12 +18,15 @@ use crate::ble::backend::{BleBackend, StreamKey};
 use crate::protocol::{
     codec::{decode_cbor, encode_cbor},
     errors::{AgentError, ErrorKind},
-    events::AgentEvent,
-    frame::Frame,
+    events::{AdvertisementDto, AgentEvent, BleConnState},
+    frame::{Frame, PROTOCOL_VERSION, capabilities},
     op::Op,
-    results::OpResult,
+    results::{OpResult, ResultPayload},
+    status::{AgentStatusDto, LeaseStatusDto, StatusSettingsDto, StatusSlotsDto},
 };
-use crate::registry::peripheral_lease::PeripheralRegistry;
+use crate::registry::lease_disclosure;
+use crate::registry::peripheral_lease::{LeaseAcquisition, PeripheralRegistry};
+use crate::registry::write_policy::{self, WritePolicy};
 use crate::translate::{HandleTranslator, agent_identifier_format};
 use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
@@ -50,6 +53,12 @@ const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_WRITE_BYTES: usize = 512;
 const MIN_MTU: i32 = 23;
 const MAX_MTU: i32 = 517;
+/// Longest an advertisement is held waiting for company under capability `scan.batch`, so a
+/// result is never delayed by more than this. Matches `BleAgent.DEFAULT_SCAN_BATCH_WINDOW`.
+const SCAN_BATCH_WINDOW: Duration = Duration::from_millis(100);
+/// Flush a batch early once a burst reaches this size, so a flood cannot grow the buffer
+/// unbounded between ticks. Matches `BleAgent.DEFAULT_SCAN_BATCH_MAX_SIZE`.
+const SCAN_BATCH_MAX_SIZE: usize = 16;
 /// How often the agent pings an otherwise-idle client to probe liveness.
 const PING_PERIOD: Duration = Duration::from_secs(15);
 /// Close a connection if nothing is heard from the peer for this long (covers a missed
@@ -188,7 +197,43 @@ struct ExecuteContext<'a> {
     scan_bindings: &'a ScanBindings,
     scan_gates: &'a ScanGates,
     negotiated_capabilities: &'a parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    /// Everything `agent.status` reports that no single op otherwise needs.
+    status: &'a StatusContext,
 }
+
+/// The agent-wide facts an `agent.status` reply is assembled from. One instance per process,
+/// shared by every connection.
+///
+/// Grouped rather than spread across [ExecuteContext] because they are one feature's inputs and
+/// exactly one op reads them.
+#[derive(Clone)]
+struct StatusSource {
+    /// When this agent process began serving.
+    started_at: Instant,
+    strict_identifiers: Arc<AtomicBool>,
+    live_sessions: Arc<LiveSessionRegistry>,
+    device_names: Arc<DeviceNames>,
+    /// Per-principal write allowlist (U7). Lives here rather than a new `ExecuteContext` field
+    /// because it's an agent-wide fact `agent.status` already reports (`writePolicyEnforced`) and
+    /// exactly the two write-bearing ops need it otherwise — the same shape as the rest of this
+    /// struct.
+    write_policy: Arc<WritePolicy>,
+}
+
+/// [StatusSource] plus the one fact that is per-connection.
+struct StatusContext {
+    source: Arc<StatusSource>,
+    /// Whether this connection presented a valid operator credential on the upgrade. Widens what
+    /// `agent.status` discloses and authorizes nothing else.
+    operator_scope: bool,
+}
+
+/// The human-readable engine/platform label, in `ServerHello` and in `agent.status` alike.
+const AGENT_INFO: &str = concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"));
+
+/// Upgrade header carrying the optional operator credential. Mirrors the Kotlin
+/// `OPERATOR_HEADER`; the two agents must read the same name or a CLI works against only one.
+const OPERATOR_HEADER: &str = "X-RemoteBle-Operator";
 
 /// Per-connection reservations for streaming BLE work. Backend stream keys are scoped to the
 /// WebSocket generation, but backend implementations retain their own registrations, so cap and
@@ -342,6 +387,13 @@ pub struct ServerConfig {
     pub strict_identifiers: Arc<AtomicBool>,
     pub scan_concurrency: ScanConcurrencyMode,
     pub transport_grace: Duration,
+    /// Optional **operator** credential, distinct from every client credential. Presenting it on
+    /// the upgrade (`X-RemoteBle-Operator: Bearer …`) widens what `agent.status` discloses to that
+    /// session — every lease and its holder — and grants nothing else. `None` means no session can
+    /// ever obtain operator scope from this agent.
+    pub operator_token: Option<String>,
+    /// Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks.
+    pub write_policy: WritePolicy,
 }
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
@@ -383,6 +435,10 @@ fn session_key(principal: &str, client_id: &str) -> String {
     format!("{principal}\0{client_id}")
 }
 
+/// What this host's **radio** can do. Agent-level capabilities are not asked of the backend and
+/// are not added here — [crate::transport::negotiation::Negotiation::on_hello] applies
+/// [crate::protocol::frame::capabilities::AGENT_CAPABILITIES] unconditionally, so that nothing a
+/// backend reports can withhold one.
 fn supported_capabilities(
     mut backend_capabilities: Vec<String>,
     scan_mode: ScanConcurrencyMode,
@@ -421,6 +477,47 @@ impl LiveSessionRegistry {
         if generations.get(client_id) == Some(&generation) {
             generations.remove(client_id);
         }
+    }
+
+    /// How many client sessions are live right now, across every principal — what `agent.status`
+    /// reports. One entry per admitted identity, which is exactly one live socket each.
+    fn len(&self) -> usize {
+        self.generations.lock().len()
+    }
+}
+
+/// Last-seen advertised names, keyed by real radio handle, for `agent.status` lease rows.
+///
+/// btleplug hands the name to the scan path and nothing else keeps it, so without this the Rust
+/// agent would report a permanently null name where the Kotlin agent reports a real one — a
+/// divergence in what one status command answers depending on which agent it reached. Bounded, and
+/// evicted oldest-first: a long scan in a busy room must not grow this without limit.
+#[derive(Default)]
+struct DeviceNames {
+    names: parking_lot::Mutex<(HashMap<String, String>, VecDeque<String>)>,
+}
+
+impl DeviceNames {
+    const MAX_ENTRIES: usize = 256;
+
+    fn observe(&self, handle: &str, name: Option<&str>) {
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let mut guard = self.names.lock();
+        let (map, order) = &mut *guard;
+        if map.insert(handle.to_string(), name.to_string()).is_none() {
+            order.push_back(handle.to_string());
+            while order.len() > Self::MAX_ENTRIES {
+                if let Some(evicted) = order.pop_front() {
+                    map.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn get(&self, handle: &str) -> Option<String> {
+        self.names.lock().0.get(handle).cloned()
     }
 }
 
@@ -521,6 +618,7 @@ pub struct AgentServer {
     failed_auth_limiter: Arc<AuthFailureLimiter>,
     revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
     scan_coordinator: ScanCoordinator,
+    status_source: Arc<StatusSource>,
 }
 
 impl AgentServer {
@@ -535,14 +633,27 @@ impl AgentServer {
             config.transport_grace,
             MAX_ACTIVE_SCANS,
         );
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let status_source = Arc::new(StatusSource {
+            // Taken here rather than at first connection: uptime means "how long has this agent
+            // been serving", and a value that only starts once someone connects would answer a
+            // different question.
+            started_at: Instant::now(),
+            strict_identifiers: config.strict_identifiers.clone(),
+            live_sessions: live_sessions.clone(),
+            device_names: Arc::new(DeviceNames::default()),
+            // Cloned rather than moved: `config` as a whole is still stored on `Self` below.
+            write_policy: Arc::new(config.write_policy.clone()),
+        });
         Self {
             config,
             backend,
             registry,
-            live_sessions: Arc::new(LiveSessionRegistry::default()),
+            live_sessions,
             failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
             revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             scan_coordinator,
+            status_source,
         }
     }
 
@@ -610,6 +721,8 @@ impl AgentServer {
             let revoked_principals = self.revoked_principals.clone();
             let scan_coordinator = self.scan_coordinator.clone();
             let scan_mode = self.config.scan_concurrency;
+            let status_source = self.status_source.clone();
+            let operator_token = self.config.operator_token.clone();
 
             tokio::spawn(Self::accept_connection_with_scan(
                 stream,
@@ -623,6 +736,8 @@ impl AgentServer {
                 revoked_principals,
                 scan_coordinator,
                 scan_mode,
+                status_source,
+                operator_token,
             ));
         }
     }
@@ -654,9 +769,17 @@ impl AgentServer {
         live_sessions: Arc<LiveSessionRegistry>,
         failed_auth_limiter: Arc<AuthFailureLimiter>,
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
+        operator_token: Option<String>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status_source = Arc::new(StatusSource {
+            started_at: Instant::now(),
+            strict_identifiers: strict.clone(),
+            live_sessions: live_sessions.clone(),
+            device_names: Arc::new(DeviceNames::default()),
+            write_policy: Arc::new(WritePolicy::permissive()),
+        });
         Self::accept_connection_with_scan(
             stream,
             peer_addr,
@@ -674,6 +797,8 @@ impl AgentServer {
                 MAX_ACTIVE_SCANS,
             ),
             ScanConcurrencyMode::Multiplexed,
+            status_source,
+            operator_token,
         )
         .await
     }
@@ -691,12 +816,15 @@ impl AgentServer {
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status_source: Arc<StatusSource>,
+        operator_token: Option<String>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let mut client_id = format!("anon-{}", peer_addr);
         let mut principal = None;
         let mut session_generation = None;
+        let mut operator_scope = false;
 
         let callback = |req: &Request,
                         response: Response|
@@ -708,6 +836,32 @@ impl AgentServer {
                     .get("Authorization")
                     .and_then(|header| header.to_str().ok()),
             );
+
+            // Optional second credential, widening only what `agent.status` discloses. A missing
+            // or wrong value is deliberately NOT a rejection: the session proceeds at normal scope
+            // and says so in its status reply, so a client that asked for operator-only fields
+            // without the secret can tell that apart from an unreachable agent. A *wrong* value is
+            // still a guess at the operator secret, so it is rate-limited like any other.
+            if let Some(expected) = operator_token.as_deref() {
+                let offered = req
+                    .headers()
+                    .get(OPERATOR_HEADER)
+                    .and_then(|header| header.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .filter(|value| !value.is_empty());
+                if let Some(offered) = offered {
+                    operator_scope = constant_time_eq(expected, offered);
+                    if !operator_scope {
+                        let decision = failed_auth_limiter.record_failure(peer_addr.ip());
+                        if decision.should_log {
+                            tracing::warn!(
+                                "operator scope refused for {}: bad credential",
+                                peer_addr
+                            );
+                        }
+                    }
+                }
+            }
 
             if let Some(cid_hdr) = req.headers().get("X-RemoteBle-Client")
                 && let Ok(str_val) = cid_hdr.to_str()
@@ -784,6 +938,10 @@ impl AgentServer {
                     session_generation.expect("accepted session must have a generation"),
                     scan_coordinator,
                     scan_mode,
+                    StatusContext {
+                        source: status_source,
+                        operator_scope,
+                    },
                 )
                 .instrument(span)
                 .await;
@@ -809,6 +967,16 @@ impl AgentServer {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status = StatusContext {
+            source: Arc::new(StatusSource {
+                started_at: Instant::now(),
+                strict_identifiers: strict.clone(),
+                live_sessions: live_sessions.clone(),
+                device_names: Arc::new(DeviceNames::default()),
+                write_policy: Arc::new(WritePolicy::permissive()),
+            }),
+            operator_scope: false,
+        };
         Self::handle_connection_with_scan(
             ws_stream,
             client_id,
@@ -824,6 +992,7 @@ impl AgentServer {
                 MAX_ACTIVE_SCANS,
             ),
             ScanConcurrencyMode::Multiplexed,
+            status,
         )
         .await
     }
@@ -839,9 +1008,11 @@ impl AgentServer {
         session_generation: u64,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status: StatusContext,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let status = Arc::new(status);
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         // Per-connection handle translator (capability `identifier.translate`). Identity until a
         // ClientHello configures it; shared with the event pump (forward) and op tasks (reverse).
@@ -928,29 +1099,101 @@ impl AgentServer {
             let _ = terminal_tx.try_send(reason);
         });
 
+        let negotiated_capabilities =
+            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
+
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAP);
         let scan_arbiter = ScanArbiter::new(event_tx.clone());
         let frame_tx_event = frame_tx.clone();
         let translator_event = translator.clone();
+        let batch_capabilities = negotiated_capabilities.clone();
+        let device_names = status.source.device_names.clone();
         let event_task = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                // Forward-translate the real handle the event carries into the client's format, then
-                // shed rather than block the radio when the client can't keep up.
+            // Advertisements held for coalescing under capability `scan.batch`, keyed by scan id.
+            // Batching lives here, at the one point both scan paths converge — the coordinator's
+            // arbiter and the uncontrolled backend path both feed this channel — rather than being
+            // implemented twice. Non-scan events pass straight through, as in the Kotlin agent,
+            // where batching is likewise internal to a scan and orders nothing else against it.
+            let mut pending: HashMap<i64, Vec<AdvertisementDto>> = HashMap::new();
+            let mut flush = tokio::time::interval(SCAN_BATCH_WINDOW);
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            // Forward-translate the real handle the event carries into the client's format, then
+            // shed rather than block the radio when the client can't keep up. `false` means the
+            // frame channel is gone and this pump is finished.
+            let deliver = |event: AgentEvent| -> bool {
                 let event = translator_event.to_client_event(event);
                 match frame_tx_event.try_send(Outbound::Frame(Frame::Event { event })) {
-                    Ok(()) => {}
+                    Ok(()) => true,
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!("outbound frame buffer full; dropping event")
+                        tracing::warn!("outbound frame buffer full; dropping event");
+                        true
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
+            };
+
+            'pump: loop {
+                tokio::select! {
+                    maybe_event = event_rx.recv() => {
+                        let Some(event) = maybe_event else { break };
+                        // Remember advertised names here, where the handle is still the real one
+                        // and before batching can fold the advertisement away. This is the only
+                        // place btleplug offers a name, and `agent.status` has no other source for
+                        // it — without this the Rust agent would report a permanently null name
+                        // where the Kotlin agent reports a real one.
+                        if let AgentEvent::ScanResult { advertisement, .. } = &event {
+                            device_names.observe(
+                                &advertisement.device.value,
+                                advertisement.name.as_deref(),
+                            );
+                        }
+                        // Read live rather than latched, so a scan opened before the hello starts
+                        // batching once a later hello negotiates it — the same rule §5.3 states
+                        // for handle translation on an already-running stream.
+                        let batching = batch_capabilities.lock().contains(capabilities::SCAN_BATCH);
+                        match event {
+                            AgentEvent::ScanResult { scan_id, advertisement } if batching => {
+                                let full = {
+                                    let buffered = pending.entry(scan_id).or_default();
+                                    buffered.push(advertisement);
+                                    buffered.len() >= SCAN_BATCH_MAX_SIZE
+                                };
+                                if full
+                                    && let Some(advertisements) = pending.remove(&scan_id)
+                                    && !deliver(AgentEvent::ScanResultBatch { scan_id, advertisements })
+                                {
+                                    break 'pump;
+                                }
+                            }
+                            other => if !deliver(other) { break 'pump },
+                        }
+                    }
+                    _ = flush.tick() => {
+                        for (scan_id, advertisements) in pending.drain() {
+                            if !deliver(AgentEvent::ScanResultBatch { scan_id, advertisements }) {
+                                break 'pump;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A scan that ends mid-window must not strand the results already buffered for it.
+            for (scan_id, advertisements) in pending.drain() {
+                if !deliver(AgentEvent::ScanResultBatch {
+                    scan_id,
+                    advertisements,
+                }) {
+                    break;
                 }
             }
         });
 
         // Per-connection handshake state — first hello wins; see [Negotiation].
         let mut negotiation = Negotiation::new();
-        let negotiated_capabilities =
-            Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
+        // Runs only for a client that negotiated `slots`; aborted with the other pumps on retire.
+        let mut slot_feed: Option<tokio::task::JoinHandle<()>> = None;
         let mut closing_for_protocol = false;
 
         loop {
@@ -1038,13 +1281,24 @@ impl AgentServer {
                                 let reply_frame = Frame::ServerHello {
                                     version,
                                     capabilities: caps.clone(),
-                                    agent_info: Some(
-                                        concat!("RemoteBle-Agent-RS ", env!("CARGO_PKG_VERSION"))
-                                            .into(),
-                                    ),
+                                    agent_info: Some(AGENT_INFO.into()),
                                 };
                                 *negotiated_capabilities.lock() = caps.clone();
                                 let _ = frame_tx.send(Outbound::Frame(reply_frame)).await;
+
+                                // Start the slot feed from the handshake, for the same reason the
+                                // Kotlin agent does: the negotiated set is only known once the
+                                // hello lands. Guarded on the task rather than on "first hello" so
+                                // a repeated hello — answered idempotently by [Negotiation] — never
+                                // starts a second feed.
+                                if slot_feed.is_none()
+                                    && caps.contains(capabilities::CONNECTION_SLOTS)
+                                {
+                                    slot_feed = Some(Self::spawn_slot_state_feed(
+                                        registry.clone(),
+                                        event_tx.clone(),
+                                    ));
+                                }
                             }
                             Frame::Command { cid, op } => {
                                 // Execute each command on its own task so a slow op (e.g. a
@@ -1075,6 +1329,7 @@ impl AgentServer {
                                 let scan_bindings = scan_bindings.clone();
                                 let scan_gates = scan_gates.clone();
                                 let negotiated_capabilities = negotiated_capabilities.clone();
+                                let status = status.clone();
                                 let op = translator.to_real_op(op);
                                 let write_reservation = match &op {
                                     Op::Write { device, .. } => {
@@ -1129,6 +1384,7 @@ impl AgentServer {
                                                 scan_bindings: &scan_bindings,
                                                 scan_gates: &scan_gates,
                                                 negotiated_capabilities: &negotiated_capabilities,
+                                                status: &status,
                                             },
                                         )
                                         .await;
@@ -1199,6 +1455,15 @@ impl AgentServer {
         // Stop and join every connection-owned pump before scheduling grace. Otherwise an old
         // writer/event task can outlive cleanup and send or mutate state after a new generation
         // reconnects under the same stable identity.
+        //
+        // The slot feed goes first: it holds a clone of [event_tx], so the drop below cannot close
+        // the event channel while it is still alive. It also outlives its client by nature — the
+        // registry it watches is process-wide — which is exactly why it must be aborted here
+        // rather than left to notice the socket is gone.
+        if let Some(feed) = slot_feed.take() {
+            feed.abort();
+            let _ = feed.await;
+        }
         drop(event_tx);
         drop(frame_tx);
         send_task.abort();
@@ -1213,6 +1478,121 @@ impl AgentServer {
         // claimed through lease cleanup ensures a reconnect cannot race an older socket's drop.
         live_sessions.release(&client_id, session_generation);
         tracing::info!("Client disconnected");
+    }
+
+    /// Streams `AgentEvent::SlotState` to a client that negotiated `slots`, starting with the
+    /// current value.
+    ///
+    /// Two things this deliberately is not. It is not per session: the count comes from the
+    /// process-wide registry, so it spans every client's leases against the host's capacity, and a
+    /// client learns that a peripheral is unavailable because *someone* holds it — including
+    /// itself, between two invocations of a process-per-command tool. And it is not driven from
+    /// the connect/disconnect paths: a `watch` hands its current value to a new receiver, so a
+    /// client that negotiates `slots` and asks nothing else still gets an answer instead of
+    /// waiting for a connection count to move.
+    ///
+    /// Events go through [event_tx] rather than straight to the frame channel so they inherit the
+    /// same shed-on-overflow policy as every other event: slot state is refreshable by nature, and
+    /// a slow client must never be able to block the radio.
+    fn spawn_slot_state_feed(
+        registry: PeripheralRegistry,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut occupancy = registry.occupancy();
+            let total = registry.total_slots();
+            loop {
+                let occupied = *occupancy.borrow_and_update();
+                let event = AgentEvent::SlotState {
+                    free: total.saturating_sub(occupied) as i32,
+                    total: total as i32,
+                };
+                if event_tx.send(event).await.is_err() {
+                    break; // the connection's event pump is gone
+                }
+                if occupancy.changed().await.is_err() {
+                    break; // the registry outlives every connection, so this is shutdown
+                }
+            }
+        })
+    }
+
+    /// Builds this caller's view of the agent for `Op::AgentStatus`.
+    ///
+    /// Disclosure is decided here rather than at the client, because only the agent knows who is
+    /// asking: an ordinary caller sees the leases its own session key holds, and everything else
+    /// becomes `other_leases` plus the aggregate slot count — enough to answer "can I connect?"
+    /// without naming another tenant. A caller with operator scope sees every lease and its holder.
+    ///
+    /// Mirrors `BleAgent.agentStatus()` field for field; the two agents answering the same question
+    /// differently is the divergence this whole op exists to remove.
+    async fn agent_status(
+        client_id: &str,
+        registry: &PeripheralRegistry,
+        translator: &Arc<HandleTranslator>,
+        scan_mode: ScanConcurrencyMode,
+        status: &StatusContext,
+    ) -> AgentStatusDto {
+        let settings = registry.settings();
+        let leases = registry.snapshot();
+        let total = registry.total_slots();
+        let occupied = leases.len();
+        let visible: Vec<_> = leases
+            .iter()
+            .filter(|lease| status.operator_scope || lease.owner == client_id)
+            .collect();
+        AgentStatusDto {
+            agent_info: Some(AGENT_INFO.to_string()),
+            protocol_version: PROTOCOL_VERSION,
+            uptime_ms: status.source.started_at.elapsed().as_millis() as i64,
+            settings: StatusSettingsDto {
+                lease_grace_ms: settings.lease_grace.as_millis() as i64,
+                transport_grace_ms: settings.transport_grace.as_millis() as i64,
+                exclusive_by_default: settings.default_exclusive,
+                scan_concurrency: scan_mode.as_str().to_string(),
+                strict_identifiers: status.source.strict_identifiers.load(Ordering::Relaxed),
+                write_policy_enforced: status.source.write_policy.enforced(),
+            },
+            slots: StatusSlotsDto {
+                free: total.saturating_sub(occupied) as i32,
+                total: total as i32,
+            },
+            connected_clients: status.source.live_sessions.len() as i32,
+            leases: visible
+                .iter()
+                .map(|lease| LeaseStatusDto {
+                    handle: translator.to_client(&lease.handle),
+                    name: status.source.device_names.get(&lease.handle),
+                    holder: Some(lease_disclosure::holder_label(
+                        &lease.owner,
+                        client_id,
+                        status.operator_scope,
+                    )),
+                    mine: lease.owner == client_id,
+                    connected: lease.connected,
+                    in_grace: lease.in_grace,
+                    remaining_grace_ms: lease.remaining_grace_ms,
+                })
+                .collect(),
+            other_leases: (leases.len() - visible.len()) as i32,
+            operator_scope: status.operator_scope,
+        }
+    }
+
+    /// The error for a write the policy refused. Never enumerates the policy — a refused caller
+    /// learns that it was refused, not the shape of the allowlist.
+    ///
+    /// Gated on `write.policy` for the same reason `RADIO_OFF` needs `radio.state`: `ErrorKind`
+    /// serializes by name, and an unknown name would fail a v1 client's decode. A client that has
+    /// not negotiated this receives `INVALID_REQUEST` instead — the same kind an over-limit write
+    /// already returns.
+    fn policy_error(negotiated: &std::collections::BTreeSet<String>, message: &str) -> AgentError {
+        let kind = if negotiated.contains(capabilities::WRITE_POLICY) {
+            ErrorKind::PolicyDenied
+        } else {
+            ErrorKind::InvalidRequest
+        };
+        AgentError::new(kind, Some(message.to_string()))
     }
 
     async fn execute_op(op: Op, context: ExecuteContext<'_>) -> OpResult {
@@ -1231,8 +1611,23 @@ impl AgentServer {
             scan_bindings,
             scan_gates,
             negotiated_capabilities,
+            status,
         } = context;
+        // What this caller may be told when a lease refuses it. Computed once, because the gate
+        // must not vary between the eleven sites below that can return `PERIPHERAL_BUSY`.
+        let disclosure = lease_disclosure::DisclosureScope {
+            operator: status.operator_scope,
+            structured: negotiated_capabilities
+                .lock()
+                .contains(capabilities::LEASE_HOLDER),
+        };
         match op {
+            // Names no device, so there is nothing to authorize against a lease: what a caller may
+            // see is decided inside, by who it is.
+            Op::AgentStatus => OpResult::ok(Some(ResultPayload::Status {
+                status: Self::agent_status(client_id, registry, translator, scan_mode, status)
+                    .await,
+            })),
             Op::ScanStart { filters, .. } if filters.len() > MAX_SCAN_FILTERS => {
                 OpResult::err(AgentError::new(
                     ErrorKind::InvalidRequest,
@@ -1364,8 +1759,30 @@ impl AgentServer {
                 OpResult::from_unit(result)
             }
             Op::Connect { device } => {
-                if let Err(e) = registry.acquire_lease(&device.value, client_id) {
-                    return OpResult::err(e);
+                let acquisition = match registry.acquire_lease(&device.value, client_id, disclosure)
+                {
+                    Ok(acquisition) => acquisition,
+                    Err(e) => return OpResult::err(e),
+                };
+                // Resuming a lease whose radio link never dropped: the peripheral is already
+                // connected, so driving the backend again would re-connect a live link. The
+                // per-connection state cannot answer this — a resuming client is by definition a
+                // new connection — only the registry, which outlives the transport, can.
+                if acquisition == LeaseAcquisition::ResumedWarmLink {
+                    tracing::info!(
+                        "warm lease resumed, skipping connect [dev={}]",
+                        device.value
+                    );
+                    // The backend emits this on a real connect; on the skip path it is ours to
+                    // send, so a resuming client sees the same thing either way.
+                    let _ = event_tx
+                        .send(AgentEvent::ConnectionState {
+                            device: device.clone(),
+                            state: BleConnState::Connected,
+                            reason: None,
+                        })
+                        .await;
+                    return OpResult::ok(None);
                 }
                 match backend.connect(&device, event_tx).await {
                     Ok(_) => {
@@ -1392,7 +1809,7 @@ impl AgentServer {
                 }
             }
             Op::Disconnect { device } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 registry.release_lease(&device.value, client_id);
@@ -1400,13 +1817,13 @@ impl AgentServer {
                 OpResult::from_unit(backend.disconnect(&device).await)
             }
             Op::Discover { device } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.discover(&device).await)
             }
             Op::Read { device, char } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.read(&device, &char).await)
@@ -1417,13 +1834,57 @@ impl AgentServer {
                 value,
                 with_response,
             } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
+                }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_write(
+                    principal,
+                    &device.value,
+                    &char.service,
+                    &char.characteristic,
+                    value.len(),
+                    with_response,
+                ) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "write not permitted for this principal",
+                    ));
                 }
                 OpResult::from_unit(backend.write(&device, &char, &value, with_response).await)
             }
+            Op::ReadDescriptor { device, desc } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
+                    return OpResult::err(e);
+                }
+                OpResult::from_payload(backend.read_descriptor(&device, &desc).await)
+            }
+            Op::WriteDescriptor {
+                device,
+                desc,
+                value,
+            } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
+                    return OpResult::err(e);
+                }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_descriptor_write(
+                    principal,
+                    &device.value,
+                    &desc.service,
+                    &desc.characteristic,
+                    &desc.descriptor,
+                    value.len(),
+                ) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "descriptor write not permitted for this principal",
+                    ));
+                }
+                OpResult::from_unit(backend.write_descriptor(&device, &desc, &value).await)
+            }
             Op::RequestMtu { device, mtu } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.request_mtu(&device, mtu).await)
@@ -1433,7 +1894,7 @@ impl AgentServer {
                 device,
                 char,
             } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 let stream = StreamKey {
@@ -1463,6 +1924,28 @@ impl AgentServer {
                 }
                 OpResult::from_unit(result)
             }
+            // Pairing itself is unimplemented on every reference agent (parity: neither JVM, Android,
+            // nor Rust advertises `pairing`), so these two answer UNSUPPORTED exactly like the
+            // catch-all below — but with an explicit policy check first, ahead of that answer,
+            // keeping this agent structurally parallel with the Kotlin one (whose common `BleAgent`
+            // dispatches Pair/Unpair for every Kotlin target, including Android/iOS backends that
+            // may implement bonding) for whenever pairing lands on either.
+            Op::Pair { device } | Op::Unpair { device } => {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
+                    return OpResult::err(e);
+                }
+                let principal = write_policy::principal_of(client_id);
+                if !status.source.write_policy.authorizes_pairing(principal) {
+                    return OpResult::err(Self::policy_error(
+                        &negotiated_capabilities.lock(),
+                        "pairing not permitted for this principal",
+                    ));
+                }
+                OpResult::err(AgentError::new(
+                    ErrorKind::Unsupported,
+                    Some("Operation not supported on this agent".into()),
+                ))
+            }
             // Ops this agent does not implement. Authorization still runs first when the op names a
             // device: a client that does not own it must get the same PERIPHERAL_BUSY the supported
             // ops give, not an answer about the agent's capabilities. Answering UNSUPPORTED first
@@ -1470,7 +1953,8 @@ impl AgentServer {
             // device-bearing branch (found by Rig A case 3, 2026-07-28).
             unsupported => {
                 if let Some(device) = unsupported.device_handle()
-                    && let Err(e) = registry.authorize_connected(&device.value, client_id)
+                    && let Err(e) =
+                        registry.authorize_connected(&device.value, client_id, disclosure)
                 {
                     return OpResult::err(e);
                 }
@@ -1693,6 +2177,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (first_client, _) = tokio_tungstenite::client_async(request(), first_client_io)
             .await
@@ -1710,6 +2195,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let second_err = tokio_tungstenite::client_async(request(), second_client_io)
             .await
@@ -1771,6 +2257,21 @@ mod tests {
         }
     }
 
+    /// The next `SlotState` event as `(free, total)`.
+    async fn recv_slot_state<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> (i32, i32)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            if let Frame::Event {
+                event: AgentEvent::SlotState { free, total },
+            } = recv_frame(ws).await
+            {
+                return (free, total);
+            }
+        }
+    }
+
     struct ScanWsClient {
         ws: tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
         accept_task: tokio::task::JoinHandle<()>,
@@ -1794,6 +2295,10 @@ mod tests {
         revoked_principals: Arc<parking_lot::Mutex<HashSet<String>>>,
         scan_coordinator: ScanCoordinator,
         scan_mode: ScanConcurrencyMode,
+        status_source: Arc<StatusSource>,
+        /// Configured operator secret, if this harness's agent has one. Per-client scope is chosen
+        /// by whether [ScanWsHarness::operator_client] sends it.
+        operator_token: Option<String>,
     }
 
     impl ScanWsHarness {
@@ -1807,18 +2312,42 @@ mod tests {
                 transport_grace,
                 MAX_ACTIVE_SCANS,
             );
+            let strict = Arc::new(AtomicBool::new(false));
+            let live_sessions = Arc::new(LiveSessionRegistry::default());
             Self {
                 fake,
                 backend,
                 registry,
                 credentials: Arc::new(HashMap::new()),
-                strict: Arc::new(AtomicBool::new(false)),
-                live_sessions: Arc::new(LiveSessionRegistry::default()),
+                strict: strict.clone(),
+                live_sessions: live_sessions.clone(),
                 failed_auth_limiter: Arc::new(AuthFailureLimiter::default()),
                 revoked_principals: Arc::new(parking_lot::Mutex::new(HashSet::new())),
                 scan_coordinator,
                 scan_mode,
+                status_source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: strict,
+                    live_sessions,
+                    device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(WritePolicy::permissive()),
+                }),
+                operator_token: None,
             }
+        }
+
+        /// Replaces the write policy every subsequent [Self::client]/[Self::client_with_operator]
+        /// connection sees. Rebuilds [Self::status_source] rather than mutating a field through the
+        /// `Arc`, since every other field is unaffected.
+        fn set_write_policy(&mut self, policy: WritePolicy) {
+            self.status_source = Arc::new(StatusSource {
+                write_policy: Arc::new(policy),
+                ..(*self.status_source).clone()
+            });
+        }
+
+        fn set_credentials(&mut self, credentials: HashMap<String, String>) {
+            self.credentials = Arc::new(credentials);
         }
 
         async fn client(
@@ -1826,6 +2355,54 @@ mod tests {
             client_id: &str,
             capabilities: &[&str],
             expected_server_capabilities: &[&str],
+        ) -> ScanWsClient {
+            self.client_with_operator(client_id, capabilities, expected_server_capabilities, None)
+                .await
+        }
+
+        /// As [Self::client], but presenting `operator` on the upgrade. `Some` with the wrong
+        /// secret is a supported case on purpose: it must connect at normal scope, not fail.
+        async fn client_with_operator(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            operator: Option<&str>,
+        ) -> ScanWsClient {
+            self.client_with_headers(
+                client_id,
+                capabilities,
+                expected_server_capabilities,
+                None,
+                operator,
+            )
+            .await
+        }
+
+        async fn client_with_bearer(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            bearer: &str,
+        ) -> ScanWsClient {
+            self.client_with_headers(
+                client_id,
+                capabilities,
+                expected_server_capabilities,
+                Some(bearer),
+                None,
+            )
+            .await
+        }
+
+        async fn client_with_headers(
+            &self,
+            client_id: &str,
+            capabilities: &[&str],
+            expected_server_capabilities: &[&str],
+            bearer: Option<&str>,
+            operator: Option<&str>,
         ) -> ScanWsClient {
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -1842,12 +2419,30 @@ mod tests {
                 self.revoked_principals.clone(),
                 self.scan_coordinator.clone(),
                 self.scan_mode,
+                self.status_source.clone(),
+                self.operator_token.clone(),
             ));
             let mut request = "ws://localhost/agent".into_client_request().unwrap();
             request.headers_mut().insert(
                 "X-RemoteBle-Client",
                 client_id.parse().expect("client id header must be valid"),
             );
+            if let Some(bearer) = bearer {
+                request.headers_mut().insert(
+                    "Authorization",
+                    format!("Bearer {bearer}")
+                        .parse()
+                        .expect("authorization header must be valid"),
+                );
+            }
+            if let Some(operator) = operator {
+                request.headers_mut().insert(
+                    OPERATOR_HEADER,
+                    format!("Bearer {operator}")
+                        .parse()
+                        .expect("operator header must be valid"),
+                );
+            }
             let (mut ws, _) = tokio_tungstenite::client_async(request, client_io)
                 .await
                 .expect("scan client must complete the WebSocket handshake");
@@ -2448,6 +3043,561 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slots_is_negotiable_though_the_backend_advertises_nothing() {
+        // `slots` is agent-level: the fake backend reports no capabilities at all, and that must
+        // not be able to withhold it. The assertion lives in `client()`, which compares the
+        // ServerHello set exactly.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let client = harness
+            .client(
+                "slots-a",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slot_state_arrives_at_handshake_without_connecting_anything() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "slots-a",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+
+        // A client that negotiates `slots` and asks nothing else still learns the occupancy,
+        // instead of waiting for a connection count to move on an agent that may be idle.
+        assert_eq!(recv_slot_state(&mut client.ws).await, (8, 8));
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slot_state_counts_another_clients_lease() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut holder = harness.client("slots-holder", &[], &[]).await;
+        send_command(
+            &mut holder.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut holder.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        // A second client's very first slot report must already account for the peripheral the
+        // first client holds — the per-session count this replaced would have said "8 free".
+        let mut watcher = harness
+            .client(
+                "slots-watcher",
+                &[capabilities::CONNECTION_SLOTS],
+                &[capabilities::CONNECTION_SLOTS],
+            )
+            .await;
+        assert_eq!(recv_slot_state(&mut watcher.ws).await, (7, 8));
+
+        watcher.close().await;
+        holder.close().await;
+    }
+
+    /// The next `ScanResultBatch` for `scan_id`, as its device handles.
+    async fn recv_scan_batch(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        scan_id: i64,
+    ) -> Vec<String> {
+        loop {
+            if let Frame::Event {
+                event:
+                    AgentEvent::ScanResultBatch {
+                        scan_id: event_scan_id,
+                        advertisements,
+                    },
+            } = recv_frame(ws).await
+                && event_scan_id == scan_id
+            {
+                return advertisements.into_iter().map(|a| a.device.value).collect();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_batch_coalesces_a_window_into_one_event() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[capabilities::SCAN_BATCH],
+                &[capabilities::SCAN_BATCH],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        // Three advertisements inside one window arrive as one event rather than three, which is
+        // the whole point of the capability: one frame, one decode, one wakeup.
+        for device in ["hr", "battery", "thermo"] {
+            harness
+                .fake
+                .emit_scan(test_advertisement(device, None, None, -50))
+                .await;
+        }
+        assert_eq!(
+            recv_scan_batch(&mut client.ws, 1).await,
+            vec!["hr", "battery", "thermo"],
+            "order within a batch must follow arrival order"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_batch_flushes_early_once_a_burst_fills_the_buffer() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness
+            .client(
+                "scan-a",
+                &[capabilities::SCAN_BATCH],
+                &[capabilities::SCAN_BATCH],
+            )
+            .await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        // A flood must not grow the buffer without bound between ticks, so the batch caps out and
+        // flushes on its own. Emitting one over the cap proves the flush was the size rule and not
+        // the timer: the first batch is exactly SCAN_BATCH_MAX_SIZE, with the remainder left over.
+        for index in 0..SCAN_BATCH_MAX_SIZE + 1 {
+            harness
+                .fake
+                .emit_scan(test_advertisement(&format!("dev-{index}"), None, None, -50))
+                .await;
+        }
+        let first = recv_scan_batch(&mut client.ws, 1).await;
+        assert_eq!(first.len(), SCAN_BATCH_MAX_SIZE);
+        assert_eq!(first[0], "dev-0");
+        assert_eq!(
+            recv_scan_batch(&mut client.ws, 1).await,
+            vec![format!("dev-{}", SCAN_BATCH_MAX_SIZE)],
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_results_are_unbatched_without_the_capability() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness.client("scan-a", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::ScanStart {
+                scan_id: 1,
+                filters: vec![],
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.wait_for_scan_start(1).await;
+
+        harness
+            .fake
+            .emit_scan(test_advertisement("hr", None, None, -50))
+            .await;
+        // A batch is a capability-gated event type: sending one unnegotiated could break the
+        // client's decode loop, which is exactly what §5.3 forbids.
+        let batch = tokio::time::timeout(
+            Duration::from_millis(300),
+            recv_scan_batch(&mut client.ws, 1),
+        )
+        .await;
+        assert!(batch.is_err(), "unexpected batch: {batch:?}");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn warm_lease_resume_does_not_reconnect_the_radio() {
+        // The property a process-per-command client depends on: each invocation opens a transport,
+        // issues `connect`, and expects to be talking to the peripheral its predecessor left
+        // connected. If that `connect` re-drove the radio, every command would pay a physical
+        // reconnect, which is the cost the transport-grace window exists to avoid — the window
+        // would keep the *lease* while silently dropping its whole benefit.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(30));
+        let device = DeviceHandle {
+            value: "dev-1".into(),
+        };
+
+        let mut first = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert_eq!(harness.fake.connects.load(Ordering::Relaxed), 1);
+        first.close().await;
+
+        // Two more invocations under the same client id — which is what keys ownership, so this is
+        // the same client resuming rather than a second one contending.
+        for _ in 0..2 {
+            let mut next = harness.client("rble", &[], &[]).await;
+            send_command(
+                &mut next.ws,
+                1,
+                Op::Connect {
+                    device: device.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut next.ws).await,
+                OpResult::Ok { .. }
+            ));
+            next.close().await;
+        }
+
+        assert_eq!(
+            harness.fake.connects.load(Ordering::Relaxed),
+            1,
+            "the radio was re-driven on resume"
+        );
+        assert_eq!(harness.fake.disconnects.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lease_whose_radio_link_dropped_still_reconnects() {
+        // The complement, so the skip above cannot silently swallow a genuine reconnect: after the
+        // radio drops, the lease survives its own grace window but the link is down, and the next
+        // connect must actually reach the backend.
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(30));
+        let device = DeviceHandle {
+            value: "dev-1".into(),
+        };
+
+        let mut first = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut first.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut first.ws).await,
+            OpResult::Ok { .. }
+        ));
+        harness.registry.on_ble_disconnected(&device.value);
+        first.close().await;
+
+        let mut second = harness.client("rble", &[], &[]).await;
+        send_command(
+            &mut second.ws,
+            1,
+            Op::Connect {
+                device: device.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut second.ws).await,
+            OpResult::Ok { .. }
+        ));
+        assert_eq!(harness.fake.connects.load(Ordering::Relaxed), 2);
+        second.close().await;
+    }
+
+    #[tokio::test]
+    async fn no_slot_state_without_the_capability() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        let mut client = harness.client("slots-none", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        // An un-negotiated event type could break a client's decode loop, so occupancy changing
+        // under its feet must still produce nothing.
+        let slot =
+            tokio::time::timeout(Duration::from_millis(200), recv_slot_state(&mut client.ws)).await;
+        assert!(slot.is_err(), "unexpected slot state: {slot:?}");
+        client.close().await;
+    }
+
+    // ---- write policy over a real handshake (U7) ----
+    //
+    // Every other write-policy test drives `execute_op` directly with a hand-built
+    // `negotiated_capabilities` set. This one instead goes through a real `ClientHello`, proving
+    // the negotiated set an actual handshake produces is what the policy check reads — not just
+    // what a test constructed to look like one.
+
+    #[tokio::test]
+    async fn named_principals_receive_the_same_write_policy_matrix_over_real_handshakes() {
+        let mut harness =
+            ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        harness.set_credentials(HashMap::from([
+            ("lab-a".to_string(), "secret-a".to_string()),
+            ("lab-b".to_string(), "secret-b".to_string()),
+        ]));
+        harness.set_write_policy(
+            WritePolicy::decode(
+                r#"{"version":1,"principals":{
+                    "lab-a":{"writes":[{"service":"180d","characteristic":"2a39"}]},
+                    "lab-b":{"writes":[{"service":"180d","characteristic":"2a39"}]}
+                }}"#,
+                &HashSet::from(["lab-a".to_string(), "lab-b".to_string()]),
+            )
+            .unwrap(),
+        );
+
+        for (principal, secret) in [("lab-a", "secret-a"), ("lab-b", "secret-b")] {
+            let mut client = harness
+                .client_with_bearer(
+                    &format!("{principal}-policy-client"),
+                    &[capabilities::WRITE_POLICY],
+                    &[capabilities::WRITE_POLICY],
+                    secret,
+                )
+                .await;
+            let device = DeviceHandle {
+                value: "dev-1".into(),
+            };
+
+            send_command(
+                &mut client.ws,
+                1,
+                Op::Connect {
+                    device: device.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+
+            send_command(
+                &mut client.ws,
+                2,
+                Op::Write {
+                    device: device.clone(),
+                    char: test_char(),
+                    value: vec![0x01],
+                    with_response: true,
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+
+            send_command(
+                &mut client.ws,
+                3,
+                Op::Write {
+                    device: device.clone(),
+                    char: CharRef {
+                        characteristic: "2a38".into(),
+                        ..test_char()
+                    },
+                    value: vec![0x01],
+                    with_response: true,
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+
+            send_command(&mut client.ws, 4, Op::Disconnect { device }).await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+            client.close().await;
+        }
+    }
+
+    // ---- agent.status (U3) ----
+
+    async fn request_status(client: &mut ScanWsClient, cid: i64) -> AgentStatusDto {
+        send_command(&mut client.ws, cid, Op::AgentStatus).await;
+        match recv_reply(&mut client.ws).await {
+            OpResult::Ok {
+                payload: Some(ResultPayload::Status { status }),
+            } => status,
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_status_shows_a_caller_its_own_leases_and_only_a_count_of_others() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        // A lease held by an entirely different principal, taken directly on the shared registry.
+        harness
+            .registry
+            .acquire_lease("dev-other", "lab-b\0ci-runner", Default::default())
+            .expect("the other tenant's lease must be granted");
+
+        let mut client = harness.client("mine", &[], &[]).await;
+        send_command(
+            &mut client.ws,
+            1,
+            Op::Connect {
+                device: DeviceHandle {
+                    value: "dev-1".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_reply(&mut client.ws).await,
+            OpResult::Ok { .. }
+        ));
+
+        let status = request_status(&mut client, 2).await;
+        assert_eq!(status.leases.len(), 1);
+        assert!(status.leases[0].mine);
+        assert!(status.leases[0].connected);
+        // The other tenant is a number, not a name: enough to explain the capacity, nothing more.
+        assert_eq!(status.other_leases, 1);
+        assert_eq!(status.slots.total, 8);
+        assert_eq!(status.slots.free, 6);
+        assert!(!status.operator_scope);
+        assert_eq!(status.connected_clients, 1);
+        assert_eq!(status.agent_info.as_deref(), Some(AGENT_INFO));
+        assert_eq!(status.settings.scan_concurrency, "multiplexed");
+        assert!(!status.settings.write_policy_enforced);
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn agent_status_discloses_every_holder_only_under_operator_scope() {
+        let mut harness =
+            ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        harness.operator_token = Some("operator-secret".to_string());
+        harness
+            .registry
+            .acquire_lease("dev-other", "lab-b\0ci-runner", Default::default())
+            .expect("the other tenant's lease must be granted");
+
+        // No credential, then a wrong one: neither may fail the connection, and neither may widen
+        // disclosure. A wrong secret connecting normally is what lets a caller report "no operator
+        // credential" instead of "agent unreachable".
+        for offered in [None, Some("not-the-operator-secret")] {
+            let mut client = harness
+                .client_with_operator("plain", &[], &[], offered)
+                .await;
+            let status = request_status(&mut client, 1).await;
+            assert!(!status.operator_scope, "offered={offered:?}");
+            assert!(status.leases.is_empty(), "offered={offered:?}");
+            assert_eq!(status.other_leases, 1, "offered={offered:?}");
+            client.close().await;
+        }
+
+        let mut operator = harness
+            .client_with_operator("ops", &[], &[], Some("operator-secret"))
+            .await;
+        let status = request_status(&mut operator, 1).await;
+        assert!(status.operator_scope);
+        assert_eq!(status.leases.len(), 1);
+        // The other principal's client id is disclosed here and nowhere else.
+        assert_eq!(status.leases[0].holder.as_deref(), Some("lab-b/ci-runner"));
+        assert!(!status.leases[0].mine);
+        // Nothing is left over once every lease is listed.
+        assert_eq!(status.other_leases, 0);
+        operator.close().await;
+    }
+
+    #[tokio::test]
+    async fn agent_status_reports_remaining_grace_for_a_lease_whose_owner_dropped() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(60));
+        harness
+            .registry
+            .acquire_lease("dev-warm", "lab-b\0gone", Default::default())
+            .expect("lease must be granted");
+        harness.registry.on_transport_drop("lab-b\0gone");
+
+        let mut operator = harness.client_with_operator("ops", &[], &[], None).await;
+        // Read as an operator would; without a token configured this connection has normal scope,
+        // so drive the assertion off the registry snapshot the reply is built from.
+        let lease = harness
+            .registry
+            .snapshot()
+            .into_iter()
+            .find(|l| l.handle == "dev-warm")
+            .expect("the warm lease must still be held");
+        assert!(lease.in_grace);
+        let remaining = lease
+            .remaining_grace_ms
+            .expect("a pending release must report how long is left");
+        // Measured against the registry's own transport grace, not the harness argument — that one
+        // configures the scan coordinator, and hard-coding a number here would silently pass if the
+        // two ever diverged.
+        let configured = harness.registry.settings().transport_grace.as_millis() as i64;
+        assert!(
+            remaining > configured - 5_000 && remaining <= configured,
+            "remaining was {remaining}ms against a {configured}ms window"
+        );
+        // And it is still occupying a slot, which is what the caller can see without disclosure.
+        let status = request_status(&mut operator, 1).await;
+        assert_eq!(status.slots.free, 7);
+        assert_eq!(status.other_leases, 1);
+        operator.close().await;
+    }
+
+    #[tokio::test]
     async fn scan_conc_08_legacy_client_gets_legacy_agent_busy_on_contention() {
         let harness = ScanWsHarness::new(ScanConcurrencyMode::Single, Duration::from_secs(1));
         let mut incumbent = harness
@@ -2826,6 +3976,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut alpha, _) =
             tokio_tungstenite::client_async(request_for("secret-a"), alpha_client_io)
@@ -2843,6 +3994,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut beta, _) =
             tokio_tungstenite::client_async(request_for("secret-b"), beta_client_io)
@@ -2910,6 +4062,8 @@ mod tests {
                 strict_identifiers: Arc::new(AtomicBool::new(false)),
                 scan_concurrency: ScanConcurrencyMode::Multiplexed,
                 transport_grace: Duration::from_secs(10),
+                operator_token: None,
+                write_policy: WritePolicy::permissive(),
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -2966,6 +4120,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let (mut first, _) = tokio_tungstenite::client_async(request(), first_client_io)
             .await
@@ -3003,6 +4158,7 @@ mod tests {
             live_sessions.clone(),
             failed_auth_limiter.clone(),
             revoked_principals.clone(),
+            None,
         ));
         let second_err = tokio_tungstenite::client_async(request(), second_client_io)
             .await
@@ -3025,6 +4181,10 @@ mod tests {
         reads: AtomicUsize,
         connects: AtomicUsize,
         disconnects: AtomicUsize,
+        /// Descriptor ops this backend was actually asked to perform, so a test can tell a
+        /// dispatched op from one the catch-all `Unsupported` arm swallowed.
+        descriptor_reads: Mutex<Vec<DescRef>>,
+        descriptor_writes: Mutex<Vec<(DescRef, Vec<u8>)>>,
     }
 
     /// Holds the reader pending forever while every writer attempt fails. This models a socket
@@ -3123,6 +4283,27 @@ mod tests {
         ) -> Result<ResultPayload, AgentError> {
             Err(AgentError::new(ErrorKind::Unsupported, None))
         }
+        async fn read_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            desc_ref: &DescRef,
+        ) -> Result<ResultPayload, AgentError> {
+            self.descriptor_reads.lock().push(desc_ref.clone());
+            Ok(ResultPayload::Bytes {
+                value: vec![0x01, 0x00],
+            })
+        }
+        async fn write_descriptor(
+            &self,
+            _device: &DeviceHandle,
+            desc_ref: &DescRef,
+            value: &[u8],
+        ) -> Result<(), AgentError> {
+            self.descriptor_writes
+                .lock()
+                .push((desc_ref.clone(), value.to_vec()));
+            Ok(())
+        }
         async fn start_observe(
             &self,
             stream: StreamKey,
@@ -3206,6 +4387,16 @@ mod tests {
         let negotiated_capabilities = Box::leak(Box::new(parking_lot::Mutex::new(
             std::collections::BTreeSet::new(),
         )));
+        let status = Box::leak(Box::new(StatusContext {
+            source: Arc::new(StatusSource {
+                started_at: Instant::now(),
+                strict_identifiers: strict.clone(),
+                live_sessions: Arc::new(LiveSessionRegistry::default()),
+                device_names: Arc::new(DeviceNames::default()),
+                write_policy: Arc::new(WritePolicy::permissive()),
+            }),
+            operator_scope: false,
+        }));
         ExecuteContext {
             client_id,
             backend,
@@ -3221,7 +4412,31 @@ mod tests {
             scan_bindings,
             scan_gates,
             negotiated_capabilities,
+            status,
         }
+    }
+
+    /// As [context], but with a caller-supplied [WritePolicy] and negotiated-capability set — for
+    /// the write-policy dispatch tests, which need both to differ from every other `execute_op`
+    /// test in this module.
+    fn context_with_policy<'a>(
+        client_id: &'a str,
+        backend: &'a Arc<dyn BleBackend>,
+        registry: &'a PeripheralRegistry,
+        generation: u64,
+        policy: WritePolicy,
+        negotiated: &[&str],
+    ) -> ExecuteContext<'a> {
+        let mut ctx = context(client_id, backend, registry, generation);
+        *ctx.negotiated_capabilities.lock() = negotiated.iter().map(|s| s.to_string()).collect();
+        ctx.status = Box::leak(Box::new(StatusContext {
+            source: Arc::new(StatusSource {
+                write_policy: Arc::new(policy),
+                ..(*ctx.status.source).clone()
+            }),
+            operator_scope: ctx.status.operator_scope,
+        }));
+        ctx
     }
 
     #[tokio::test]
@@ -3258,7 +4473,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
         let result = AgentServer::execute_op(
             Op::Read {
@@ -3280,6 +4497,114 @@ mod tests {
         assert_eq!(fake.reads.load(Ordering::Relaxed), 0);
     }
 
+    fn test_descriptor() -> DescRef {
+        DescRef {
+            service: "180d".into(),
+            characteristic: "2a37".into(),
+            // Client Characteristic Configuration — the descriptor a client actually reaches for.
+            descriptor: "2902".into(),
+            instance: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn descriptor_read_reaches_the_backend() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::ReadDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+
+        // Dispatched, not swallowed by the catch-all arm that used to answer UNSUPPORTED here.
+        assert!(matches!(
+            result,
+            OpResult::Ok {
+                payload: Some(ResultPayload::Bytes { ref value }),
+            } if value == &[0x01, 0x00]
+        ));
+        assert_eq!(*fake.descriptor_reads.lock(), vec![test_descriptor()]);
+    }
+
+    #[tokio::test]
+    async fn descriptor_write_reaches_the_backend_with_its_value() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+                value: vec![0x01, 0x00],
+            },
+            context("owner", &backend, &registry, 1),
+        )
+        .await;
+
+        assert!(matches!(result, OpResult::Ok { .. }));
+        assert_eq!(
+            *fake.descriptor_writes.lock(),
+            vec![(test_descriptor(), vec![0x01, 0x00])]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_is_rejected_before_a_descriptor_op_reaches_the_radio() {
+        // Descriptor ops moved out of the catch-all arm, which authorized before answering. The
+        // new arms must do the same, or implementing them would have quietly reopened the
+        // cross-client hole Rig A case 3 closed: a handle is routing data, not a credential.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        for op in [
+            Op::ReadDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+            },
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: test_descriptor(),
+                value: vec![0x01, 0x00],
+            },
+        ] {
+            let result =
+                AgentServer::execute_op(op, context("other", &backend, &registry, 1)).await;
+            assert!(
+                matches!(result, OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy)
+            );
+        }
+        assert!(fake.descriptor_reads.lock().is_empty());
+        assert!(fake.descriptor_writes.lock().is_empty());
+    }
+
     /// Regression (Rig A case 3, 2026-07-28): an op this agent does not implement must still be
     /// *authorized* before it is answered. `ReadRssi` and `SetConnParams` fall through to the
     /// catch-all arm, which used to reply `Unsupported` without consulting the registry — so a
@@ -3290,7 +4615,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         for op in [
@@ -3322,7 +4649,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -3337,6 +4666,435 @@ mod tests {
         assert!(matches!(result, OpResult::Err { error } if error.kind == ErrorKind::Unsupported));
     }
 
+    // ---- write policy (U7) ----
+
+    fn test_char() -> CharRef {
+        CharRef {
+            service: "180d".into(),
+            characteristic: "2a39".into(),
+            instance: 0,
+        }
+    }
+
+    fn allowing_write(principal: &str) -> WritePolicy {
+        WritePolicy::decode(
+            &format!(
+                r#"{{"version":1,"principals":{{"{principal}":{{"writes":[
+                    {{"service":"180d","characteristic":"2a39","maximumBytes":1}}
+                ]}}}}}}"#
+            ),
+            &HashSet::from([principal.to_string()]),
+        )
+        .unwrap()
+    }
+
+    fn denying_everything(principal: &str) -> WritePolicy {
+        WritePolicy::decode(
+            &format!(r#"{{"version":1,"principals":{{"{principal}":{{"writes":[]}}}}}}"#),
+            &HashSet::from([principal.to_string()]),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn permissive_policy_allows_a_write_by_default() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01],
+                with_response: true,
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                WritePolicy::permissive(),
+                &[],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Ok { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_configured_policy_denies_an_unlisted_or_empty_principal() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        for policy in [
+            denying_everything("owner"),
+            // "owner" isn't in this policy at all — same outcome as an empty rule list.
+            WritePolicy::decode(
+                r#"{"version":1,"principals":{"someone-else":{"writes":[]}}}"#,
+                &HashSet::from(["owner".to_string(), "someone-else".to_string()]),
+            )
+            .unwrap(),
+        ] {
+            let result = AgentServer::execute_op(
+                Op::Write {
+                    device: DeviceHandle {
+                        value: "dev".into(),
+                    },
+                    char: test_char(),
+                    value: vec![0x01],
+                    with_response: true,
+                },
+                context_with_policy(
+                    "owner",
+                    &backend,
+                    &registry,
+                    1,
+                    policy,
+                    &[capabilities::WRITE_POLICY],
+                ),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_over_the_configured_byte_bound_is_denied() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01, 0x02], // the rule allows at most 1 byte
+                with_response: true,
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                allowing_write("owner"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+    }
+
+    #[tokio::test]
+    async fn policy_denied_requires_the_capability_otherwise_it_is_invalid_request() {
+        // The crux: an unknown ErrorKind name would break a v1 client's decode, so a client that
+        // never negotiated write.policy must not receive PolicyDenied at all.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let write = || Op::Write {
+            device: DeviceHandle {
+                value: "dev".into(),
+            },
+            char: test_char(),
+            value: vec![0xff], // exceeds the rule's 1-byte-of-a-different-value... still just over policy
+            with_response: true,
+        };
+
+        let with_capability = AgentServer::execute_op(
+            write(),
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                denying_everything("owner"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            with_capability,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+
+        let without_capability = AgentServer::execute_op(
+            write(),
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                denying_everything("owner"),
+                &[],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            without_capability,
+            OpResult::Err { error } if error.kind == ErrorKind::InvalidRequest
+        ));
+    }
+
+    #[tokio::test]
+    async fn peripheral_busy_is_answered_before_any_policy_check() {
+        // Ordering matters: a caller that doesn't own the lease must never learn whether policy
+        // would also have refused it — that would leak whether the policy permits a characteristic
+        // on a device this caller cannot even touch.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let result = AgentServer::execute_op(
+            Op::Write {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                char: test_char(),
+                value: vec![0x01],
+                with_response: true,
+            },
+            // "intruder" would also be denied by this policy, but must never find that out.
+            context_with_policy(
+                "intruder",
+                &backend,
+                &registry,
+                1,
+                denying_everything("intruder"),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PeripheralBusy
+        ));
+    }
+
+    #[tokio::test]
+    async fn descriptor_writes_are_gated_independently_of_characteristic_writes() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let allowed_descriptor = test_descriptor();
+        let policy = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"descriptorWrites":[{"service":"180d","characteristic":"2a37","descriptor":"2902","maximumBytes":2}]}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: allowed_descriptor.clone(),
+                value: vec![0x01, 0x00],
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                1,
+                policy.clone(),
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Ok { .. }));
+        assert_eq!(
+            *fake.descriptor_writes.lock(),
+            vec![(allowed_descriptor, vec![0x01, 0x00])]
+        );
+
+        let result = AgentServer::execute_op(
+            Op::WriteDescriptor {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+                desc: DescRef {
+                    descriptor: "2901".into(),
+                    ..test_descriptor()
+                },
+                value: vec![0x01],
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                policy,
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+        ));
+        assert_eq!(fake.descriptor_writes.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pair_and_unpair_are_gated_even_though_neither_is_implemented() {
+        // Pairing itself is unimplemented here (parity: neither JVM, Android, nor Rust advertises
+        // it today), so a policy that *allows* pairing still ends in UNSUPPORTED — but a policy
+        // that denies it must short-circuit before that answer, not after.
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
+        registry.on_connected("dev", "owner");
+
+        let denying = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"writes":[],"pairing":false}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        for op in [
+            Op::Pair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            Op::Unpair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+        ] {
+            let result = AgentServer::execute_op(
+                op,
+                context_with_policy(
+                    "owner",
+                    &backend,
+                    &registry,
+                    1,
+                    denying.clone(),
+                    &[capabilities::WRITE_POLICY],
+                ),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                OpResult::Err { error } if error.kind == ErrorKind::PolicyDenied
+            ));
+        }
+
+        let allowing = WritePolicy::decode(
+            r#"{"version":1,"principals":{"owner":{"writes":[],"pairing":true}}}"#,
+            &HashSet::from(["owner".to_string()]),
+        )
+        .unwrap();
+        let result = AgentServer::execute_op(
+            Op::Pair {
+                device: DeviceHandle {
+                    value: "dev".into(),
+                },
+            },
+            context_with_policy(
+                "owner",
+                &backend,
+                &registry,
+                2,
+                allowing,
+                &[capabilities::WRITE_POLICY],
+            ),
+        )
+        .await;
+        assert!(matches!(result, OpResult::Err { error } if error.kind == ErrorKind::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn write_policy_enforced_reflects_whether_a_policy_is_configured() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn BleBackend> = fake.clone();
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+
+        let permissive_status = AgentServer::agent_status(
+            "owner",
+            &registry,
+            &Arc::new(HandleTranslator::new(
+                agent_identifier_format(),
+                Arc::new(AtomicBool::new(false)),
+            )),
+            ScanConcurrencyMode::Multiplexed,
+            &StatusContext {
+                source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: Arc::new(AtomicBool::new(false)),
+                    live_sessions: Arc::new(LiveSessionRegistry::default()),
+                    device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(WritePolicy::permissive()),
+                }),
+                operator_scope: false,
+            },
+        )
+        .await;
+        assert!(!permissive_status.settings.write_policy_enforced);
+
+        let enforced_status = AgentServer::agent_status(
+            "owner",
+            &registry,
+            &Arc::new(HandleTranslator::new(
+                agent_identifier_format(),
+                Arc::new(AtomicBool::new(false)),
+            )),
+            ScanConcurrencyMode::Multiplexed,
+            &StatusContext {
+                source: Arc::new(StatusSource {
+                    started_at: Instant::now(),
+                    strict_identifiers: Arc::new(AtomicBool::new(false)),
+                    live_sessions: Arc::new(LiveSessionRegistry::default()),
+                    device_names: Arc::new(DeviceNames::default()),
+                    write_policy: Arc::new(denying_everything("owner")),
+                }),
+                operator_scope: false,
+            },
+        )
+        .await;
+        assert!(enforced_status.settings.write_policy_enforced);
+        let _ = backend; // kept for symmetry with the rest of this module's tests
+    }
+
     /// LEASE-DISCONNECT-01: `Op::Disconnect` releases the lease immediately, with no transport
     /// grace window — contrast with `registry::peripheral_lease::tests::
     /// reconnect_within_grace_keeps_lease_and_skips_teardown` (LEASE-GRACE-01), where the same
@@ -3346,7 +5104,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -3363,8 +5123,16 @@ mod tests {
 
         // No grace window: another client can acquire the same device right away, and the
         // original owner can no longer act on it without a fresh Connect.
-        assert!(registry.acquire_lease("dev", "someone-else").is_ok());
-        assert!(registry.authorize_connected("dev", "owner").is_err());
+        assert!(
+            registry
+                .acquire_lease("dev", "someone-else", Default::default())
+                .is_ok()
+        );
+        assert!(
+            registry
+                .authorize_connected("dev", "owner", Default::default())
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3423,7 +5191,9 @@ mod tests {
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
         for (client, device, generation) in [("a", "dev-a", 1), ("b", "dev-b", 2)] {
-            registry.acquire_lease(device, client).unwrap();
+            registry
+                .acquire_lease(device, client, Default::default())
+                .unwrap();
             registry.on_connected(device, client);
             let _ = AgentServer::execute_op(
                 Op::ObserveStart {
@@ -3473,7 +5243,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake;
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
         let result = AgentServer::execute_op(
             Op::RequestMtu {

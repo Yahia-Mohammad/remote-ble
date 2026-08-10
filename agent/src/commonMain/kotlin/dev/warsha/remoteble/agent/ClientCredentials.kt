@@ -69,6 +69,16 @@ class ClientCredentials private constructor(private val byName: Map<String, Stri
             return "$principal\u0000$clientId"
         }
 
+        /**
+         * The principal half of a [sessionKey] — the whole string if it carries no separator,
+         * which is what an unauthenticated connection's bare client id looks like. Used wherever a
+         * component needs the principal alone rather than the full ownership key, e.g. `WritePolicy`.
+         */
+        fun principalOf(sessionKey: String): String {
+            val separator = sessionKey.indexOf('\u0000')
+            return if (separator < 0) sessionKey else sessionKey.substring(0, separator)
+        }
+
         // Compare all available bytes and length so a mismatch does not exit early.
         private fun constantTimeEquals(expected: String, actual: String): Boolean {
             val a = expected.encodeToByteArray()

@@ -4,9 +4,14 @@ import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentError
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -43,32 +48,93 @@ import kotlinx.coroutines.sync.withLock
 class PeripheralRegistry(
     private val scope: CoroutineScope,
     private val leaseGrace: Duration = 10.seconds,
-    private val transportGrace: Duration = 10.seconds,
+    // Two minutes, because the binding case is a client with a process-per-command lifecycle whose
+    // next command must resume this lease; see AgentConfig.transportGrace for the trade.
+    private val transportGrace: Duration = 120.seconds,
     private val defaultExclusive: Boolean = true,
+    /**
+     * How many peripherals this **agent host** can hold at once. The cap lives here, not in a
+     * per-connection [BleAgent], because the constraint is the host radio's: two clients each
+     * connecting four peripherals exhaust the same controller as one client connecting eight.
+     */
+    private val maxSlots: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     private val onRelease: suspend (handle: String) -> Unit = {},
+    /**
+     * Where "how much grace is left" is measured from. Separate from [scope]'s scheduler only so a
+     * test can advance it in step with virtual time (`TestScope.testTimeSource`); production always
+     * takes the monotonic default, which no clock adjustment can move backwards.
+     */
+    private val timeSource: TimeSource = TimeSource.Monotonic,
 ) {
     init {
         require(defaultExclusive) {
             "Shared peripheral mode is unavailable in RemoteBLE 0.9.0; use exclusive ownership"
         }
+        require(maxSlots >= 1) { "maxSlots must be at least 1" }
     }
 
     private val mutex = Mutex()
     private val leases = mutableMapOf<String, Lease>()
+    private val _occupiedSlots = MutableStateFlow(0)
+
+    /**
+     * How many of [totalSlots] are currently taken, across **every** client — the number
+     * `AgentEvent.SlotState` reports.
+     *
+     * A lease occupies its slot from acquisition until release, which deliberately includes a lease
+     * inside its grace window: that peripheral is unavailable to anyone else, and on the transport
+     * grace path its radio link is still up. Counting only *live* connections would tell a client
+     * that capacity is free when the next `connect` would be refused — and would hide from a
+     * process-per-command client the peripheral it is itself holding between invocations.
+     *
+     * A `StateFlow` so a newly negotiated client can be handed the current value without waiting
+     * for something to change, and so one client's connect is observable by another's.
+     */
+    val occupiedSlots: StateFlow<Int> = _occupiedSlots.asStateFlow()
+
+    /** Slot capacity of this agent host. */
+    val totalSlots: Int get() = maxSlots
+
+    /** Republishes occupancy. Call under [mutex], after any change to [leases]. */
+    private fun publishOccupancy() {
+        _occupiedSlots.value = leases.size
+    }
     // clientKey -> how to push a disconnect notification to that client's live connection (with the
     // drop's reason, when known). Registered by BleAgent.start(); a reconnect's fresh registration
     // simply replaces the old.
     private val clientNotifiers =
         mutableMapOf<String, suspend (handle: String, reason: AgentError?) -> Unit>()
 
-    private class Lease(val owner: String, var connected: Boolean, var graceJob: Job?)
+    private class Lease(
+        val owner: String,
+        var connected: Boolean,
+        var graceJob: Job?,
+        /**
+         * When [graceJob] will fire. Tracked alongside the job because "a release is pending" and
+         * "the release is 4 seconds away" are different answers: a process-per-command client
+         * deciding whether its next invocation will resume needs the second one, and the job alone
+         * cannot give it.
+         */
+        var graceDeadline: TimeMark? = null,
+    )
 
     sealed interface Acquisition {
-        /** This client now owns (or already owned) the peripheral. */
-        data object Granted : Acquisition
+        /**
+         * This client now owns (or already owned) the peripheral.
+         *
+         * [linkAlreadyLive] distinguishes a *resume* from a fresh reservation: the lease was still
+         * marked physically connected, so the radio link never went down and a `connect()` on the
+         * backend would be redundant. This is the normal state for a client whose transport
+         * dropped inside its grace window — including every invocation of a process-per-command
+         * client after the first.
+         */
+        data class Granted(val linkAlreadyLive: Boolean) : Acquisition
 
         /** The peripheral is exclusively owned by [owner] (a stable client id). */
         data class Denied(val owner: String) : Acquisition
+
+        /** The host's every connection slot is taken; see [occupiedSlots]. */
+        data object NoSlot : Acquisition
     }
 
     /**
@@ -81,20 +147,26 @@ class PeripheralRegistry(
     sealed interface Authorization {
         data object Granted : Authorization
 
-        /** Another client owns the live or grace-window lease. */
-        data object PeripheralBusy : Authorization
+        /**
+         * Another client owns the live or grace-window lease. [owner] is that client's session key,
+         * for disclosure through [LeaseDisclosure] — never rendered raw into a client-visible
+         * message, because half of it is text the holder chose.
+         */
+        data class PeripheralBusy(val owner: String) : Authorization
 
         /** No lease exists for this client, or its BLE link is not currently connected. */
         data object NotConnected : Authorization
     }
 
-    /** A consistent view of one peripheral's ownership, for the status dashboard. */
+    /** A consistent view of one peripheral's ownership, for the status dashboard and `agent.status`. */
     data class LeaseInfo(
         val handle: String,
         val owner: String,
         val connected: Boolean,
         val inGrace: Boolean,
         val exclusive: Boolean,
+        /** Milliseconds until the release timer fires; null when none is running. Never negative. */
+        val remainingGraceMs: Long? = null,
     )
 
     /** Process-level configuration, surfaced read-only on the dashboard. */
@@ -111,22 +183,32 @@ class PeripheralRegistry(
     )
 
     /**
-     * Reserves [handle] for [clientKey]. Grants if the peripheral is free, already owned by this
-     * client; otherwise denies with the current owner. Re-acquiring as the
-     * owner cancels any pending release (this is how a reconnecting client resumes its lease).
+     * Reserves [handle] for [clientKey]. Grants if the peripheral is free or already owned by this
+     * client; denies with the current owner when another client holds it, and reports [NoSlot] when
+     * the host is at capacity. Re-acquiring as the owner cancels any pending release (this is how a
+     * reconnecting client resumes its lease) and never consumes a new slot.
      */
     suspend fun acquire(handle: String, clientKey: String): Acquisition = mutex.withLock {
         val lease = leases[handle]
         when {
+            lease == null && leases.size >= maxSlots -> {
+                Logger.info(LogTags.REGISTRY) { "lease refused, no slot [dev=$handle owner=$clientKey]" }
+                Acquisition.NoSlot
+            }
             lease == null -> {
                 leases[handle] = Lease(clientKey, connected = false, graceJob = null)
+                publishOccupancy()
                 Logger.info(LogTags.REGISTRY) { "lease acquired [dev=$handle owner=$clientKey]" }
-                Acquisition.Granted
+                Acquisition.Granted(linkAlreadyLive = false)
             }
             lease.owner == clientKey -> {
                 lease.cancelGrace()
-                Logger.info(LogTags.REGISTRY) { "lease resumed [dev=$handle owner=$clientKey]" }
-                Acquisition.Granted
+                Logger.info(LogTags.REGISTRY) {
+                    "lease resumed [dev=$handle owner=$clientKey live=${lease.connected}]"
+                }
+                // Read under the same lock that cancelled the grace, so the answer cannot be
+                // invalidated between here and the caller's decision to skip the backend.
+                Acquisition.Granted(linkAlreadyLive = lease.connected)
             }
             else -> Acquisition.Denied(lease.owner)
         }
@@ -142,7 +224,7 @@ class PeripheralRegistry(
     suspend fun authorizeConnected(handle: String, clientKey: String): Authorization = mutex.withLock {
         val lease = leases[handle] ?: return@withLock Authorization.NotConnected
         when {
-            lease.owner != clientKey -> Authorization.PeripheralBusy
+            lease.owner != clientKey -> Authorization.PeripheralBusy(lease.owner)
             !lease.connected -> Authorization.NotConnected
             else -> Authorization.Granted
         }
@@ -262,6 +344,7 @@ class PeripheralRegistry(
         leases[handle]?.takeIf { it.owner == clientKey }?.let {
             it.cancelGrace()
             leases.remove(handle)
+            publishOccupancy()
         }
         Unit
     }
@@ -269,12 +352,18 @@ class PeripheralRegistry(
     /** A consistent snapshot of all current leases, for status/monitoring. */
     suspend fun snapshot(): List<LeaseInfo> = mutex.withLock {
         leases.map { (handle, lease) ->
+            val inGrace = lease.graceJob?.isActive == true
             LeaseInfo(
                 handle = handle,
                 owner = lease.owner,
                 connected = lease.connected,
-                inGrace = lease.graceJob?.isActive == true,
+                inGrace = inGrace,
                 exclusive = true,
+                // Clamped at zero: the timer can be past due but not yet resumed on this dispatcher,
+                // and a negative "time remaining" is a number no caller can do anything sensible with.
+                remainingGraceMs = lease.graceDeadline
+                    ?.takeIf { inGrace }
+                    ?.let { maxOf(0L, -it.elapsedNow().inWholeMilliseconds) },
             )
         }
     }
@@ -282,6 +371,7 @@ class PeripheralRegistry(
     // Caller must hold [mutex]. Schedules a one-shot release unless one is already pending.
     private fun scheduleRelease(handle: String, lease: Lease, after: Duration) {
         if (lease.graceJob?.isActive == true) return
+        lease.graceDeadline = timeSource.markNow() + after
         lease.graceJob = scope.launch {
             delay(after)
             val released = mutex.withLock {
@@ -289,6 +379,7 @@ class PeripheralRegistry(
                 // or cancelled it). Cancellation already pre-empts this on resume.
                 if (leases[handle] === lease) {
                     leases.remove(handle)
+                    publishOccupancy()
                     true
                 } else {
                     false
@@ -305,5 +396,6 @@ class PeripheralRegistry(
     private fun Lease.cancelGrace() {
         graceJob?.cancel()
         graceJob = null
+        graceDeadline = null
     }
 }

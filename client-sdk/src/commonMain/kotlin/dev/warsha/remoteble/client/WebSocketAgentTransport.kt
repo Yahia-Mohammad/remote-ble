@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
+import dev.warsha.remoteble.protocol.OPERATOR_HEADER
 import dev.warsha.remoteble.protocol.INCOMPATIBLE_PROTOCOL_CLOSE_REASON
 import dev.warsha.remoteble.log.Logger
 import io.ktor.client.HttpClient
@@ -91,6 +92,13 @@ data class ReconnectPolicy(
  * [clientId] is a *stable session id* generated once and re-sent on every reconnect, so the
  * agent recognises this client after a brief drop and lets it resume its peripheral ownership.
  * It is not a credential — it identifies, it does not authenticate.
+ *
+ * [operatorToken] is the agent's separate **operator** credential. Supplying it widens what
+ * `agent.status` discloses to this session — every lease and its holder, rather than only its own —
+ * and nothing else. It is deliberately a second provider rather than a wider [authToken]: the agent
+ * requires the two secrets to be distinct, so a client bearer token can never quietly carry operator
+ * reach. Refreshed per connection attempt like [authToken]; null (the default) sends no header, and
+ * a wrong value is not a connect failure — the session simply proceeds at normal scope.
  */
 @OptIn(ExperimentalUuidApi::class)
 class WebSocketAgentTransport(
@@ -100,6 +108,7 @@ class WebSocketAgentTransport(
     private val authToken: suspend () -> String? = { null },
     private val reconnect: ReconnectPolicy = ReconnectPolicy(),
     private val clientId: String = Uuid.random().toString(),
+    private val operatorToken: suspend () -> String? = { null },
 ) : AgentTransport {
 
     private val _state = MutableStateFlow(TransportState.DISCONNECTED)
@@ -156,9 +165,11 @@ class WebSocketAgentTransport(
         _state.value = TransportState.CONNECTING
         val s = try {
             val token = authToken()
+            val operator = operatorToken()
             httpClient.webSocketSession(urlString = url) {
                 token?.takeIf { it.isNotBlank() }?.let { header(HttpHeaders.Authorization, "Bearer $it") }
                 header(CLIENT_ID_HEADER, clientId)
+                operator?.takeIf { it.isNotBlank() }?.let { header(OPERATOR_HEADER, "Bearer $it") }
             }
         } catch (e: Throwable) {
             _state.value = TransportState.DISCONNECTED

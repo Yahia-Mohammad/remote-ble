@@ -172,6 +172,17 @@ sealed interface Op {
         val profile: ConnProfile,
         val hint: ConnParamHint? = null,
     ) : Op
+
+    // --- Agent status (capability: "agent.status") ---
+
+    /**
+     * Asks the agent to describe itself: identity, uptime, effective ownership settings, slot
+     * occupancy and leases. Carries no arguments — the answer is scoped by *who is asking*, which
+     * the agent already knows from the authenticated session, not by anything the client could
+     * request here. See [AgentStatusDto].
+     */
+    @Serializable @SerialName("agent.status")
+    data object AgentStatus : Op
 }
 
 /**
@@ -195,7 +206,7 @@ inline fun Op.mapDevice(transform: (DeviceHandle) -> DeviceHandle): Op = when (t
     is Op.RequestConnectionPriority -> copy(device = transform(device))
     is Op.ReadRssi -> copy(device = transform(device))
     is Op.SetConnParams -> copy(device = transform(device))
-    is Op.ScanStart, is Op.ScanStop, is Op.ObserveStop -> this
+    is Op.ScanStart, is Op.ScanStop, is Op.ObserveStop, Op.AgentStatus -> this
 }
 
 /**
@@ -217,5 +228,6 @@ val Op.isIdempotent: Boolean
         is Op.Write, is Op.WriteDescriptor, is Op.Pair -> false
         is Op.ScanStart, is Op.ScanStop, is Op.Connect, is Op.Disconnect, is Op.Discover,
         is Op.Read, is Op.ObserveStart, is Op.ObserveStop, is Op.RequestMtu, is Op.ReadDescriptor,
-        is Op.Unpair, is Op.RequestConnectionPriority, is Op.ReadRssi, is Op.SetConnParams -> true
+        is Op.Unpair, is Op.RequestConnectionPriority, is Op.ReadRssi, is Op.SetConnParams,
+        Op.AgentStatus -> true
     }

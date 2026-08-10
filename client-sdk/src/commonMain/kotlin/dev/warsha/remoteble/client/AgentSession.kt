@@ -3,17 +3,21 @@ package dev.warsha.remoteble.client
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentError
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.Command
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
 import dev.warsha.remoteble.protocol.Event
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import dev.warsha.remoteble.protocol.isIdempotent
 import dev.warsha.remoteble.protocol.ProtocolCodec
+import dev.warsha.remoteble.protocol.orThrow
 import dev.warsha.remoteble.protocol.Reply
+import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -164,6 +168,25 @@ suspend fun AgentSession.supportsCapability(capability: String): Boolean =
     awaitCapabilities().contains(capability)
 
 /**
+ * The agent's caller-scoped status: identity, uptime, effective ownership settings, slot occupancy
+ * and the leases this session may see. Requires the `agent.status` capability
+ * ([Capabilities.AGENT_STATUS]).
+ *
+ * Returns null when the agent does not advertise the capability — an agent that predates it — so a
+ * caller can say "this agent is too old" rather than reporting a failure. Every other outcome
+ * throws, because a negotiated capability that then fails is a real error.
+ *
+ * The reply's [AgentStatusDto.operatorScope] reports whether this session was granted operator
+ * scope. Operator-only fields (every lease, and its holder) are absent without it; the session
+ * acquires it by presenting the agent's operator credential on the transport's upgrade headers
+ * (`OPERATOR_HEADER`), never by anything sent over the session itself.
+ */
+suspend fun AgentSession.agentStatus(): AgentStatusDto? {
+    if (!supportsCapability(Capabilities.AGENT_STATUS)) return null
+    return (request(Op.AgentStatus).orThrow() as ResultPayload.Status).status
+}
+
+/**
  * The retry decision for a failed op — **behavior, not parameters**. Given the failure so far it
  * answers one question: wait how long before trying again, or stop? Returning `null` stops and
  * surfaces the error. Implementations are **stateless** — the loop passes the state in ([attempt],
@@ -242,6 +265,10 @@ private val ALWAYS_OFFERED_CAPABILITIES: Set<String> = setOf(
     Capabilities.SCAN_CONCURRENCY_MULTIPLEXED,
     Capabilities.SCAN_CONCURRENCY_SINGLE,
     Capabilities.SCAN_CONCURRENCY_UNCONTROLLED,
+    // The SDK can always decode a status reply, and a client that failed to offer this would be
+    // told the agent does not support it — indistinguishable, to the caller, from an agent too old
+    // to have it at all.
+    Capabilities.AGENT_STATUS,
 )
 
 @OptIn(ExperimentalAtomicApi::class)
@@ -251,6 +278,21 @@ class DefaultAgentSession(
     private val scope: CoroutineScope,
     private val clientCapabilities: Set<String> = emptySet(),
     private val retryPolicyFor: (Op) -> RetryPolicy = ::defaultRetryPolicyFor,
+    /**
+     * The identifier format this client declares in its handshake. Null resolves to the host's —
+     * the right answer for a Kable-facing consumer, which has to turn a device handle back into a
+     * native `Identifier`, and the reason the agent rewrites handles at all.
+     *
+     * A consumer that never constructs an `Identifier` should declare [IdentifierFormat.STRING]
+     * instead: it means "any string fits", so the agent stops synthesizing per-client handles and
+     * hands over its own opaque ones. That matters most for a client whose **processes are
+     * short-lived**. A synthesized handle is routed back through a per-connection reverse map that
+     * a fresh connection primes only from the leases that client still holds, so a handle learned
+     * by scanning in one process is unroutable in the next — while an untranslated agent handle
+     * addresses the same peripheral from any process, and matches what the agent's own dashboard
+     * and logs show.
+     */
+    private val identifierFormat: IdentifierFormat? = null,
 ) : AgentSession {
 
     // Do not own or cancel the caller's scope: a session gets its own child so endpoint/token
@@ -565,7 +607,7 @@ class DefaultAgentSession(
      */
     private suspend fun sendHello() {
         val caps = clientCapabilities + ALWAYS_OFFERED_CAPABILITIES
-        val fmt = currentIdentifierFormat()
+        val fmt = identifierFormat ?: currentIdentifierFormat()
         runCatchingNonCancellation {
             transport.send(
                 codec.encode(

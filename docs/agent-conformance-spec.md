@@ -164,10 +164,94 @@ Properties:
 - The `hello` exchange carries **no auth credential or ownership id** — those stay on the
   upgrade headers (§4).
 
+#### Agent-level versus backend-level capabilities
+
+Every capability is one or the other, and the distinction decides what a client may assume when it
+points the same command at a different agent.
+
+- **Agent-level** capabilities are radio-independent: the agent implements them itself, over
+  bookkeeping it already keeps. A conforming agent MUST advertise **all** of them, unconditionally
+  — the backend has no say, and no host, platform, or radio library may narrow the set. Today these
+  are `slots`, `scan.batch`, `identifier.translate`, `agent.status` (§6.2), `write.policy`, and
+  `lease.holder` (§5.5).
+- **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
+  differ between an Android phone and a Linux box. But two agents on the **same host** MUST
+  advertise the same backend-level set: a divergence there is a defect in one of them, not a
+  platform difference. `descriptors`, `rssi`, `conn.priority`, `conn.params`, and `pairing` are
+  backend-level.
+
+Both rules are subordinate to rule 3 above: an agent that cannot honour an agent-level capability
+MUST NOT advertise it, and MUST be treated as non-conforming until it can. Advertising a capability
+one would answer `UNSUPPORTED` is worse than the gap it papers over, because a client cannot
+discover the difference until the op fails.
+
 Capability strings are defined where their feature is specified (this spec defines
 `identifier.translate`, §6.1); the reference registry is
 [`Capabilities.kt`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Capabilities.kt)
 in `:protocol`.
+
+### 5.4 Per-principal write policy (capability `write.policy`)
+
+An agent that implements `write.policy` MUST advertise it as an agent-level capability. The policy
+is an optional, read-once startup configuration keyed by the authenticated principal. With no
+configured policy source, every mutation remains allowed for compatibility. A configured policy
+MUST deny an unlisted principal and a listed principal with no matching rule; malformed JSON,
+unknown fields, unsupported schema versions, unknown principals, and invalid byte bounds MUST fail
+startup before the listener or BLE backend starts. The reference agents treat a supplied blank or
+whitespace-only policy path as unconfigured and emit a startup warning; an absent path is silent.
+
+The current schema version is `1`. A valid policy JSON document has unique member names in every
+object, a top-level `version`, and an optional `principals` object. Each principal may contain
+`writes`, `descriptorWrites`, and `pairing`; no other members are valid. A write rule requires
+`service` and `characteristic`, with optional `device` (defaulting to `"*"`), optional nullable
+`maximumBytes` (a nonnegative signed 32-bit integer) and nullable `withResponse`. A descriptor rule
+requires `service`, `characteristic`, and `descriptor`, with optional `device` (defaulting to `"*"`)
+and optional nullable `maximumBytes`. `null` means unlimited and `0` permits only
+an empty payload; the normal 512-byte operation ceiling still applies. UUID fields compare
+case-insensitively to the wire form, and `"*"` is the only wildcard, independently in each field.
+
+`device` matches the peripheral's **device handle** — the value the registry leases and
+`agent.status` reports — case-insensitively, so an operator writes the identity the agent already
+shows them. It is optional so that a policy written before the field existed keeps its meaning
+unchanged; supplying it scopes a rule to one peripheral, which is what separates "this principal may
+write this control point" from "…on its own device" on a shared rig.
+
+The agent MUST authorize the lease before evaluating policy. It then evaluates `write`,
+`descriptor-write`, `pair`, and `unpair` before invoking the backend; descriptor permission is
+independent of characteristic-write permission. A policy refusal is `POLICY_DENIED` only for a
+client that negotiated `write.policy`, otherwise it is the wire-safe `INVALID_REQUEST` fallback.
+`agent.status.settings.writePolicyEnforced` reports whether a nonblank policy source was loaded.
+
+Duplicate JSON member names are invalid and portable policy files MUST NOT rely on last-value
+semantics. Reference-agent rejection of this invalid input is deferred hardening: Kotlin can retain
+the last duplicate value, Rust rejects duplicate DTO fields, and duplicate principal-map behavior is
+not guaranteed.
+
+### 5.5 Lease-holder diagnostics (capability `lease.holder`)
+
+An agent that refuses an op with `PERIPHERAL_BUSY` MUST name the holder in `AgentError.message`, and
+MUST additionally populate the structured `AgentError.holder` (`principal`, optional `clientId`) for
+a client that negotiated `lease.holder`. An agent MUST NOT send `holder` to a client that did not:
+the error frame is decoded strictly, so an unrecognized key fails the decode of the whole frame
+rather than being ignored — the same hazard that gates `RADIO_OFF` and `POLICY_DENIED`, reached
+through an unknown key instead of an unknown enum name.
+
+Disclosure is scoped to the caller, and both renderings MUST reflect the same decision:
+
+| Holder relative to the caller | `principal` | `clientId` |
+|---|---|---|
+| Same principal | disclosed | disclosed |
+| Another principal, operator scope | disclosed | disclosed |
+| Another principal, no operator scope | disclosed | withheld |
+
+A principal name is operator-assigned and already shared context between tenants of one agent; a
+client id is chosen by the client and can carry a hostname or username it never intended to publish.
+
+Both fields carry text the *holder* chose and are rendered by whatever client was refused — a
+terminal, a log, a coding agent's context. An agent MUST therefore length-bound them and escape
+control characters, including the bidirectional overrides and line separators an `isISOControl`-style
+check misses, in the structured field exactly as in the message. A machine-readable field is *more*
+likely to be logged or forwarded verbatim, so it is not the place to relax this.
 
 ## 6. Identifiers
 
@@ -205,6 +289,65 @@ platform may be unable to represent as its own local identifier. The optional, a
   there are no leases to re-seed from; a translated client must rescan — a documented limitation.)
 
 This is a backward-compatible `1.x` addition: peers that don't name the capability are unaffected.
+
+### 6.2 Agent status (capability `agent.status`)
+
+The `agent.status` op answers, over the session a client already has, what the agent is and what it
+currently holds. **Agent-level** (§5.3): every field comes from bookkeeping the agent already keeps,
+so no host or radio library may narrow it, and a conforming agent MUST advertise it.
+
+Request `agent.status` carries **no fields** — the reply is scoped by *who is asking*, which the
+authenticated session already establishes, not by anything the client could request. Its wire
+payload is an empty map (`["agent.status", {}]`).
+
+Reply payload `status` (`Ok{ status }`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `agentInfo?` | string | The same engine/platform label `server_hello` carries. |
+| `protocolVersion` | i32 = 1 | The version this agent speaks. |
+| `uptimeMs` | i64 | How long this agent process has been serving. |
+| `settings` | object | `leaseGraceMs`, `transportGraceMs`, `exclusiveByDefault`, `scanConcurrency` (the mode's lowercased name), `strictIdentifiers`, `writePolicyEnforced`. The values **in force**, not the defaults. |
+| `slots` | `{ free: i32, total: i32 }` | Host occupancy, agent-global and lease-aware — the same accounting `conn.slots` reports (§8). |
+| `connectedClients` | i32 | Live client sessions, across every principal. |
+| `leases` | `[LeaseStatus]` | The leases this caller may see in full — see disclosure below. |
+| `otherLeases` | i32 = 0 | Leases held by someone else and therefore absent from `leases`. |
+| `operatorScope` | bool = false | Whether this caller presented valid operator scope. |
+
+`LeaseStatus` = `{ handle: string, name?: string, holder?: string, mine: bool = false,
+connected: bool, inGrace: bool, remainingGraceMs?: i64 }`. `handle` MUST be minted in the caller's
+identifier format (§6.1) like any other outgoing handle, so a handle read here is routable in the
+caller's next op. `remainingGraceMs` MUST be present whenever `inGrace` is true, and MUST NOT be
+negative — a past-due timer reports `0`.
+
+#### Disclosure
+
+A lease's holder is another tenant's identity, so what a caller may see depends on who is asking —
+the same question `PERIPHERAL_BUSY` answers (§10.1), decided by the same policy.
+
+- A caller **without** operator scope MUST receive only the leases its own session key holds. Every
+  other lease MUST be reducible to `otherLeases` and the aggregate `slots` count, which together
+  answer "can I connect?" without naming anyone.
+- A caller **with** operator scope MUST receive every lease, each with `holder` named.
+- `holder` is `principal` alone, or `principal/clientId` where the caller is entitled to the client
+  id: its own principal's, or any principal's under operator scope. It MUST be length-bounded and
+  control-character escaped at the point of disclosure — both halves are text the *holder* chose and
+  the string is rendered by whatever received it.
+
+**Operator scope** is presented on the WebSocket upgrade as `X-RemoteBle-Operator: Bearer <secret>`,
+validated against a credential the agent MUST require to be **distinct from every client
+credential** — a normal bearer token must not silently gain operator reach. An absent or wrong value
+MUST NOT fail the connection: the session proceeds at normal scope and reports `operatorScope:
+false`, so a client that asked for operator-only fields without the secret can tell that apart from
+an unreachable agent, or one too old to advertise the capability at all.
+
+#### Why not HTTP
+
+An agent MAY additionally expose a versioned `GET /api/v1/status`, but MUST NOT treat it as the
+contract: the JVM agent's `/api/state` is a loopback-gated plaintext dashboard feed whose schema is
+not a compatibility surface, and `agent-rs` runs no HTTP server at all. A status surface that
+reaches one of three agent implementations, on localhost only, does not answer the question the op
+exists for. The reference agents implement the op and nothing else.
 
 ## 7. Operations (`Op`)
 
@@ -296,6 +439,7 @@ retry could help:
 | `UNKNOWN_DEVICE` | never reached | agent | `DeviceHandle` not known to the agent. |
 | `NO_CONNECTION_SLOT` | never reached | agent | The agent's per-client connection cap is full. |
 | `PERIPHERAL_BUSY` | never reached | agent | The peripheral is owned by **another** client (§10). |
+| `POLICY_DENIED` | never reached | agent | A configured per-principal write policy refused the mutation; emitted only after negotiating `write.policy`. |
 | `AGENT_BUSY` | never reached | agent | The agent transiently cannot service the op. |
 | `UNSUPPORTED` | never reached | agent | The op/feature isn't supported by this agent. |
 | `TIMEOUT` | never reached | **client** | No reply within the client's deadline (§11). |
@@ -305,8 +449,10 @@ Rules:
 - The agent MUST NOT emit `TIMEOUT` or `TRANSPORT_LOST` — by definition they describe the agent
   being *unreachable*, so the client mints them locally; everything else originates at the agent.
 - `gattStatus` MUST only be present for "reached radio" kinds, carrying the raw BLE-stack status.
-- The `ErrorKind` set is frozen for `1.x`; new kinds require a minor bump and clients MUST treat
-  an unknown kind as a generic failure (fail the op; do not crash).
+- The ungated `ErrorKind` set is frozen for `1.x`; a new wire-breaking kind MUST be capability-gated
+  and have a pre-existing fallback for clients that did not negotiate it. `POLICY_DENIED`, for
+  example, is gated by `write.policy` and falls back to `INVALID_REQUEST`. Clients MUST treat an
+  unknown kind as a generic failure (fail the op; do not crash).
 
 ## 10. Peripheral ownership & leasing
 
@@ -339,10 +485,19 @@ the peripheral within the window, the lease MUST persist; otherwise the agent MU
 ### 10.4 Transport-drop grace (`transportGrace`) & resume
 When a client's **transport** (WebSocket) drops, the agent:
 - MUST NOT immediately surrender the client's leases; it MUST keep the **radio link warm** and
-  schedule release after a configurable `transportGrace` (reference default **10 s**).
+  schedule release after a configurable `transportGrace` (reference default **120 s**, sized for
+  clients that run one command per process and resume on the next).
 - MUST allow a client that **reconnects with the same `X-RemoteBle-Client` id within the window**
   to **resume** — re-acquiring its own leases (its replayed `connect`s succeed as the owner, with
   no re-pair/rediscovery), which cancels the pending release.
+- MUST NOT re-drive the radio for a resumed lease whose link is still up. A replayed `connect` on
+  such a lease is an **idempotent success**: the agent replies `Ok` and emits
+  `ConnectionState(CONNECTED)` without calling its backend's connect. "Keep the link warm" is the
+  whole point of the window, and an agent that reconnected anyway would satisfy the letter of the
+  two clauses above while charging every resuming client a full physical reconnect and
+  rediscovery — the exact cost the window exists to avoid, and invisible to the client, which sees
+  a slow `Ok` either way. Note that per-connection state cannot decide this, because a resuming
+  client is by definition a new connection; the lease is what knows.
 - MUST release (and tear down the warm link) if no matching client returns before expiry.
 
 Resume therefore **requires** the client identity of §4.2. A client that sends no identity

@@ -18,9 +18,19 @@ On a supported Linux host, mount the host system D-Bus socket and supply a crede
 ```sh
 docker run --rm --name remoteble-agent -p 8080:8080 \
   -e REMOTE_BLE_TOKEN='replace-me' \
+  -e REMOTE_BLE_POLICY_FILE=/etc/remoteble/policy.json \
+  -v /srv/remoteble/policy.json:/etc/remoteble/policy.json:ro \
   -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
   remoteble-agent-rs:local
 ```
+
+`REMOTE_BLE_POLICY_FILE` (or `--policy-file`) loads the strict per-principal write policy before
+the BLE backend or listener starts. Mount it read-only: an absent file is permissive for backward
+compatibility, while a configured file denies unlisted principals and fails startup for malformed,
+unknown-field, unknown-principal, or invalid-bound configuration. The schema, including required
+descriptor UUID rules, is documented in [the write-policy proposal](proposals/agent-write-policy.md).
+A blank or whitespace-only path is treated as unconfigured with a startup warning; use unique JSON
+member names, since duplicate-member rejection remains a documented portability limitation.
 
 Do not add `--privileged`, host networking, HCI mounts, or a credential-bearing health check. The
 image’s `--version` and fail-closed startup checks are covered by `container-smoke.sh`; D-Bus access,

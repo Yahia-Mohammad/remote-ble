@@ -77,5 +77,13 @@ policy it is running rather than leaving it to the host. Read [scanning.md](scan
 relying on concurrent discovery; the one guarantee it deliberately does **not** make is Apple
 discovery completeness under mixed filter classes.
 
+## Going further than 0.10.0
+
+Two **agent** defaults move in 0.11.0 — `transportGrace` 10 s → 120 s, and the connection slot cap
+from 4-per-client-session to 8-agent-wide. Both are shipped defaults with no source change to make,
+and the second changes *what is counted*, not just the number. If you are upgrading an agent past
+0.10.0, read [migrate-to-0.11.0.md](migrate-to-0.11.0.md) rather than treating them as a changelog
+line.
+
 Review the [changelog](../CHANGELOG.md) for the cumulative behavior changes before upgrading a
 production deployment, especially if it skipped several GitHub-only agent releases.

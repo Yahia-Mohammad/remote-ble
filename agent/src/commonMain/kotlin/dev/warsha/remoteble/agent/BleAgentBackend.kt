@@ -18,9 +18,14 @@ import kotlinx.coroutines.flow.Flow
 class BleAgentBackend(
     private val backend: BleBackend,
     private val lifecycleScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
-    private val registry: PeripheralRegistry =
-        PeripheralRegistry(lifecycleScope, onRelease = { backend.disconnect(DeviceHandle(it)) }),
+    // Declared before [registry] so a default registry inherits the same cap: the slot limit is the
+    // host radio's, and the registry is where it is enforced.
     private val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
+    private val registry: PeripheralRegistry = PeripheralRegistry(
+        lifecycleScope,
+        maxSlots = maxConnections,
+        onRelease = { backend.disconnect(DeviceHandle(it)) },
+    ),
     private val observer: AgentObserver = AgentObserver.None,
     private val scanCoordinator: ScanCoordinator? = null,
     // Optional features advertised in the handshake: the backend's own (radio-dependent,
@@ -31,8 +36,14 @@ class BleAgentBackend(
     // Shared identifier strict-mode switch (capability `identifier.translate`), flipped from the
     // dashboard. One instance across all connections so a toggle applies agent-wide.
     private val strictMode: StrictModeState = StrictModeState(),
+    // The agent-wide observations `agent.status` needs (uptime, connected clients, advertised
+    // names). Read back off [observer] rather than taken as a second reference: in production they
+    // are the same instance, and two references could drift into disagreeing about one agent.
+    private val monitor: AgentMonitor? = observer as? AgentMonitor,
+    // Per-principal write allowlist (U7). Permissive by default, matching pre-U7 behaviour.
+    private val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) : AgentBackend {
-    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String): Job =
+    override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         BleAgent(
             incoming, outgoing, scope, backend,
             maxConnections = maxConnections,
@@ -44,6 +55,9 @@ class BleAgentBackend(
             agentInfo = agentInfo,
             strictMode = strictMode,
             scanCoordinator = scanCoordinator,
+            monitor = monitor,
+            operatorScope = operatorScope,
+            writePolicy = writePolicy,
         ).start()
 }
 

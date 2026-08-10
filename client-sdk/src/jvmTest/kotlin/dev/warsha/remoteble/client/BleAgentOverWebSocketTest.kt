@@ -3,9 +3,11 @@ package dev.warsha.remoteble.client
 import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BleAgentBackend
 import dev.warsha.remoteble.agent.BleBackend
+import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.protocol.AdvertisementDto
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -16,6 +18,8 @@ import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -110,6 +114,45 @@ class BleAgentOverWebSocketTest {
             assertEquals(listOf(listOf<Byte>(0, 60), listOf<Byte>(0, 61)),
                 withTimeout(10.seconds) { peripheral.observe(heartRate).take(2).toList() }.map { it.toList() })
             peripheral.disconnect()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    @Test
+    fun agentStatusCarriesOperatorScopeOnlyForTheOperatorCredential() = runBlocking {
+        val port = freePort()
+        val server = AgentWebSocketServer(
+            port,
+            backend = BleAgentBackend(StubBleBackend()),
+            credentials = ClientCredentials.of(mapOf("lab-a" to "client-secret")),
+            operatorToken = "operator-secret",
+        ).also { it.startAndAwaitReady(port) }
+        try {
+            suspend fun statusWith(operator: String?): AgentStatusDto {
+                val session = DefaultAgentSession(
+                    WebSocketAgentTransport(
+                        "ws://localhost:$port/agent",
+                        scope,
+                        httpClient,
+                        authToken = { "client-secret" },
+                        operatorToken = { operator },
+                    ),
+                    CborProtocolCodec(),
+                    scope,
+                )
+                withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+                return withTimeout(10.seconds) { requireNotNull(session.agentStatus()) }
+            }
+
+            // The client credential alone buys nothing: a normal bearer must not carry operator reach.
+            assertFalse(statusWith(null).operatorScope)
+            // Nor does a wrong operator secret — and, critically, it does not fail the connection
+            // either, which is what lets a caller report "no operator credential" rather than
+            // "agent unreachable".
+            assertFalse(statusWith("not-the-operator-secret").operatorScope)
+            assertTrue(statusWith("operator-secret").operatorScope)
         } finally {
             server.stop()
         }

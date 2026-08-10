@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use btleplug::api::{
-    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
+    Central, CharPropFlags, Characteristic, Descriptor, Manager as _, Peripheral as _,
     ScanFilter as BtleScanFilter,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
@@ -16,7 +16,8 @@ use super::backend::{BleBackend, COORDINATOR_SCAN_STREAM, StreamKey};
 use crate::protocol::{
     errors::{AgentError, ErrorKind},
     events::{AdvertisementDto, AgentEvent, BleConnState},
-    op::{CharRef, DeviceHandle, ScanFilter},
+    frame::capabilities,
+    op::{CharRef, DescRef, DeviceHandle, ScanFilter},
     results::{CharNode, ResultPayload, ServiceNode},
 };
 use crate::registry::peripheral_lease::PeripheralRegistry;
@@ -633,6 +634,40 @@ fn find_characteristic(
         })
 }
 
+/// Resolves a `DescRef` against a connected peripheral's discovered attribute table.
+///
+/// Deliberately mirrors [find_characteristic]: same case-insensitive UUID comparison, same
+/// service-then-attribute narrowing, and the same `CharacteristicNotFound` kind when nothing
+/// matches. The protocol has no distinct "descriptor not found" error, and inventing one here
+/// would diverge from the Kotlin agent, which reports a missing descriptor the same way.
+fn find_descriptor(peripheral: &Peripheral, desc_ref: &DescRef) -> Result<Descriptor, AgentError> {
+    peripheral
+        .services()
+        .into_iter()
+        .filter(|s| s.uuid.to_string().eq_ignore_ascii_case(&desc_ref.service))
+        .flat_map(|s| s.characteristics)
+        .filter(|c| {
+            c.uuid
+                .to_string()
+                .eq_ignore_ascii_case(&desc_ref.characteristic)
+        })
+        .flat_map(|c| c.descriptors)
+        .find(|d| {
+            d.uuid
+                .to_string()
+                .eq_ignore_ascii_case(&desc_ref.descriptor)
+        })
+        .ok_or_else(|| {
+            AgentError::new(
+                ErrorKind::CharacteristicNotFound,
+                Some(format!(
+                    "Descriptor {} not found on char {} in service {}",
+                    desc_ref.descriptor, desc_ref.characteristic, desc_ref.service
+                )),
+            )
+        })
+}
+
 /// Maps btleplug's characteristic property flags to the protocol's property bitmask (the same
 /// bit values Kotlin's `CharacteristicProperties` uses, so both agents report identically).
 fn char_prop_mask(flags: CharPropFlags) -> i32 {
@@ -734,10 +769,16 @@ fn report_unsolicited_disconnect(
 #[async_trait]
 impl BleBackend for BtleplugBackend {
     fn capabilities(&self) -> Vec<String> {
-        // Baseline v1 only. Advertise a capability *here* once it is actually
-        // implemented end-to-end (descriptors, pairing, conn.priority, scan.batch,
-        // slots) so a client never negotiates something we'd answer UNSUPPORTED.
-        vec![]
+        // **Backend-level** capabilities only — what this radio can do. The agent-level ones
+        // (`slots`, `identifier.translate`, and eventually `scan.batch`) are radio-independent and
+        // are applied in `Negotiation::on_hello`; returning them here would be the wrong seam.
+        //
+        // Baseline v1: advertise one *here* once it is implemented end-to-end, so a client never
+        // negotiates something we would answer UNSUPPORTED. Still outstanding, and all genuinely
+        // unavailable in btleplug rather than merely unbuilt: `pairing`, `conn.priority`,
+        // `conn.params`, and `rssi` (btleplug reports the cached advertisement value, not a
+        // connected read, so advertising it would be a lie about what the number means).
+        vec![capabilities::DESCRIPTORS.to_string()]
     }
 
     async fn start_scan(
@@ -913,7 +954,12 @@ impl BleBackend for BtleplugBackend {
                     .map(|c| CharNode {
                         uuid: c.uuid.to_string(),
                         properties: char_prop_mask(c.properties),
-                        descriptors: vec![],
+                        // Reported now that the descriptor ops exist: a client discovers the tree
+                        // to learn what it may address, so advertising `descriptors` while
+                        // returning an empty list here would leave the capability unreachable.
+                        // btleplug populates these during `discover_services()` above, the same
+                        // point Kable fills `DiscoveredCharacteristic.descriptors`.
+                        descriptors: c.descriptors.iter().map(|d| d.uuid.to_string()).collect(),
                     })
                     .collect(),
             })
@@ -935,6 +981,38 @@ impl BleBackend for BtleplugBackend {
             .await?
             .map_err(|e| AgentError::new(ErrorKind::ReadFailed, Some(e.to_string())))?;
         Ok(ResultPayload::Bytes { value: bytes })
+    }
+
+    async fn read_descriptor(
+        &self,
+        device: &DeviceHandle,
+        desc_ref: &DescRef,
+    ) -> Result<ResultPayload, AgentError> {
+        let peripheral = self.find_connected_peripheral(device)?;
+        let descriptor = find_descriptor(&peripheral, desc_ref)?;
+        let bytes = gatt_op("read_descriptor", peripheral.read_descriptor(&descriptor))
+            .await?
+            .map_err(|e| AgentError::new(ErrorKind::ReadFailed, Some(e.to_string())))?;
+        Ok(ResultPayload::Bytes { value: bytes })
+    }
+
+    /// Always with-response at ATT level — there is no write-without-response for descriptors — so
+    /// this needs none of [DegradedWrites]'s machinery, which exists for a btleplug defect in the
+    /// with-response *characteristic* path and is keyed to that op.
+    async fn write_descriptor(
+        &self,
+        device: &DeviceHandle,
+        desc_ref: &DescRef,
+        value: &[u8],
+    ) -> Result<(), AgentError> {
+        let peripheral = self.find_connected_peripheral(device)?;
+        let descriptor = find_descriptor(&peripheral, desc_ref)?;
+        gatt_op(
+            "write_descriptor",
+            peripheral.write_descriptor(&descriptor, value),
+        )
+        .await?
+        .map_err(|e| AgentError::new(ErrorKind::WriteFailed, Some(e.to_string())))
     }
 
     async fn write(

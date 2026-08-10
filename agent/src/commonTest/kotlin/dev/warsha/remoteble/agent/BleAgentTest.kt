@@ -2,6 +2,7 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentEvent
+import dev.warsha.remoteble.protocol.AgentStatusDto
 import dev.warsha.remoteble.protocol.BleBondState
 import dev.warsha.remoteble.protocol.BleConnState
 import dev.warsha.remoteble.protocol.BleRadioState
@@ -26,7 +27,9 @@ import dev.warsha.remoteble.protocol.ResultPayload
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServerHello
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -66,7 +69,9 @@ class BleAgentTest {
         maxConnections: Int = 4,
         maxActiveScans: Int = BleAgent.MAX_ACTIVE_SCANS,
         maxActiveObservations: Int = BleAgent.MAX_ACTIVE_OBSERVATIONS,
-        registry: PeripheralRegistry = PeripheralRegistry(scope),
+        // The slot cap lives in the registry (it is the host radio's, not one session's), so a
+        // harness asking for a smaller cap has to build the registry with it.
+        registry: PeripheralRegistry = PeripheralRegistry(scope, maxSlots = maxConnections),
         clientId: Long = 0L,
         capabilities: Set<String> = emptySet(),
         scanBatchWindow: Duration = BleAgent.DEFAULT_SCAN_BATCH_WINDOW,
@@ -75,6 +80,12 @@ class BleAgentTest {
         // Default to a format that differs from the clients tests declare, so translation engages.
         agentFormat: IdentifierFormat = IdentifierFormat.BLUEZ_JSON,
         observer: AgentObserver = AgentObserver.None,
+        // Ownership identity. Defaults to the connection id, as it does in production for a client
+        // that sends no stable id; `agent.status` disclosure tests set it to a real session key.
+        clientKey: String = clientId.toString(),
+        monitor: AgentMonitor? = null,
+        operatorScope: Boolean = false,
+        writePolicy: WritePolicy = WritePolicy.permissive(),
     ) {
         private val codec = CborProtocolCodec()
         private val toAgent = Channel<ByteArray>(Channel.UNLIMITED)
@@ -126,6 +137,10 @@ class BleAgentTest {
                 strictMode = strictMode,
                 agentFormat = agentFormat,
                 observer = observer,
+                clientKey = clientKey,
+                monitor = monitor,
+                operatorScope = operatorScope,
+                writePolicy = writePolicy,
             )
             agent.start()
         }
@@ -494,7 +509,7 @@ class BleAgentTest {
     }
 
     @Test
-    fun emitsSlotStateOnConnectAndDisconnectWhenNegotiated() = runTest {
+    fun emitsSlotStateOnNegotiationThenOnEveryOccupancyChange() = runTest {
         val h = Harness(
             backgroundScope, FakeBleBackend(), maxConnections = 2,
             capabilities = setOf(Capabilities.CONNECTION_SLOTS),
@@ -507,9 +522,34 @@ class BleAgentTest {
         assertIs<OpResult.Ok>(h.frames.reply(2))
 
         val slots = h.frames.filterIsInstance<Event>().map { it.event }
-            .filterIsInstance<AgentEvent.SlotState>().take(2).toList()
-        assertEquals(listOf(1, 2), slots.map { it.free }) // 2-1 after connect, back to 2 after disconnect
+            .filterIsInstance<AgentEvent.SlotState>().take(3).toList()
+        // The first is the handshake snapshot: a client that negotiates `slots` and connects
+        // nothing still learns the current occupancy, instead of waiting for a change that a
+        // quiet agent may never produce.
+        assertEquals(listOf(2, 1, 2), slots.map { it.free })
         assertEquals(2, slots[0].total)
+    }
+
+    @Test
+    fun slotStateCountsAnotherClientsLease() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 2)
+        val other = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientId = 1L)
+        other.sendHello(emptySet())
+        other.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(other.frames.reply(1))
+
+        // A second client's very first slot report must already account for the peripheral the
+        // first client holds — the per-session count this replaced would have said "2 free".
+        val watcher = Harness(
+            backgroundScope, FakeBleBackend(), registry = registry, clientId = 2L,
+            capabilities = setOf(Capabilities.CONNECTION_SLOTS),
+        )
+        watcher.sendHello(setOf(Capabilities.CONNECTION_SLOTS))
+
+        val slot = watcher.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.SlotState>().first()
+        assertEquals(1, slot.free)
+        assertEquals(2, slot.total)
     }
 
     @Test
@@ -815,6 +855,61 @@ class BleAgentTest {
     }
 
     @Test
+    fun identifierTranslation_stringClientGetsHandlesThatRouteFromALaterConnection() = runTest {
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend(
+            advertisements = listOf(AdvertisementDto(device = realHandle, name = "Fake A", rssi = -55)),
+        )
+        val registry = PeripheralRegistry(backgroundScope)
+
+        // A non-Kable client declares STRING: it holds any handle, so nothing is synthesized.
+        val first = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        first.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.STRING)
+        first.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+        val scanned = first.frames.firstScanResult(7).advertisement.device.value
+        assertEquals(realHandle.value, scanned)
+
+        // A *second connection* — the next process of a process-per-command client — that has
+        // scanned nothing and holds no lease still addresses the peripheral with that handle.
+        val second = Harness(
+            backgroundScope, backend, registry = registry,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        second.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.STRING)
+        second.send(1, Op.Connect(DeviceHandle(scanned)))
+        assertEquals(OpResult.Ok(), second.frames.reply(1))
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun identifierTranslation_synthesizedHandleFromAnEarlierConnectionDoesNotRoute() = runTest {
+        // The behaviour the STRING opt-out above exists to avoid, pinned so it cannot change
+        // silently: synthesis is per connection and its reverse map is primed only from leases,
+        // so a handle a translating client scanned in one connection is meaningless in the next.
+        val realHandle = DeviceHandle("FA:KE:0A")
+        val backend = FakeBleBackend()
+        val synthesized = HandleTranslator.synthesize(IdentifierFormat.UUID, realHandle.value)
+
+        val fresh = Harness(
+            backgroundScope, backend,
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            agentFormat = IdentifierFormat.BLUEZ_JSON,
+        )
+        fresh.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        fresh.send(1, Op.Connect(DeviceHandle(synthesized)))
+        assertIs<OpResult.Ok>(fresh.frames.reply(1))
+
+        // It reached the radio as the synthetic string, not as the peripheral it names.
+        assertEquals(listOf(DeviceHandle(synthesized)), backend.connectCalls)
+    }
+
+    @Test
     fun identifierTranslation_strictModePassesHandlesThrough() = runTest {
         val realHandle = DeviceHandle("FA:KE:0A")
         val backend = FakeBleBackend(
@@ -923,7 +1018,69 @@ class BleAgentTest {
         h2.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
         h2.send(1, Op.Connect(DeviceHandle(clientHandle)))
         assertEquals(OpResult.Ok(), h2.frames.reply(1))
-        assertEquals(listOf(realHandle, realHandle), backend.connectCalls)
+        // One physical connect for both invocations: the radio link never went down, so the resume
+        // must not re-drive it. See [warmLeaseResumeDoesNotReconnectTheRadio].
+        assertEquals(listOf(realHandle), backend.connectCalls)
+    }
+
+    @Test
+    fun warmLeaseResumeDoesNotReconnectTheRadio() = runTest {
+        // The property a process-per-command client depends on: each invocation opens a transport,
+        // issues `connect`, and expects to be talking to the peripheral its predecessor left
+        // connected. If that `connect` re-drove the radio, every command would pay a physical
+        // reconnect (and rediscovery), which is the cost the transport-grace window exists to
+        // avoid — the window would keep the *lease* while silently dropping its whole benefit.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+
+        val first = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        first.sendHello(emptySet())
+        first.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+        assertEquals(listOf(device), backend.connectCalls)
+
+        // Two more invocations, each a fresh connection. The client id is what keys ownership, so
+        // it stays the same — that is precisely what makes these the *same* client resuming rather
+        // than a second one contending.
+        repeat(2) {
+            val next = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+            next.sendHello(emptySet())
+            next.send(1, Op.Connect(device))
+            assertIs<OpResult.Ok>(next.frames.reply(1))
+            // Still reported as connected, so the client can proceed straight to its GATT op.
+            assertEquals(
+                AgentEvent.ConnectionState(device, BleConnState.CONNECTED),
+                next.frames.filterIsInstance<Event>().map { it.event }
+                    .filterIsInstance<AgentEvent.ConnectionState>().first(),
+            )
+            next.close()
+        }
+
+        assertEquals(listOf(device), backend.connectCalls, "the radio was re-driven on resume")
+        assertEquals(emptyList(), backend.disconnectCalls)
+    }
+
+    @Test
+    fun aLeaseWhoseRadioLinkDroppedStillReconnects() = runTest {
+        // The complement, so the skip above cannot silently swallow a genuine reconnect: after an
+        // unsolicited BLE disconnect the lease survives its own grace window, but the link is down
+        // and the next connect must actually reach the radio.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+
+        val first = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        first.sendHello(emptySet())
+        first.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(first.frames.reply(1))
+
+        registry.onDisconnected(device.value, "1") // radio dropped, lease still held
+        first.close()
+
+        val second = Harness(backgroundScope, backend, registry = registry, clientId = 1L)
+        second.sendHello(emptySet())
+        second.send(1, Op.Connect(device))
+        assertIs<OpResult.Ok>(second.frames.reply(1))
+        assertEquals(listOf(device, device), backend.connectCalls)
     }
 
     @Test
@@ -952,9 +1109,11 @@ class BleAgentTest {
         )
         h.send(2, Op.Disconnect(device))
         assertIs<OpResult.Ok>(h.frames.reply(2))
-        val slotAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
-            .filterIsInstance<AgentEvent.SlotState>().first()
-        assertEquals(2, slotAfterHello.free) // both slots free again — and the event now flows
+        val slotsAfterHello = h.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.SlotState>().take(2).toList()
+        // The event now flows: the handshake snapshot already accounts for the peripheral this
+        // client connected before negotiating, and the disconnect frees it.
+        assertEquals(listOf(1, 2), slotsAfterHello.map { it.free })
     }
 
     @Test
@@ -1063,5 +1222,373 @@ class BleAgentTest {
                 .filterIsInstance<AgentEvent.RadioState>().first()
         }
         assertNull(radio)
+    }
+
+    // ---- agent.status (U3) ----
+
+    private suspend fun SharedFlow<Frame>.status(cid: Long): AgentStatusDto =
+        assertIs<ResultPayload.Status>(assertIs<OpResult.Ok>(reply(cid)).payload).status
+
+    private val alpha = ClientCredentials.sessionKey("lab-a", "shell-1")
+    private val beta = ClientCredentials.sessionKey("lab-b", "ci-runner")
+
+    @Test
+    fun agentStatusShowsACallerItsOwnLeasesAndOnlyACountOfOthers() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 4)
+        val other = DeviceHandle("FA:KE:0B")
+        // A lease held by a different principal entirely.
+        registry.acquire(other.value, beta)
+        registry.onConnected(other.value, beta)
+
+        val h = Harness(backgroundScope, FakeBleBackend(), registry = registry, clientKey = alpha)
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val status = h.frames.status(2)
+        assertEquals(1, status.leases.size)
+        assertTrue(status.leases.single().mine)
+        assertEquals("lab-a/shell-1", status.leases.single().holder)
+        // The other tenant is a number, not a name: enough to explain the capacity, nothing more.
+        assertEquals(1, status.otherLeases)
+        assertEquals(2, status.slots.free)
+        assertEquals(4, status.slots.total)
+        assertFalse(status.operatorScope)
+    }
+
+    @Test
+    fun agentStatusUnderOperatorScopeNamesEveryHolder() = runTest {
+        val registry = PeripheralRegistry(backgroundScope, maxSlots = 4)
+        val other = DeviceHandle("FA:KE:0B")
+        registry.acquire(other.value, beta)
+        registry.onConnected(other.value, beta)
+
+        val h = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            registry = registry,
+            clientKey = alpha,
+            operatorScope = true,
+        )
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val status = h.frames.status(2)
+        assertTrue(status.operatorScope)
+        assertEquals(2, status.leases.size)
+        // Nothing is left over once every lease is listed.
+        assertEquals(0, status.otherLeases)
+        // The other principal's client id is disclosed here and nowhere else.
+        assertEquals(
+            setOf("lab-a/shell-1", "lab-b/ci-runner"),
+            status.leases.mapNotNull { it.holder }.toSet(),
+        )
+    }
+
+    @Test
+    fun agentStatusReportsLeaseHandlesInTheCallersOwnFormat() = runTest {
+        // A client whose identifier format differs from the agent's, so translation engages: a
+        // handle read from a status reply has to be usable in the caller's next op, exactly like
+        // one read from a scan result.
+        val h = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION),
+            clientKey = alpha,
+        )
+        h.sendHello(setOf(Capabilities.IDENTIFIER_TRANSLATION), IdentifierFormat.UUID)
+        h.frames.filterIsInstance<ServerHello>().first()
+        h.connect(1)
+
+        h.send(2, Op.AgentStatus)
+        val reported = h.frames.status(2).leases.single().handle
+        assertNotEquals(device.value, reported, "a translating client must not see the radio handle")
+
+        // And it routes: addressing the peripheral by the handle status just returned works.
+        h.send(3, Op.Read(DeviceHandle(reported), char))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+    }
+
+    // ---- write policy (U7) ----
+
+    private fun allowingWrite(principal: String): WritePolicy = WritePolicy.decode(
+        """{"version":1,"principals":{"$principal":{"writes":[
+            {"service":"${char.service}","characteristic":"${char.characteristic}","maximumBytes":1}
+        ]}}}""",
+        knownPrincipals = setOf(principal),
+    )
+
+    private fun denyingEverything(principal: String): WritePolicy = WritePolicy.decode(
+        """{"version":1,"principals":{"$principal":{"writes":[]}}}""",
+        knownPrincipals = setOf(principal),
+    )
+
+    /** A harness whose backend (and negotiated set) already includes `write.policy`. */
+    private suspend fun policyAwareHarness(
+        scope: CoroutineScope,
+        backend: BleBackend,
+        clientKey: String,
+        writePolicy: WritePolicy,
+    ): Harness {
+        val h = Harness(
+            scope,
+            backend,
+            capabilities = setOf(Capabilities.WRITE_POLICY),
+            clientKey = clientKey,
+            writePolicy = writePolicy,
+        )
+        h.sendHello(setOf(Capabilities.WRITE_POLICY))
+        h.frames.filterIsInstance<ServerHello>().first()
+        return h
+    }
+
+    @Test
+    fun permissivePolicyAllowsAWriteByDefault() = runTest {
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend)
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+    }
+
+    @Test
+    fun aConfiguredPolicyDeniesAnUnlistedOrEmptyPrincipal() = runTest {
+        for (policy in listOf(
+            denyingEverything("owner"),
+            // "owner" isn't in this policy at all — same outcome as an empty rule list.
+            WritePolicy.decode(
+                """{"version":1,"principals":{"someone-else":{"writes":[]}}}""",
+                knownPrincipals = setOf("owner", "someone-else"),
+            ),
+        )) {
+            val backend = FakeBleBackend()
+            val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+            h.connect(1)
+
+            h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+            val err = assertIs<OpResult.Err>(h.frames.reply(2))
+            assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        }
+    }
+
+    @Test
+    fun aWriteOverTheConfiguredByteBoundIsDenied() = runTest {
+        val backend = FakeBleBackend()
+        val h = policyAwareHarness(backgroundScope, backend, "owner", allowingWrite("owner"))
+        h.connect(1)
+
+        // The rule allows at most 1 byte.
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01, 0x02), withResponse = true))
+        val err = assertIs<OpResult.Err>(h.frames.reply(2))
+        assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        assertNull(backend.lastWrite)
+    }
+
+    @Test
+    fun policyDeniedRequiresTheCapabilityOtherwiseItIsInvalidRequest() = runTest {
+        // The crux: an unknown ErrorKind name would break a v1 client's decode, so a client that
+        // never negotiated write.policy must not receive POLICY_DENIED at all.
+        val backend = FakeBleBackend()
+        val h = Harness(backgroundScope, backend, clientKey = "owner", writePolicy = denyingEverything("owner"))
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.INVALID_REQUEST, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+    }
+
+    @Test
+    fun policyDeniedIsSentOnceTheCapabilityIsNegotiated() = runTest {
+        val backend = FakeBleBackend()
+        val h = policyAwareHarness(backgroundScope, backend, "owner", denyingEverything("owner"))
+        h.connect(1)
+
+        h.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(h.frames.reply(2)).error.kind)
+    }
+
+    @Test
+    fun peripheralBusyIsAnsweredBeforeAnyPolicyCheck() = runTest {
+        // Ordering matters: a caller that doesn't own the lease must never learn whether policy
+        // would also have refused it — that would leak whether the policy permits a characteristic
+        // on a device this caller cannot even touch.
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(backgroundScope, backend, registry = registry, clientKey = "owner")
+        owner.connect(1)
+
+        // "intruder" would also be denied by this policy, but must never find that out.
+        val intruder = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = "intruder",
+            writePolicy = denyingEverything("intruder"),
+        )
+        intruder.send(2, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        val err = assertIs<OpResult.Err>(intruder.frames.reply(2))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, err.error.kind)
+    }
+
+    @Test
+    fun aDeviceScopedRuleIsEnforcedAtDispatch() = runTest {
+        // The policy object's own matching is unit-tested; this proves the dispatch point actually
+        // passes the device it is operating on, rather than a wildcard that would make the field
+        // decorative.
+        val backend = FakeBleBackend()
+        val otherDevice = DeviceHandle("FA:KE:0B")
+        val policy = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[
+                {"device":"${device.value}","service":"${char.service}","characteristic":"${char.characteristic}"}
+            ]}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+        h.connect(1)
+        h.connect(2, otherDevice)
+
+        h.send(3, Op.Write(device, char, byteArrayOf(0x01), withResponse = true))
+        assertIs<OpResult.Ok>(h.frames.reply(3))
+
+        // Same principal, same characteristic, the peripheral the rule does not name.
+        h.send(4, Op.Write(otherDevice, char, byteArrayOf(0x01), withResponse = true))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(h.frames.reply(4)).error.kind)
+    }
+
+    @Test
+    fun structuredHolderRidesOnPeripheralBusyOnlyForANegotiatedClient() = runTest {
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-laptop"),
+        )
+        owner.connect(1)
+
+        // A client that negotiated nothing: the prose names the holder, the field stays absent —
+        // sending it would fail its decode of the whole frame, not merely be ignored.
+        val ungated = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-ci"),
+        )
+        ungated.send(2, Op.Connect(device))
+        val plain = assertIs<OpResult.Err>(ungated.frames.reply(2))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, plain.error.kind)
+        assertNull(plain.error.holder)
+        assertContains(plain.error.message!!, "rble-laptop")
+
+        // A client that negotiated `lease.holder` gets the same decision as fields.
+        val gated = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-agent"),
+            capabilities = setOf(Capabilities.LEASE_HOLDER),
+        )
+        gated.sendHello(wanted = setOf(Capabilities.LEASE_HOLDER))
+        gated.send(3, Op.Connect(device))
+        val structured = assertIs<OpResult.Err>(gated.frames.reply(3))
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, structured.error.kind)
+        assertEquals("lab-a", structured.error.holder?.principal)
+        assertEquals("rble-laptop", structured.error.holder?.clientId)
+    }
+
+    @Test
+    fun theStructuredHolderWithholdsAnotherPrincipalsClientId() = runTest {
+        val backend = FakeBleBackend()
+        val registry = PeripheralRegistry(backgroundScope)
+        val owner = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-a", "rble-laptop"),
+        )
+        owner.connect(1)
+
+        val other = Harness(
+            backgroundScope,
+            backend,
+            registry = registry,
+            clientKey = ClientCredentials.sessionKey("lab-b", "rble-ci"),
+            capabilities = setOf(Capabilities.LEASE_HOLDER),
+        )
+        other.sendHello(wanted = setOf(Capabilities.LEASE_HOLDER))
+        other.send(2, Op.Connect(device))
+        val err = assertIs<OpResult.Err>(other.frames.reply(2))
+        // Enough to diagnose contention ("lab-a has it"), without publishing another tenant's
+        // client id — which can carry a hostname or username it never meant to share.
+        assertEquals("lab-a", err.error.holder?.principal)
+        assertNull(err.error.holder?.clientId)
+    }
+
+    @Test
+    fun descriptorWritesAreGatedIndependentlyOfCharacteristicWrites() = runTest {
+        val backend = FakeBleBackend()
+        val desc = DescRef(char.service, char.characteristic, "00002902-0000-1000-8000-00805f9b34fb")
+        val otherDesc = DescRef(char.service, char.characteristic, "00002901-0000-1000-8000-00805f9b34fb")
+        val policy = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"descriptorWrites":[
+                {"service":"${char.service}","characteristic":"${char.characteristic}","descriptor":"${desc.descriptor}","maximumBytes":2}
+            ]}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val h = policyAwareHarness(backgroundScope, backend, "owner", policy)
+        h.connect(1)
+
+        h.send(2, Op.WriteDescriptor(device, desc, byteArrayOf(0x01, 0x00)))
+        assertIs<OpResult.Ok>(h.frames.reply(2))
+        assertEquals(desc, backend.lastDescriptorWrite?.first)
+
+        h.send(3, Op.WriteDescriptor(device, otherDesc, byteArrayOf(0x01)))
+        val err = assertIs<OpResult.Err>(h.frames.reply(3))
+        assertEquals(ErrorKind.POLICY_DENIED, err.error.kind)
+        assertEquals(desc, backend.lastDescriptorWrite?.first)
+    }
+
+    @Test
+    fun pairAndUnpairAreGated() = runTest {
+        val backend = FakeBleBackend()
+
+        val denying = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[],"pairing":false}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val denied = policyAwareHarness(backgroundScope, backend, "owner", denying)
+        denied.connect(1)
+        denied.send(2, Op.Pair(device))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(denied.frames.reply(2)).error.kind)
+        denied.send(3, Op.Unpair(device))
+        assertEquals(ErrorKind.POLICY_DENIED, assertIs<OpResult.Err>(denied.frames.reply(3)).error.kind)
+        assertTrue(backend.pairCalls.isEmpty())
+        assertTrue(backend.unpairCalls.isEmpty())
+
+        val allowing = WritePolicy.decode(
+            """{"version":1,"principals":{"owner":{"writes":[],"pairing":true}}}""",
+            knownPrincipals = setOf("owner"),
+        )
+        val allowed = Harness(backgroundScope, backend, clientKey = "owner", writePolicy = allowing)
+        allowed.connect(4)
+        allowed.send(5, Op.Pair(device))
+        assertIs<OpResult.Ok>(allowed.frames.reply(5))
+        assertEquals(listOf(device), backend.pairCalls)
+    }
+
+    @Test
+    fun agentStatusReportsWhetherAPolicyIsConfigured() = runTest {
+        val permissive = Harness(backgroundScope, FakeBleBackend())
+        permissive.send(1, Op.AgentStatus)
+        assertFalse(permissive.frames.status(1).settings.writePolicyEnforced)
+
+        val enforced = Harness(
+            backgroundScope,
+            FakeBleBackend(),
+            clientKey = "owner",
+            writePolicy = denyingEverything("owner"),
+        )
+        enforced.send(1, Op.AgentStatus)
+        assertTrue(enforced.frames.status(1).settings.writePolicyEnforced)
     }
 }

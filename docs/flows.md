@@ -182,7 +182,7 @@ its `RemoteGattClient`:
 ```
 
 - The agent's `Connect` reserves a slot under its mutex before the slow native
-  connect; the cap is `maxConnections` (default 4) → `Err(NO_CONNECTION_SLOT)` past
+  connect; the cap is `maxConnections` (default 8, agent-wide) → `Err(NO_CONNECTION_SLOT)` past
   it.
 - Discovery on the real backend polls until the GATT table stabilizes (see
   [agent.md](agent.md#op-by-op)).

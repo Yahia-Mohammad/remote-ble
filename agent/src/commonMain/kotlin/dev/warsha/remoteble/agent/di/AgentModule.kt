@@ -15,6 +15,7 @@ import dev.warsha.remoteble.agent.ScanCoordinator
 import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.agent.StrictModeState
+import dev.warsha.remoteble.agent.WritePolicy
 import dev.warsha.remoteble.agent.DefaultDispatcherProvider
 import dev.warsha.remoteble.agent.DispatcherProvider
 import dev.warsha.remoteble.agent.platformName
@@ -41,8 +42,22 @@ data class AgentConfig(
     val allowRemoteDashboard: Boolean = false,
     val maxConnections: Int = BleAgent.DEFAULT_MAX_CONNECTIONS,
     val exclusiveByDefault: Boolean = true,
+    /**
+     * How long a lease survives an *unsolicited BLE disconnect* — the radio link is already down, so
+     * holding it only reserves the peripheral for a returning owner. Short on purpose.
+     */
     val leaseGrace: Duration = 10.seconds,
-    val transportGrace: Duration = 10.seconds,
+    /**
+     * How long a lease survives the *client's transport* dropping, with the radio link left warm.
+     *
+     * Two minutes because the binding case is a client whose process is short-lived: a CLI, a script,
+     * or a coding agent that runs one command per process and expects the next command to resume the
+     * same connection. Ten seconds is shorter than the gap between two commands a human types, so it
+     * silently paid a full reconnect and rediscovery on nearly every step. The cost of the longer
+     * window is contention — a peripheral stays leased for up to two minutes after its holder walks
+     * away — so an operator running a shared rig should lower it via `REMOTE_BLE_TRANSPORT_GRACE_MS`.
+     */
+    val transportGrace: Duration = 120.seconds,
     val livenessProbeInterval: Duration = 15.seconds,
     /** Scan isolation policy advertised for this process lifetime. */
     val scanConcurrency: ScanConcurrencyMode = ScanConcurrencyMode.MULTIPLEXED,
@@ -56,6 +71,8 @@ data class AgentConfig(
     val failFastOnDegradedWrites: Boolean = true,
     /** Non-null only for the JVM's explicit radio-less simulation mode. */
     val simulationProfile: SimulationProfile? = null,
+    /** Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks. */
+    val writePolicy: WritePolicy = WritePolicy.permissive(),
 ) {
     companion object {
         const val DEFAULT_BIND_HOST: String = "127.0.0.1"
@@ -99,6 +116,7 @@ fun agentModule(config: AgentConfig): Module = module {
             leaseGrace = config.leaseGrace,
             transportGrace = config.transportGrace,
             defaultExclusive = true,
+            maxSlots = config.maxConnections,
             onRelease = { handle -> backend.disconnect(DeviceHandle(handle)) },
         )
     }
@@ -122,9 +140,10 @@ fun agentModule(config: AgentConfig): Module = module {
             lifecycleScope = get(qualifier = org.koin.core.qualifier.named("agent")),
             maxConnections = config.maxConnections,
             observer = get<AgentMonitor>(),
-            agentInfo = "RemoteBLE Agent 0.10.0 (kable/${platformName()})",
+            agentInfo = "RemoteBLE Agent 0.11.0 (kable/${platformName()})",
             strictMode = get(),
             scanCoordinator = get(),
+            writePolicy = config.writePolicy,
         )
     }
     single {

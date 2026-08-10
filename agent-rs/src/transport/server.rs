@@ -1613,6 +1613,14 @@ impl AgentServer {
             negotiated_capabilities,
             status,
         } = context;
+        // What this caller may be told when a lease refuses it. Computed once, because the gate
+        // must not vary between the eleven sites below that can return `PERIPHERAL_BUSY`.
+        let disclosure = lease_disclosure::DisclosureScope {
+            operator: status.operator_scope,
+            structured: negotiated_capabilities
+                .lock()
+                .contains(capabilities::LEASE_HOLDER),
+        };
         match op {
             // Names no device, so there is nothing to authorize against a lease: what a caller may
             // see is decided inside, by who it is.
@@ -1751,7 +1759,8 @@ impl AgentServer {
                 OpResult::from_unit(result)
             }
             Op::Connect { device } => {
-                let acquisition = match registry.acquire_lease(&device.value, client_id) {
+                let acquisition = match registry.acquire_lease(&device.value, client_id, disclosure)
+                {
                     Ok(acquisition) => acquisition,
                     Err(e) => return OpResult::err(e),
                 };
@@ -1800,7 +1809,7 @@ impl AgentServer {
                 }
             }
             Op::Disconnect { device } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 registry.release_lease(&device.value, client_id);
@@ -1808,13 +1817,13 @@ impl AgentServer {
                 OpResult::from_unit(backend.disconnect(&device).await)
             }
             Op::Discover { device } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.discover(&device).await)
             }
             Op::Read { device, char } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.read(&device, &char).await)
@@ -1825,7 +1834,7 @@ impl AgentServer {
                 value,
                 with_response,
             } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 let principal = write_policy::principal_of(client_id);
@@ -1844,7 +1853,7 @@ impl AgentServer {
                 OpResult::from_unit(backend.write(&device, &char, &value, with_response).await)
             }
             Op::ReadDescriptor { device, desc } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.read_descriptor(&device, &desc).await)
@@ -1854,7 +1863,7 @@ impl AgentServer {
                 desc,
                 value,
             } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 let principal = write_policy::principal_of(client_id);
@@ -1873,7 +1882,7 @@ impl AgentServer {
                 OpResult::from_unit(backend.write_descriptor(&device, &desc, &value).await)
             }
             Op::RequestMtu { device, mtu } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 OpResult::from_payload(backend.request_mtu(&device, mtu).await)
@@ -1883,7 +1892,7 @@ impl AgentServer {
                 device,
                 char,
             } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 let stream = StreamKey {
@@ -1920,7 +1929,7 @@ impl AgentServer {
             // dispatches Pair/Unpair for every Kotlin target, including Android/iOS backends that
             // may implement bonding) for whenever pairing lands on either.
             Op::Pair { device } | Op::Unpair { device } => {
-                if let Err(e) = registry.authorize_connected(&device.value, client_id) {
+                if let Err(e) = registry.authorize_connected(&device.value, client_id, disclosure) {
                     return OpResult::err(e);
                 }
                 let principal = write_policy::principal_of(client_id);
@@ -1942,7 +1951,8 @@ impl AgentServer {
             // device-bearing branch (found by Rig A case 3, 2026-07-28).
             unsupported => {
                 if let Some(device) = unsupported.device_handle()
-                    && let Err(e) = registry.authorize_connected(&device.value, client_id)
+                    && let Err(e) =
+                        registry.authorize_connected(&device.value, client_id, disclosure)
                 {
                     return OpResult::err(e);
                 }
@@ -3475,7 +3485,7 @@ mod tests {
         // A lease held by an entirely different principal, taken directly on the shared registry.
         harness
             .registry
-            .acquire_lease("dev-other", "lab-b\0ci-runner")
+            .acquire_lease("dev-other", "lab-b\0ci-runner", Default::default())
             .expect("the other tenant's lease must be granted");
 
         let mut client = harness.client("mine", &[], &[]).await;
@@ -3517,7 +3527,7 @@ mod tests {
         harness.operator_token = Some("operator-secret".to_string());
         harness
             .registry
-            .acquire_lease("dev-other", "lab-b\0ci-runner")
+            .acquire_lease("dev-other", "lab-b\0ci-runner", Default::default())
             .expect("the other tenant's lease must be granted");
 
         // No credential, then a wrong one: neither may fail the connection, and neither may widen
@@ -3553,7 +3563,7 @@ mod tests {
         let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(60));
         harness
             .registry
-            .acquire_lease("dev-warm", "lab-b\0gone")
+            .acquire_lease("dev-warm", "lab-b\0gone", Default::default())
             .expect("lease must be granted");
         harness.registry.on_transport_drop("lab-b\0gone");
 
@@ -4461,7 +4471,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
         let result = AgentServer::execute_op(
             Op::Read {
@@ -4498,7 +4510,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4527,7 +4541,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4557,7 +4573,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         for op in [
@@ -4595,7 +4613,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         for op in [
@@ -4627,7 +4647,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4677,7 +4699,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4707,7 +4731,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         for policy in [
@@ -4750,7 +4776,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4785,7 +4813,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let write = || Op::Write {
@@ -4840,7 +4870,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -4874,7 +4906,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let allowed_descriptor = test_descriptor();
@@ -4943,7 +4977,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let denying = WritePolicy::decode(
@@ -5066,7 +5102,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
 
         let result = AgentServer::execute_op(
@@ -5083,8 +5121,16 @@ mod tests {
 
         // No grace window: another client can acquire the same device right away, and the
         // original owner can no longer act on it without a fresh Connect.
-        assert!(registry.acquire_lease("dev", "someone-else").is_ok());
-        assert!(registry.authorize_connected("dev", "owner").is_err());
+        assert!(
+            registry
+                .acquire_lease("dev", "someone-else", Default::default())
+                .is_ok()
+        );
+        assert!(
+            registry
+                .authorize_connected("dev", "owner", Default::default())
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -5143,7 +5189,9 @@ mod tests {
         let backend: Arc<dyn BleBackend> = fake.clone();
         let registry = PeripheralRegistry::new(LeaseConfig::default());
         for (client, device, generation) in [("a", "dev-a", 1), ("b", "dev-b", 2)] {
-            registry.acquire_lease(device, client).unwrap();
+            registry
+                .acquire_lease(device, client, Default::default())
+                .unwrap();
             registry.on_connected(device, client);
             let _ = AgentServer::execute_op(
                 Op::ObserveStart {
@@ -5193,7 +5241,9 @@ mod tests {
         let fake = Arc::new(FakeBackend::default());
         let backend: Arc<dyn BleBackend> = fake;
         let registry = PeripheralRegistry::new(LeaseConfig::default());
-        registry.acquire_lease("dev", "owner").unwrap();
+        registry
+            .acquire_lease("dev", "owner", Default::default())
+            .unwrap();
         registry.on_connected("dev", "owner");
         let result = AgentServer::execute_op(
             Op::RequestMtu {

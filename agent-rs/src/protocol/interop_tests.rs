@@ -11,7 +11,7 @@
 //! To regenerate the ground truth, see `WireDumpTest` on the Kotlin side.
 
 use super::codec::{decode_cbor, encode_cbor};
-use super::errors::{AgentError, ErrorKind};
+use super::errors::{AgentError, ErrorKind, LeaseHolder};
 use super::events::{AdvertisementDto, AgentEvent, BleConnState};
 use super::frame::Frame;
 use super::op::{
@@ -260,6 +260,7 @@ fn reply_err_carries_camelcase_gatt_status() {
                     kind: ErrorKind::GattError,
                     gatt_status: Some(133),
                     message: Some("x".into()),
+                    holder: None,
                 },
             },
         },
@@ -340,6 +341,29 @@ fn command_agent_status() {
         Frame::Command {
             cid: 30,
             op: Op::AgentStatus,
+        },
+    );
+}
+
+#[test]
+fn reply_err_peripheral_busy_carries_the_holder() {
+    // The `lease.holder` field as the Kotlin agent emits it. Pinned in both directions because the
+    // two agents spell it differently in source (Rust renames `client_id` to `clientId`), and a
+    // dropped rename would still decode — into an error whose holder is silently absent, which is
+    // the exact failure the structured field exists to remove.
+    assert_kotlin_decodes_to(
+        "9f657265706c79bf636369640966726573756c749f63657272bf656572726f72bf646b696e646f5045524950484552414c5f42555359676d657373616765783c7065726970686572616c20696e20757365206279207072696e636970616c20276c61622d61272c20636c69656e74202772626c652d6c6170746f702766686f6c646572bf697072696e636970616c656c61622d6168636c69656e7449646b72626c652d6c6170746f70ffffffffffff",
+        Frame::Reply {
+            cid: 9,
+            result: OpResult::Err {
+                error: AgentError::peripheral_busy(
+                    "peripheral in use by principal 'lab-a', client 'rble-laptop'".into(),
+                    Some(LeaseHolder {
+                        principal: "lab-a".into(),
+                        client_id: Some("rble-laptop".into()),
+                    }),
+                ),
+            },
         },
     );
 }

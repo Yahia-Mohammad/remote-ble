@@ -23,6 +23,15 @@ pub enum ErrorKind {
     PolicyDenied,
 }
 
+/// Who holds a leased peripheral, on `PERIPHERAL_BUSY`. Mirrors `LeaseHolder` in the Kotlin
+/// protocol; `client_id` is `None` where the caller is not entitled to see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseHolder {
+    pub principal: String,
+    #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentError {
     pub kind: ErrorKind,
@@ -30,6 +39,12 @@ pub struct AgentError {
     pub gatt_status: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Populated only for a client that negotiated `lease.holder` — an unknown key would fail a
+    /// v1 client's decode outright, so this is skipped rather than sent as null. `skip_serializing_if`
+    /// mirrors Kotlin's `encodeDefaults = false` field by field, which is what makes "diff the two
+    /// agents' replies" a real check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<LeaseHolder>,
 }
 
 impl AgentError {
@@ -38,6 +53,17 @@ impl AgentError {
             kind,
             gatt_status: None,
             message,
+            holder: None,
+        }
+    }
+
+    /// A `PERIPHERAL_BUSY` error naming the holder, for a client that negotiated `lease.holder`.
+    pub fn peripheral_busy(message: String, holder: Option<LeaseHolder>) -> Self {
+        Self {
+            kind: ErrorKind::PeripheralBusy,
+            gatt_status: None,
+            message: Some(message),
+            holder,
         }
     }
 
@@ -50,6 +76,7 @@ impl AgentError {
             kind,
             gatt_status: Some(gatt_status),
             message,
+            holder: None,
         }
     }
 }

@@ -23,6 +23,7 @@ pub mod capabilities {
     pub const IDENTIFIER_TRANSLATION: &str = "identifier.translate";
     pub const AGENT_STATUS: &str = "agent.status";
     pub const WRITE_POLICY: &str = "write.policy";
+    pub const LEASE_HOLDER: &str = "lease.holder";
     pub const SCAN_CONCURRENCY_MULTIPLEXED: &str = "scan.concurrency.multiplexed";
     pub const SCAN_CONCURRENCY_SINGLE: &str = "scan.concurrency.single";
     pub const SCAN_CONCURRENCY_UNCONTROLLED: &str = "scan.concurrency.uncontrolled";
@@ -38,6 +39,7 @@ pub mod capabilities {
         SCAN_BATCH,
         AGENT_STATUS,
         WRITE_POLICY,
+        LEASE_HOLDER,
     ];
 }
 

@@ -152,6 +152,7 @@ impl PeripheralRegistry {
         &self,
         device_handle: &str,
         client_id: &str,
+        scope: lease_disclosure::DisclosureScope,
     ) -> Result<LeaseAcquisition, AgentError> {
         let mut map = self.inner.state.lock();
 
@@ -172,12 +173,10 @@ impl PeripheralRegistry {
             // shared model is deferred rather than granting an untracked guest. The holder is
             // named through the disclosure policy, never by interpolating the raw session key —
             // half of that key is text the holder chose, and it belongs to another tenant.
-            return Err(AgentError::new(
-                ErrorKind::PeripheralBusy,
-                Some(lease_disclosure::busy_message(
-                    &state.owner_client_id,
-                    client_id,
-                )),
+            return Err(lease_disclosure::peripheral_busy(
+                &state.owner_client_id,
+                client_id,
+                scope,
             ));
         }
 
@@ -230,6 +229,7 @@ impl PeripheralRegistry {
         &self,
         device_handle: &str,
         client_id: &str,
+        scope: lease_disclosure::DisclosureScope,
     ) -> Result<(), AgentError> {
         let map = self.inner.state.lock();
         match map.get(device_handle) {
@@ -237,13 +237,9 @@ impl PeripheralRegistry {
                 ErrorKind::NotConnected,
                 Some("Peripheral is not connected".into()),
             )),
-            Some(state) if state.owner_client_id != client_id => Err(AgentError::new(
-                ErrorKind::PeripheralBusy,
-                Some(lease_disclosure::busy_message(
-                    &state.owner_client_id,
-                    client_id,
-                )),
-            )),
+            Some(state) if state.owner_client_id != client_id => Err(
+                lease_disclosure::peripheral_busy(&state.owner_client_id, client_id, scope),
+            ),
             Some(state) if !state.connected => Err(AgentError::new(
                 ErrorKind::NotConnected,
                 Some("Peripheral is not connected".into()),
@@ -410,9 +406,15 @@ mod tests {
     #[test]
     fn held_by_lists_only_that_clients_leases() {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
-        assert!(reg.acquire_lease("dev1", "clientA").is_ok());
+        assert!(
+            reg.acquire_lease("dev1", "clientA", Default::default())
+                .is_ok()
+        );
         reg.on_connected("dev1", "clientA");
-        assert!(reg.acquire_lease("dev2", "clientB").is_ok());
+        assert!(
+            reg.acquire_lease("dev2", "clientB", Default::default())
+                .is_ok()
+        );
 
         let mut held = reg.held_by("clientA");
         held.sort();
@@ -423,13 +425,21 @@ mod tests {
     #[test]
     fn test_acquire_and_exclusive_conflict() {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
-        assert!(reg.acquire_lease("dev1", "clientA").is_ok());
+        assert!(
+            reg.acquire_lease("dev1", "clientA", Default::default())
+                .is_ok()
+        );
 
         // Same client re-acquiring is idempotent ok
-        assert!(reg.acquire_lease("dev1", "clientA").is_ok());
+        assert!(
+            reg.acquire_lease("dev1", "clientA", Default::default())
+                .is_ok()
+        );
 
         // Different client rejected with PeripheralBusy
-        let err = reg.acquire_lease("dev1", "clientB").unwrap_err();
+        let err = reg
+            .acquire_lease("dev1", "clientB", Default::default())
+            .unwrap_err();
         assert_eq!(err.kind, ErrorKind::PeripheralBusy);
     }
 
@@ -438,19 +448,29 @@ mod tests {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
 
         assert_eq!(
-            reg.authorize_connected("dev1", "clientA").unwrap_err().kind,
+            reg.authorize_connected("dev1", "clientA", Default::default())
+                .unwrap_err()
+                .kind,
             ErrorKind::NotConnected
         );
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         assert_eq!(
-            reg.authorize_connected("dev1", "clientA").unwrap_err().kind,
+            reg.authorize_connected("dev1", "clientA", Default::default())
+                .unwrap_err()
+                .kind,
             ErrorKind::NotConnected
         );
 
         reg.on_connected("dev1", "clientA");
-        assert!(reg.authorize_connected("dev1", "clientA").is_ok());
+        assert!(
+            reg.authorize_connected("dev1", "clientA", Default::default())
+                .is_ok()
+        );
         assert_eq!(
-            reg.authorize_connected("dev1", "clientB").unwrap_err().kind,
+            reg.authorize_connected("dev1", "clientB", Default::default())
+                .unwrap_err()
+                .kind,
             ErrorKind::PeripheralBusy
         );
     }
@@ -463,13 +483,21 @@ mod tests {
         });
         assert_eq!(reg.free_slots(), 2);
 
-        assert!(reg.acquire_lease("dev1", "clientA").is_ok());
+        assert!(
+            reg.acquire_lease("dev1", "clientA", Default::default())
+                .is_ok()
+        );
         assert_eq!(reg.free_slots(), 1);
 
-        assert!(reg.acquire_lease("dev2", "clientB").is_ok());
+        assert!(
+            reg.acquire_lease("dev2", "clientB", Default::default())
+                .is_ok()
+        );
         assert_eq!(reg.free_slots(), 0);
 
-        let err = reg.acquire_lease("dev3", "clientC").unwrap_err();
+        let err = reg
+            .acquire_lease("dev3", "clientC", Default::default())
+            .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NoConnectionSlot);
     }
 
@@ -488,7 +516,8 @@ mod tests {
             }
         });
 
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         assert_eq!(reg.free_slots(), 7);
 
         reg.on_transport_drop("clientA");
@@ -522,13 +551,15 @@ mod tests {
             }
         });
 
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         reg.on_transport_drop("clientA");
         tokio::task::yield_now().await; // let the grace task register its sleep against now
         tokio::time::advance(Duration::from_secs(2)).await;
 
         // Owner reconnects within the window: re-acquire cancels the pending release.
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
 
         tokio::time::advance(Duration::from_secs(10)).await;
         tokio::task::yield_now().await;
@@ -543,7 +574,8 @@ mod tests {
     #[tokio::test]
     async fn occupancy_starts_at_the_current_value_for_a_late_subscriber() {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
 
         // Subscribing *after* the lease exists still yields the current count, without waiting
         // for a change — this is what lets a freshly negotiated client be told the truth
@@ -558,12 +590,14 @@ mod tests {
         let mut occupancy = reg.occupancy();
         assert_eq!(*occupancy.borrow_and_update(), 0);
 
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         occupancy.changed().await.unwrap();
         assert_eq!(*occupancy.borrow_and_update(), 1);
 
         // A different client's lease moves the same number: the capacity is the host radio's.
-        reg.acquire_lease("dev2", "clientB").unwrap();
+        reg.acquire_lease("dev2", "clientB", Default::default())
+            .unwrap();
         occupancy.changed().await.unwrap();
         assert_eq!(*occupancy.borrow_and_update(), 2);
 
@@ -575,11 +609,13 @@ mod tests {
     #[tokio::test]
     async fn re_acquiring_an_owned_lease_does_not_republish_occupancy() {
         let reg = PeripheralRegistry::new(LeaseConfig::default());
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         let mut occupancy = reg.occupancy();
         occupancy.borrow_and_update();
 
-        reg.acquire_lease("dev1", "clientA").unwrap(); // the resume path, not a new lease
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap(); // the resume path, not a new lease
 
         assert!(
             !occupancy.has_changed().unwrap(),
@@ -593,7 +629,8 @@ mod tests {
             transport_grace: Duration::from_secs(5),
             ..Default::default()
         });
-        reg.acquire_lease("dev1", "clientA").unwrap();
+        reg.acquire_lease("dev1", "clientA", Default::default())
+            .unwrap();
         let mut occupancy = reg.occupancy();
         assert_eq!(*occupancy.borrow_and_update(), 1);
 

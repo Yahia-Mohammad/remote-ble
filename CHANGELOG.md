@@ -18,6 +18,8 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-10
+
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
 > running one command per process. The wire protocol version is unchanged at **1** and no existing
 > `@SerialName` discriminator moved; the additions are one new op (`agent.status`) with its result
@@ -26,6 +28,15 @@ protocol version: **1**.
 > also adds a capability-gated per-principal write policy. `agent-rs`
 > also begins advertising and emitting capabilities and events that already existed (`slots`,
 > `scan.batch`, and their `SlotState` / `ScanResultBatch` events).
+>
+> **No source change is required of a client.** Two *agent* defaults move, though — `transportGrace`
+> 10 s → 120 s and the slot cap from 4-per-session to 8-agent-wide — and the second changes what is
+> counted, not just the number. Upgrade guidance is in
+> [`docs/migrate-to-0.11.0.md`](docs/migrate-to-0.11.0.md).
+>
+> This is a **minor**, not a patch, release: it adds three capability strings, an op, public DTOs,
+> and a new `ErrorKind` member (`POLICY_DENIED`) that an exhaustive `when` in a consumer would not
+> have covered.
 
 ### Added
 
@@ -637,6 +648,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0
 [0.8.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.8.0
 [0.7.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.7.0

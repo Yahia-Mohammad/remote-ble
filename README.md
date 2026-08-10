@@ -82,7 +82,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.10.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.11.0")
 }
 ```
 
@@ -90,9 +90,9 @@ dependencies {
 > README shows the version actually resolvable right now** — if you're reading between a version
 > bump and its Central publish, use that number.
 
-Upgrading from an earlier Central release? Read the concise
-[0.10.0 migration guide](docs/migrate-to-0.10.0.md), especially the breaking `authToken` provider
-change.
+Upgrading? Read the concise [0.11.0 migration guide](docs/migrate-to-0.11.0.md) — no source
+change is required, but two agent defaults move. Coming from a release older than 0.10.0, start with
+the [0.10.0 guide](docs/migrate-to-0.10.0.md) and its breaking `authToken` provider change.
 
 **iOS** is covered by the same coordinate: it's a Kotlin Multiplatform publication, so an
 iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) resolves the
@@ -364,8 +364,8 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 
 ## Status
 
-The 0.10.0 release candidate is code-complete and verified locally (full `./gradlew build` and the
-Rust suite green). App logic written purely against Kable's `Peripheral`/`Scanner` API runs
+0.10.0 shipped on 2026-08-04 — tag, GitHub Release, GHCR image and Maven Central. 0.11.0 is the
+current line. App logic written purely against Kable's `Peripheral`/`Scanner` API runs
 unchanged against a `RemotePeripheral` talking to an agent over WebSocket — connect, discover,
 read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
 complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
@@ -376,9 +376,11 @@ found, are in [`docs/`](docs/). One boundary is worth stating plainly rather tha
 detail: the container was validated on **one amd64 Linux host**, so arm64, AppArmor,
 SELinux-enforcing and rootless Podman are *not* covered, and the image is labelled accordingly.
 
-What remains is **publication** (GitHub release + GHCR image + Maven Central). Until that happens,
-treat 0.10.0 as a release candidate rather than a shipped version. The exact remaining-work boundary
-is tracked in the [release handoff](docs/proposals/0.10.0-progress-status.md) and the
+0.11.0 adds readiness work for clients whose processes are short-lived — a status op, an
+agent-enforced write allowlist, structured lease-holder diagnostics, and a longer default transport
+grace so a per-command process resumes rather than reconnects. See
+[`docs/migrate-to-0.11.0.md`](docs/migrate-to-0.11.0.md). The 0.10.0 release record is in the
+[release handoff](docs/proposals/0.10.0-progress-status.md) and the
 [release-candidate inventory](docs/release-candidate.md).
 
 The reference apps show both sides: an Android client (`:android-client`) and an iOS launcher

@@ -37,7 +37,7 @@ a supplied blank or whitespace-only path is also treated as unconfigured, with a
   "principals": {
     "lab-a": {
       "writes": [
-        { "service": "0000180d-0000-1000-8000-00805f9b34fb", "characteristic": "00002a39-0000-1000-8000-00805f9b34fb", "maximumBytes": 1 },
+        { "device": "AA:BB:CC:DD:EE:FF", "service": "0000180d-0000-1000-8000-00805f9b34fb", "characteristic": "00002a39-0000-1000-8000-00805f9b34fb", "maximumBytes": 1 },
         { "service": "0000180f-0000-1000-8000-00805f9b34fb", "characteristic": "*", "maximumBytes": 20, "withResponse": true }
       ],
       "descriptorWrites": [
@@ -58,6 +58,19 @@ a nullable nonnegative signed 32-bit value: `null` is unlimited and `0` permits 
 payload. Existing operation limits still reject payloads above 512 bytes. Pairing is the separate,
 coarse per-principal boolean because `desc.write` and `pair` are mutations too and a policy that
 covered only `Op.Write` would be a door left open next to a locked one.
+
+### The optional `device` field
+
+Both rule kinds take an optional `device`, defaulting to `"*"`, matched case-insensitively against
+the peripheral's **device handle** — the value the registry leases and `agent.status` reports, so an
+operator writes the identity the agent already shows them rather than a second naming scheme.
+
+It is optional because a policy written without it must keep meaning what it meant. It exists
+because without it the policy is device-blind, and on a shared rig that is the whole question: "may
+`lab-a` write this control point" and "may `lab-a` write this control point *on the peripheral it
+leased*" are different grants, and only the second is a boundary between tenants. A CLI resolving a
+selector cannot know its handle until the connection exists, so the check is made at dispatch with
+the concrete handle in hand, not at parse time.
 
 ### Absent, empty, and unlisted are three different states
 

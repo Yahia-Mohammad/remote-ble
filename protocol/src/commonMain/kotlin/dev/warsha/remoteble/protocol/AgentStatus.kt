@@ -60,9 +60,12 @@ data class StatusSettingsDto(
     /** Identifier strict mode: agent-wide suppression of handle translation (§6.1). */
     val strictIdentifiers: Boolean,
     /**
-     * Whether this agent enforces a per-principal write policy. Reported from the start so a client
-     * can distinguish an enforcing agent from a permissive one; no reference agent enforces one yet,
-     * so it is `false` everywhere until that lands.
+     * Whether this agent has a per-principal write policy *configured*, as opposed to running
+     * permissive. Distinct from the [Capabilities.WRITE_POLICY] capability, which every conforming
+     * agent advertises unconditionally because it describes the mechanism: the capability says
+     * "this agent can enforce and can send `POLICY_DENIED`", this field says "an operator has
+     * actually configured rules". A client that wants to know whether its writes are subject to an
+     * allowlist needs this one.
      */
     val writePolicyEnforced: Boolean = false,
 )
@@ -90,7 +93,12 @@ data class LeaseStatusDto(
     val name: String? = null,
     /**
      * The holder, rendered under the disclosure policy: `principal` alone, or `principal/clientId`
-     * where the caller is entitled to the client id. Null when the caller may not see it at all.
+     * where the caller is entitled to the client id.
+     *
+     * In practice a lease this caller can see always has a holder — a normal caller sees only its
+     * own leases, and an operator sees every holder — so this is nullable for wire tolerance, not
+     * because any current agent omits it. The structured counterpart on a refused op is
+     * [AgentError.holder], which splits the same decision into fields.
      *
      * Both halves are text the *holder* chose, so this arrives length-bounded and
      * control-character escaped — it is rendered by whatever received it, which may be a terminal or

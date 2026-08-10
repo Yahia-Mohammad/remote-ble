@@ -21,7 +21,8 @@ protocol version: **1**.
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent
 > running one command per process. The wire protocol version is unchanged at **1** and no existing
 > `@SerialName` discriminator moved; the additions are one new op (`agent.status`) with its result
-> payload and capability string, gated so it reaches only clients that negotiate it. This release
+> payload and capability string, plus one capability-gated additive field (`AgentError.holder`
+> behind `lease.holder`), gated so they reach only clients that negotiate them. This release
 > also adds a capability-gated per-principal write policy. `agent-rs`
 > also begins advertising and emitting capabilities and events that already existed (`slots`,
 > `scan.batch`, and their `SlotState` / `ScanResultBatch` events).
@@ -58,6 +59,21 @@ protocol version: **1**.
   deferred. The agent-level `write.policy` capability
   gates the new non-transient `POLICY_DENIED` error; clients that did not negotiate it receive the
   wire-safe `INVALID_REQUEST` fallback instead.
+
+- **`lease.holder`: structured holder details on `PERIPHERAL_BUSY`.** A new agent-level capability
+  adds `AgentError.holder` (`principal`, optional `clientId`) alongside the human message, so a
+  client can attribute contention without parsing a sentence back apart. It is gated rather than
+  sent unconditionally because `AgentError` is decoded strictly: an unrecognized key fails a v1
+  client's decode of the whole error frame, so this is not the compatible addition an optional field
+  would be under a lenient codec. `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode` pins that.
+  The structured field and the message render one disclosure decision, and both are escaped and
+  length-bounded — a machine-readable field is more likely to be forwarded verbatim, not less.
+
+- **Write rules can name a device.** `WriteRule` and `DescriptorWriteRule` take an optional `device`
+  matching the peripheral's handle, defaulting to `"*"`, so an existing policy file keeps its
+  meaning. Without it a policy was device-blind: an operator could permit a principal to write a
+  control point, but not to write it only on that principal's own peripheral — the distinction that
+  matters on a shared rig.
 
 - **A client can declare its identifier format.** `DefaultAgentSession` takes an optional
   `identifierFormat`, still defaulting to the host's. A consumer that never constructs a Kable
@@ -129,7 +145,8 @@ protocol version: **1**.
   *did* drop still reconnects. Written into the conformance spec at §10.4.
 
 - **`PERIPHERAL_BUSY` names the holder.** Both agents apply one disclosure policy: the principal
-  always, the client id only when the caller shares that principal. The identity is escaped and
+  always, the client id only when the caller shares that principal — or presents operator scope.
+  The identity is escaped and
   length-bounded at the point of disclosure, since half of it is text the holder chose and the
   message is rendered in someone else's terminal, log, or model context. This also stops `agent-rs`
   interpolating the raw session key, which leaked a foreign client id and the NUL separator.

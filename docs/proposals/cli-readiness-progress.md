@@ -1,6 +1,6 @@
 # CLI-readiness branch: what landed, what is left
 
-Working note for `feat/cli-readiness`, last updated 2026-08-05. It exists so the next person on
+Working note for `feat/cli-readiness`, last updated 2026-08-10. It exists so the next person on
 this branch — or the same person a week later — does not have to re-derive the scope decisions or
 re-verify what already passed. The changes themselves are described in `CHANGELOG.md` under
 `[Unreleased]`; this file is about state and intent.
@@ -33,6 +33,8 @@ This branch is the upstream half.
 | Status contract (U3) | `agent.status` op, both agents, caller-scoped disclosure | `AgentStatus.kt`, `status.rs`, `BleAgent.kt`, `server.rs` |
 | Operator scope | `X-RemoteBle-Operator` on the upgrade; `agent-rs` gained an operator token | `AgentWebSocketServer.kt`, `server.rs`, `main.rs` |
 | Grace deadlines | both registries now track *when* a release fires, not just that one is pending | `PeripheralRegistry.kt`, `peripheral_lease.rs` |
+| Holder diagnostics (U5, rest) | `lease.holder` capability + structured `AgentError.holder` | `Capabilities.kt`, `Errors.kt`, `LeaseDisclosure.kt`, `lease_disclosure.rs` |
+| Device-scoped write rules (U7, rest) | optional `device` on both rule kinds, default `"*"` | `WritePolicy.kt`, `write_policy.rs` |
 
 **No capability now differs between two agents on the same host.** That was not the original scope
 — it grew out of the judgement that differing capability support between the reference agents is
@@ -41,7 +43,7 @@ writing a third agent.
 
 ### Verification
 
-`./gradlew build` green; `cargo test` 147 passed; `cargo clippy --all-targets` and
+`./gradlew build` green; `cargo test` 188 passed; `cargo clippy --all-targets` and
 `cargo fmt --check` clean. Note there is **no Gradle format-check task in this repo** — `formatCheck`
 belongs to the CLI repo, not this one.
 
@@ -50,7 +52,11 @@ assumed meaningful: both warm-resume regressions, the `scan.batch` coalescing te
 the grace-deadline test (deadline write removed) and the disclosure tests on both agents (scope
 check forced true, which fails all three Rust status tests and the Kotlin caller-scoped one). The
 coalescing test has an inherent timing hazard (three emits could straddle a flush tick), so it was
-stressed 60× with no failures.
+stressed 60× with no failures. The two 2026-08-10 additions were held to the same bar:
+`the_structured_holder_is_omitted_without_the_capability` fails when the gate is forced open, and
+`aDeviceScopedRuleIsEnforcedAtDispatch` fails when `matchesChar` stops consulting `device` — which
+is what makes the latter prove the *dispatch point* passes a real handle, rather than a wildcard
+that would leave the field decorative.
 
 The operator-header path is covered end to end over a real socket, not only at the unit level:
 `BleAgentOverWebSocketTest.agentStatusCarriesOperatorScopeOnlyForTheOperatorCredential` drives a
@@ -82,6 +88,18 @@ The status DTOs also carry `skip_serializing_if` conditions on the Rust side tha
 `encodeDefaults = false` field by field. That is deliberate: it makes "diff the two agents' status
 replies" a real check rather than two encodings a decoder happens to tolerate.
 
+**`lease.holder` moved it again**, in a way worth naming because it is a different shape of change
+from `agent.status`: a new *field on an existing type* rather than a new op. That reads as the
+safest possible addition and is in fact the most dangerous one available here, because `AgentError`
+decodes under `Cbor.Default`, which does not ignore unknown keys — so an ungated `holder` breaks a
+v1 client's decode of the entire error frame. `ProtocolCodecTest.anUngatedHolderFieldBreaksAV1Decode`
+pins that behaviour rather than leaving it as a claim in a KDoc; if the codec ever becomes lenient
+the test says so and the gate can be revisited. Both directions are pinned as usual
+(`RustAgentInteropTest.replyErrPeripheralBusyCarriesTheHolder` and
+`interop_tests::reply_err_peripheral_busy_carries_the_holder`), which is what would catch Rust's
+`#[serde(rename = "clientId")]` going missing — a dropped rename still decodes, into an error whose
+holder is silently absent.
+
 ## Findings worth carrying forward
 
 - **The parity record was comparing the wrong pair of agents.** It measured `agent-rs` against
@@ -97,12 +115,57 @@ replies" a real check rather than two encodings a decoder happens to tolerate.
 - **`cargo fmt --check` was already failing before this work**, so the Rust diff includes a few
   reformatted lines nobody in these commits wrote.
 
+## Reviewed against the CLI's contract, 2026-08-10
+
+The first pass through `remoteble-tools`' `implementation-plan.md` treated U5 and U7 as complete
+when only the half this repo could see had landed. Diffing the CLI's **vendored** protocol slice
+(`remoteble-tools/core/src/commonMain/kotlin/dev/warsha/remoteble/protocol/`) against `:protocol`
+found the rest — that diff is the sharpest tool available here, because the CLI is already written
+against the wire contract it expects, so any drift is a compile break or a silent degradation
+waiting to happen. Three gaps and two doc defects came out of it:
+
+- **U5 was half done.** The prose message landed; `lease.holder` and the structured
+  `AgentError.holder` did not. The CLI already renders `error.holder` as `{principal, clientId}`
+  (`cli/.../Main.kt`, `SessionProtocol.kt`) and maps `Capabilities.LEASE_HOLDER` in `AgentFeature`.
+  Because the field is nullable with a default, this failed *silently*: the CLI would have decoded
+  every refusal with `holder = null` forever and no error anywhere, and U5's gate — assert the
+  holder without parsing logs — would have quietly stayed unmet. Re-vendoring would additionally
+  have deleted `Capabilities.LEASE_HOLDER` and broken `core`'s compile.
+- **`busyMessage` ignored operator scope**, so an operator was told less by the refusal than by the
+  `agent.status` row describing the same lease. Both now render one decision from one function.
+- **U7 was device-blind.** The plan asks for "the optional exact/wildcard device rule" and
+  `safety-model.md` documents `device` defaulting to `"*"` as authoritative agent behaviour; neither
+  rule type had the field, and no rationale had been recorded for dropping it.
+
+### Settled: operator scope stays additive
+
+U3's text allows a *standalone* operator bearer session that may read management status but perform
+no BLE operations. This branch keeps operator scope as a **widening of disclosure on top of a valid
+client credential** (`X-RemoteBle-Operator` on the upgrade) rather than a second admission path.
+The trade is explicit: there is no read-only management principal, and an operator is necessarily
+also a BLE-capable client. What U3 actually requires is already met — the operator secret must be
+distinct from every client credential, so a normal bearer token cannot silently gain operator
+access. `remoteble-tools/docs/implementation-plan.md` §U3 needs amending to match; that is the one
+item this branch deliberately pushes back rather than implements.
+
+### Still to do in the CLI repo
+
+Not upstream defects, but they block the handoff and are invisible from there:
+
+- The vendored slice has **no `OPERATOR_HEADER`**, so the CLI cannot request operator scope today
+  even though both agents support it.
+- It carries `Op.AgentSlots` / `ResultPayload.AgentSlots` as deprecated compatibility decoders for
+  an op this repo never shipped. Consistent with U4's "deliberately no explicit slot query", but it
+  should be recorded so nobody adds it upstream to satisfy the decoder.
+- `AgentStatusDto` lives in `Results.kt` there and `AgentStatus.kt` here, so re-vendoring is a
+  manual merge, not a file copy.
+
 ## Still open
 
-### U7, per-principal write policy — completed on `feat/write-policy`
+### U7, per-principal write policy — done (merged from `feat/write-policy`, device rule added here)
 
-The actual security boundary and last upstream ask other than publishing is implemented on its own
-review branch. The delivered schema, capability/error gate, and verification record are in
+The actual security boundary and last upstream ask other than publishing. The delivered schema,
+capability/error gate, and verification record are in
 [`agent-write-policy.md`](agent-write-policy.md) and
 [`write-policy-progress.md`](write-policy-progress.md).
 
@@ -114,6 +177,10 @@ wires `StatusSettingsDto.writePolicyEnforced` to the actual configured policy on
 
 The CLI's own policy remains advisory by design; the agent policy is independently verified with
 the SDK and a raw WebSocket/CBOR client, so neither client controls the security decision.
+
+The optional `device` field was missed on that branch and added here — see the review section above
+and `agent-write-policy.md`. Worth noting how it was found: not by reading the code, but by reading
+the *consumer's* spec, which named a field the implementation had silently dropped.
 
 ### U3 is done — what it cost that the plan did not anticipate
 

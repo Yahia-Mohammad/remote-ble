@@ -172,7 +172,8 @@ points the same command at a different agent.
 - **Agent-level** capabilities are radio-independent: the agent implements them itself, over
   bookkeeping it already keeps. A conforming agent MUST advertise **all** of them, unconditionally
   — the backend has no say, and no host, platform, or radio library may narrow the set. Today these
-  are `slots`, `scan.batch`, `identifier.translate`, `agent.status` (§6.2), and `write.policy`.
+  are `slots`, `scan.batch`, `identifier.translate`, `agent.status` (§6.2), `write.policy`, and
+  `lease.holder` (§5.5).
 - **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
   differ between an Android phone and a Linux box. But two agents on the **same host** MUST
   advertise the same backend-level set: a divergence there is a defect in one of them, not a
@@ -202,11 +203,18 @@ whitespace-only policy path as unconfigured and emit a startup warning; an absen
 The current schema version is `1`. A valid policy JSON document has unique member names in every
 object, a top-level `version`, and an optional `principals` object. Each principal may contain
 `writes`, `descriptorWrites`, and `pairing`; no other members are valid. A write rule requires
-`service` and `characteristic`, with optional nullable `maximumBytes` (a nonnegative signed 32-bit
-integer) and nullable `withResponse`. A descriptor rule requires `service`, `characteristic`, and
-`descriptor`, with optional nullable `maximumBytes`. `null` means unlimited and `0` permits only
+`service` and `characteristic`, with optional `device` (defaulting to `"*"`), optional nullable
+`maximumBytes` (a nonnegative signed 32-bit integer) and nullable `withResponse`. A descriptor rule
+requires `service`, `characteristic`, and `descriptor`, with optional `device` (defaulting to `"*"`)
+and optional nullable `maximumBytes`. `null` means unlimited and `0` permits only
 an empty payload; the normal 512-byte operation ceiling still applies. UUID fields compare
 case-insensitively to the wire form, and `"*"` is the only wildcard, independently in each field.
+
+`device` matches the peripheral's **device handle** — the value the registry leases and
+`agent.status` reports — case-insensitively, so an operator writes the identity the agent already
+shows them. It is optional so that a policy written before the field existed keeps its meaning
+unchanged; supplying it scopes a rule to one peripheral, which is what separates "this principal may
+write this control point" from "…on its own device" on a shared rig.
 
 The agent MUST authorize the lease before evaluating policy. It then evaluates `write`,
 `descriptor-write`, `pair`, and `unpair` before invoking the backend; descriptor permission is
@@ -218,6 +226,32 @@ Duplicate JSON member names are invalid and portable policy files MUST NOT rely 
 semantics. Reference-agent rejection of this invalid input is deferred hardening: Kotlin can retain
 the last duplicate value, Rust rejects duplicate DTO fields, and duplicate principal-map behavior is
 not guaranteed.
+
+### 5.5 Lease-holder diagnostics (capability `lease.holder`)
+
+An agent that refuses an op with `PERIPHERAL_BUSY` MUST name the holder in `AgentError.message`, and
+MUST additionally populate the structured `AgentError.holder` (`principal`, optional `clientId`) for
+a client that negotiated `lease.holder`. An agent MUST NOT send `holder` to a client that did not:
+the error frame is decoded strictly, so an unrecognized key fails the decode of the whole frame
+rather than being ignored — the same hazard that gates `RADIO_OFF` and `POLICY_DENIED`, reached
+through an unknown key instead of an unknown enum name.
+
+Disclosure is scoped to the caller, and both renderings MUST reflect the same decision:
+
+| Holder relative to the caller | `principal` | `clientId` |
+|---|---|---|
+| Same principal | disclosed | disclosed |
+| Another principal, operator scope | disclosed | disclosed |
+| Another principal, no operator scope | disclosed | withheld |
+
+A principal name is operator-assigned and already shared context between tenants of one agent; a
+client id is chosen by the client and can carry a hostname or username it never intended to publish.
+
+Both fields carry text the *holder* chose and are rendered by whatever client was refused — a
+terminal, a log, a coding agent's context. An agent MUST therefore length-bound them and escape
+control characters, including the bidirectional overrides and line separators an `isISOControl`-style
+check misses, in the structured field exactly as in the message. A machine-readable field is *more*
+likely to be logged or forwarded verbatim, so it is not the place to relax this.
 
 ## 6. Identifiers
 

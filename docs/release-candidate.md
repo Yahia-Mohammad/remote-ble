@@ -1,12 +1,17 @@
-# 0.10.0 release-candidate inventory
+# Release-candidate inventory and release evidence
 
-The release candidate is version **0.10.0** everywhere checked by
-[`check-release-version.sh`](../scripts/check-release-version.sh). Run the guard with the intended
+The **currently released line is 0.11.0** (2026-08-10); the inventory and checklist below were
+written for 0.10.0 and remain the procedure of record for every release since. Every version source
+a release touches is checked by
+[`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
 tag before any release workflow dispatch:
 
 ```sh
-bash scripts/check-release-version.sh v0.10.0
+bash scripts/check-release-version.sh v0.11.0
 ```
+
+Substitute the tag being cut. The published evidence for each release is recorded under
+[Release evidence](#release-evidence--published-2026-08-04) below, 0.11.0's alongside 0.10.0's.
 
 ## Release evidence — published 2026-08-04
 

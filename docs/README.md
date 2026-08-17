@@ -92,7 +92,7 @@ host.
 
 | Document | Covers |
 |---|---|
-| [release-candidate.md](release-candidate.md) | 0.10.0 version source, artifact inventory, and pre-tag approval checklist |
+| [release-candidate.md](release-candidate.md) | Version sources, artifact inventory, pre-tag approval checklist, and the published evidence for 0.10.0 and 0.11.0 |
 | [release-gates.md](release-gates.md) | 0.10.0 permanent CI release gates, source SBOM, policy boundaries, and consumer fixture |
 | [proposals/0.10.0-scope.md](proposals/0.10.0-scope.md) | 0.10.0 release scope: conformance, simulated CI agent, Rust container, validation, and publication |
 | [proposals/0.10.0-progress-status.md](proposals/0.10.0-progress-status.md) | 0.10.0 implementation handoff and working log — status, open items, and session-by-session history |

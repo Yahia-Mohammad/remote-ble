@@ -101,7 +101,11 @@ class BleAgentOverWebSocketTest {
             withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
 
             val advertisement = withTimeout(10.seconds) { RemoteScanSource(session).advertisements().first() }
-            assertEquals(DeviceHandle("sim-hrm-1"), advertisement.device)
+            // Not asserted to equal the profile's "sim-hrm-1": the simulated backend declares
+            // IdentifierFormat.STRING, so a client whose own format can't hold an arbitrary string
+            // (a UUID/MAC host) is handed a synthesized handle instead. What must hold on every
+            // host is that whatever handle arrives routes ops back to the simulated peripheral —
+            // which is what the rest of this test exercises.
             val peripheral = RemoteGattClient(advertisement.device, session)
             val heartRate = CharRef("180d", "2a37")
             val controlPoint = CharRef("180d", "2a39")

@@ -105,7 +105,10 @@ class BleAgent(
     // Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
     // connections and flipped live from the dashboard; read on each forward handle translation.
     private val strictMode: StrictModeState = StrictModeState(),
-    private val agentFormat: IdentifierFormat = agentIdentifierFormat(),
+    // The format [backend] mints its handles in, so [HandleTranslator] knows whether the client's
+    // declared format can hold them. Defaults to the backend's own declaration rather than the host
+    // OS: a radio-less backend mints handles the host's radio format doesn't describe.
+    private val agentFormat: IdentifierFormat = backend.handleFormat,
     // Shared by every socket only in the guaranteed modes. Null preserves the standalone/test
     // agent's historical connection-local scan behaviour.
     private val scanCoordinator: ScanCoordinator? = null,

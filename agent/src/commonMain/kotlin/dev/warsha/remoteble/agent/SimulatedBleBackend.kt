@@ -6,6 +6,7 @@ import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServiceNode
 import kotlin.time.Duration.Companion.milliseconds
@@ -40,6 +41,12 @@ class SimulatedBleBackend(
     // Simulated connected RSSI is derived from the declared advertisement, so it is truthful to
     // advertise. Other optional operations remain unsupported unless a profile model is added.
     override val capabilities: Set<String> = setOf(Capabilities.RSSI)
+
+    // Handles here are the profile's declared `id` strings ([A-Za-z0-9._-], deliberately readable
+    // like "sim-hrm-1"), not host radio ids — so this is STRING on every host, exactly like Android.
+    // Inheriting the host default instead would make a macOS-host simulated agent claim UUID, and
+    // HandleTranslator would then skip the rewrite a UUID client needs and hand it "sim-hrm-1".
+    override val handleFormat: IdentifierFormat = IdentifierFormat.STRING
 
     override fun connectionDrops(): Flow<ConnectionDrop> = drops
 

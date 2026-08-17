@@ -18,6 +18,26 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A simulated agent declared the host radio's handle format instead of its own.** Under
+  `--simulate` there is no radio: handles are the profile's declared `id` strings. The agent
+  nevertheless reported `agentIdentifierFormat()`, so on a host whose format matched the client's
+  (a macOS dev box against an Apple or JVM client, say) `HandleTranslator` saw client == agent,
+  skipped the rewrite, and handed the client a handle no platform parser accepts — every access of
+  `.identifier` threw `RemoteIdentifierUnavailableException`. The shared `:client-ui` reads it for
+  every sighting (`DiscoveredDevice.from`), so an Apple-format client scanning a simulated agent
+  hit this on its scan screen. Handle format is now a property of whatever mints the handles:
+  `BleBackend.handleFormat` defaults to the radio format, `SimulatedBleBackend` overrides it to
+  `STRING`, and `BleAgent` derives `agentFormat` from the backend so the two cannot drift.
+
+  Consumer-visible for simulated agents only: `advertisement.device` no longer always equals the
+  profile `id`, because a UUID/MAC client now receives the synthesized handle it can parse. Match
+  on `advertisement.name` or a service UUID instead — [`docs/simulation.md`](docs/simulation.md)
+  gains a per-platform table. No wire-protocol change: the agent's own format is never sent — only
+  the client declares one, in `ClientHello.identifierFormat`, and this decides whether the agent
+  rewrites a handle before putting it on the wire.
+
 ## [0.11.0] - 2026-08-10
 
 > Readiness work for clients whose **processes are short-lived** — a CLI, a script, a coding agent

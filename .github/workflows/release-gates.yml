@@ -157,6 +157,15 @@ jobs:
           java-version: "17"
       - name: Drive the ordinary SDK through the simulated agent
         run: ./gradlew :client-sdk:jvmTest --tests '*BleAgentOverWebSocketTest.simulatedProfileDrivesTheOrdinaryClientOverARealSocket'
+      # The test above drives the SDK by DeviceHandle and never converts one into a Kable
+      # Identifier, which is how a simulated agent handing out unparseable handles reached 0.11.0
+      # unnoticed — :client-ui reads `.identifier` for every sighting, but nothing in CI did. These
+      # cover that path: the agent-side gate is host-independent (it supplies the client format),
+      # the SDK-side one walks the real socket on this runner's host format.
+      - name: Check simulated handles reach the client in a format it can parse
+        run: ./gradlew :agent:jvmTest --tests '*SimulatedAgentHandleFormatTest'
+      - name: Drive the SDK's Kable identifier path through the simulated agent
+        run: ./gradlew :client-sdk:jvmTest --tests '*SimulatedAgentIdentifierTest'
       - name: Archive Kotlin test reports
         if: failure()
         uses: actions/upload-artifact@v7

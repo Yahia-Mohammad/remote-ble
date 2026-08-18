@@ -360,6 +360,9 @@ interface BleBackend {
     fun scan(filters: List<ScanFilter>): Flow<AdvertisementDto>   // streams while collected
     suspend fun connect(device: DeviceHandle)
     suspend fun disconnect(device: DeviceHandle)
+    val handleFormat: IdentifierFormat   // the format THIS backend mints handles in; defaults to
+                                         // the host radio's. A backend whose handles do not come
+                                         // from the radio must override it — see below.
     fun isConnected(device: DeviceHandle): Boolean   // polled by ConnectionWatcher; default false
     suspend fun checkLiveness(device: DeviceHandle): Boolean   // active probe; default delegates to isConnected
     suspend fun discover(device: DeviceHandle): List<ServiceNode>
@@ -373,6 +376,13 @@ interface BleBackend {
 // convenience for backends to fail an op with a specific ErrorKind:
 internal fun bleError(kind: ErrorKind, gattStatus: Int? = null, message: String? = null): Nothing
 ```
+
+**`handleFormat` is a correctness property, not metadata.** `HandleTranslator` reads it to decide
+whether a client's declared format can hold this backend's handles as-is; declaring the wrong one
+silently disables translation and ships the client a handle it cannot parse. It defaults to the host
+radio's format, which is right for every backend whose handles come from the radio —
+`SimulatedBleBackend` overrides it to `STRING`, because its handles are profile-declared strings on
+every host. `BleAgent` derives its own `agentFormat` from this, so the two cannot drift apart.
 
 **Failures are reported by throwing `AgentException`** (via `bleError`) with an
 appropriate `ErrorKind`; `BleAgent` turns those into `OpResult.Err`. The "reached the
@@ -879,7 +889,7 @@ Logger.level = parseLogLevel(System.getenv("REMOTE_BLE_LOG"))  // default: INFO
 | Level | Tag | What |
 |---|---|---|
 | **ERROR** | `agent/engine` | Unexpected op failure (internal error) |
-| **WARN** | `agent/server` | Undecodable frame dropped; 401 rejection; repeated hello ignored |
+| **WARN** | `agent/server` | Undecodable frame dropped; 401 rejection; repeated hello ignored; **connection closed before sending `ClientHello`** |
 | **WARN** | `agent/engine` | Connect failed; scan/observe ended on error |
 | **WARN** | `agent/watcher` | Liveness probe failed (unsolicited disconnect declared); probe tick exception |
 | **INFO** | `agent/server` | Client connected/disconnected; handshake negotiated |

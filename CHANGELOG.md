@@ -18,6 +18,21 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Added
+
+- **`AgentWebSocketServer.resolvedPort`** — the port the server actually bound. Equal to the
+  requested port unless that was `0`, in which case the OS chooses one during the bind and this is
+  the only way to learn it. Binding `0` and reading this back is the race-free way to take a free
+  port: probing for one first (`ServerSocket(0)`, note the port, close it, bind it) leaves a window
+  in which anything on the host — including the same process's outbound sockets, drawn from the same
+  ephemeral range — can take the port and turn the bind into an `AgentBindException`.
+
+- **A diagnostic for a connection that never handshakes.** The agent now warns on teardown when a
+  connection ended without ever delivering a `ClientHello`, naming the connection id and peer.
+  Previously the only trace was a `client connected` line with no `handshake` line after it, which
+  is not something anyone finds without already suspecting it — see
+  [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12).
+
 ### Fixed
 
 - **A simulated agent declared the host radio's handle format instead of its own.** Under
@@ -43,6 +58,15 @@ protocol version: **1**.
   present. Owners now render as `principal/clientId` at every lease log site. Found while
   investigating [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12); the ownership key
   itself is unchanged, so nothing on the wire or in lease behaviour moves.
+
+- **The client SDK reported a handshake it had not sent.** `sendHello` logged `hello sent`
+  unconditionally and put the real failure at `debug`. Its own justification for ignoring a failure
+  — that the transport drop path would fire and a reconnect would re-handshake — holds only if the
+  socket is dead, but any throwable from `send` is wrapped as a transport failure, so a send can
+  fail on a live socket. The session then waits for a `ServerHello` nobody will send, with
+  `capabilities` null and readiness stuck at `NEGOTIATING`, while the log says otherwise. The
+  failure is now a warning that says the session will not retry, and success is reported only when
+  the frame actually went out.
 
 ## [0.11.0] - 2026-08-10
 

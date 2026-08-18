@@ -771,9 +771,9 @@ Logger.level = LogLevel.DEBUG
 | Level | What | Where |
 |---|---|---|
 | **ERROR** | Reconnect gave up; initial connect failed (reconnect disabled) | `WebSocketAgentTransport` |
-| **WARN** | Reconnect attempt N failed (backing off); sendCommand transport error | `WebSocketAgentTransport`, `DefaultAgentSession` |
-| **INFO** | CONNECTED / DISCONNECTED; transport lost; reconciled N connections/subs/scans in Xms; hello sent; negotiated caps | `WebSocketAgentTransport`, `DefaultAgentSession`, `RemotePeripheral` |
-| **DEBUG** | Request ok / failed / retry; sendCommand not connected; fireAndForget failure; sendHello failure; MTU failure; cleanup/teardown; WWR burst item failure | `DefaultAgentSession`, `RemotePeripheral` |
+| **WARN** | Reconnect attempt N failed (backing off); sendCommand transport error; **hello NOT sent** (the session cannot negotiate and will not retry) | `WebSocketAgentTransport`, `DefaultAgentSession` |
+| **INFO** | CONNECTED / DISCONNECTED; transport lost; reconciled N connections/subs/scans in Xms; hello sent (**only when it actually went out**); negotiated caps | `WebSocketAgentTransport`, `DefaultAgentSession`, `RemotePeripheral` |
+| **DEBUG** | Request ok / failed / retry; sendCommand not connected; fireAndForget failure; MTU failure; cleanup/teardown; WWR burst item failure | `DefaultAgentSession`, `RemotePeripheral` |
 | **TRACE** | Payload bytes (truncated); per-event traffic — not used by current instrumentation (reserved for future) | — |
 
 ### Properties

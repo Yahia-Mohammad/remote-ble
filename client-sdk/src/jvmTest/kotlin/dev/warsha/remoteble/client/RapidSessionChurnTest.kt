@@ -5,6 +5,8 @@ import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.ClientHello
 import dev.warsha.remoteble.protocol.ServerHello
+import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.log.LogLevel
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.header
@@ -12,6 +14,7 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.fail
 import kotlin.time.Duration.Companion.seconds
@@ -51,16 +54,61 @@ class RapidSessionChurnTest {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val httpClient = defaultWebSocketHttpClient()
 
+    // Agent and client share one Logger, so a single sink captures both halves of the handshake
+    // window — the whole point of the instrumentation added for #12. Without this the harness can
+    // report *that* a session failed but not which side let go of the frame.
+    private val log = mutableListOf<String>()
+
+    @BeforeTest
+    fun captureLogs() {
+        Logger.configure(level = LogLevel.INFO) { level, tag, message, _ ->
+            synchronized(log) { log.add("$level [$tag] $message") }
+        }
+    }
+
     @AfterTest
     fun tearDown() {
+        Logger.configure(level = null)
         httpClient.close()
         scope.cancel()
+    }
+
+    /** What the two sides said about the window, plus enough tail to see the ordering. */
+    private fun diagnosis(): String {
+        val lines = synchronized(log) { log.toList() }
+        val agentSawNoHello = lines.filter { "before sending ClientHello" in it }
+        val clientFailedToSend = lines.filter { "hello NOT sent" in it }
+        return buildString {
+            appendLine()
+            appendLine("agent reported ${agentSawNoHello.size} connection(s) closed before a ClientHello arrived")
+            appendLine("client reported ${clientFailedToSend.size} hello send failure(s)")
+            appendLine(
+                when {
+                    agentSawNoHello.isNotEmpty() && clientFailedToSend.isNotEmpty() ->
+                        "=> both: the client could not write the frame (look at the client's send path)"
+                    agentSawNoHello.isNotEmpty() ->
+                        "=> agent only: the frame was lost in flight or on the agent's read path"
+                    clientFailedToSend.isNotEmpty() ->
+                        "=> client only: the write failed and the agent never saw the connection get that far"
+                    else ->
+                        "=> neither: this is not the #12 signature; read the tail below"
+                },
+            )
+            appendLine("last 15 log lines:")
+            lines.takeLast(15).forEach { appendLine("  $it") }
+        }
     }
 
     private suspend fun DefaultClientWebSocketSession.awaitServerHello(codec: CborProtocolCodec): ServerHello? =
         withTimeoutOrNull(HANDSHAKE_TIMEOUT) {
             while (true) {
-                val frame = incoming.receive()
+                // receiveCatching, not receive: when the socket dies mid-handshake Ktor *cancels*
+                // this channel, and `receive()` then throws a CancellationException that travels
+                // straight through withTimeoutOrNull and out of the test — reporting
+                // `CancellationException at BufferedChannel.kt` instead of the diagnosis this
+                // harness exists to produce. That is exactly what the first CI reproduction did
+                // (2026-08-18), which cost the run its evidence.
+                val frame = incoming.receiveCatching().getOrNull() ?: return@withTimeoutOrNull null
                 if (frame !is Frame.Binary) continue
                 val decoded = runCatching { codec.decode(frame.readBytes()) }.getOrNull()
                 if (decoded is ServerHello) return@withTimeoutOrNull decoded
@@ -88,7 +136,8 @@ class RapidSessionChurnTest {
                         val reason = withTimeoutOrNull(1.seconds) { socket.closeReason.await() }
                         fail(
                             "session $attempt of $SESSIONS never completed its handshake " +
-                                "(${attempt} succeeded before it); close reason: $reason",
+                                "($attempt succeeded before it); close reason: $reason" +
+                                diagnosis(),
                         )
                     }
                 } finally {

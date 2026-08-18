@@ -209,7 +209,7 @@ jobs:
         run: |
           reproduced=0
           for i in $(seq 1 "$ITERATIONS"); do
-            if ./gradlew :client-sdk:jvmTest --tests '*RapidSessionChurnTest' --rerun-tasks --console=plain; then
+            if ./gradlew :client-sdk:jvmTest -Premoteble.churnHarness=true --tests '*RapidSessionChurnTest' --rerun-tasks --console=plain; then
               echo "iteration $i: all sessions completed their handshake"
             else
               reproduced=$((reproduced + 1))

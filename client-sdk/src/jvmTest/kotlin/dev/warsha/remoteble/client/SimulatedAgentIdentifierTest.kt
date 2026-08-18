@@ -9,7 +9,6 @@ import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.IdentifierFormat
-import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -53,13 +52,12 @@ class SimulatedAgentIdentifierTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
     @Test
     fun simulatedAdvertisementYieldsAUsableIdentifierOnTranslatableHosts() = runBlocking {
-        val port = freePort()
         val backend = SimulatedBleBackend(SimulationProfile.decode(PROFILE))
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(backend)).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(backend))
+            .also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),

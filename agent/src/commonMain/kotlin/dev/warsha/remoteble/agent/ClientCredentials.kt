@@ -70,6 +70,17 @@ class ClientCredentials private constructor(private val byName: Map<String, Stri
         }
 
         /**
+         * A [sessionKey] rendered for humans, as `principal/clientId`.
+         *
+         * The separator [sessionKey] uses is NUL, which is unambiguous precisely because it cannot
+         * appear in a client id — but writing one into a log turns the file binary. `file` then
+         * reports `data`, and `grep` silently reports no match for strings that are plainly there,
+         * so the log stops being greppable exactly when someone is grepping it during an incident.
+         * Every log site that names an owner goes through this.
+         */
+        fun describeSessionKey(sessionKey: String): String = sessionKey.replace('\u0000', '/')
+
+        /**
          * The principal half of a [sessionKey] — the whole string if it carries no separator,
          * which is what an unauthenticated connection's bare client id looks like. Used wherever a
          * component needs the principal alone rather than the full ownership key, e.g. `WritePolicy`.

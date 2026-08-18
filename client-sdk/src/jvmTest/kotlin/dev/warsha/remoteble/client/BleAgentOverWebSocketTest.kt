@@ -14,7 +14,6 @@ import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServiceNode
-import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -57,12 +56,10 @@ class BleAgentOverWebSocketTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
     @Test
     fun productionAgentHandlerOverWebSocket() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),
@@ -89,9 +86,9 @@ class BleAgentOverWebSocketTest {
 
     @Test
     fun simulatedProfileDrivesTheOrdinaryClientOverARealSocket() = runBlocking {
-        val port = freePort()
         val simulated = SimulatedBleBackend(SimulationProfile.decode(SIMULATED_PROFILE))
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(simulated)).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(simulated)).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),
@@ -122,13 +119,13 @@ class BleAgentOverWebSocketTest {
 
     @Test
     fun agentStatusCarriesOperatorScopeOnlyForTheOperatorCredential() = runBlocking {
-        val port = freePort()
         val server = AgentWebSocketServer(
-            port,
+            port = 0,
             backend = BleAgentBackend(StubBleBackend()),
             credentials = ClientCredentials.of(mapOf("lab-a" to "client-secret")),
             operatorToken = "operator-secret",
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             suspend fun statusWith(operator: String?): AgentStatusDto {
                 val session = DefaultAgentSession(

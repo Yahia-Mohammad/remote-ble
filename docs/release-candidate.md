@@ -1,7 +1,6 @@
 # Release-candidate inventory and release evidence
 
-The **currently released line is 0.11.0** (2026-08-10), with **0.12.0 prepared and awaiting its
-tag**; the inventory and checklist below were
+The **currently released line is 0.12.0** (2026-08-18); the inventory and checklist below were
 written for 0.10.0 and remain the procedure of record for every release since. Every version source
 a release touches is checked by
 [`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
@@ -13,6 +12,68 @@ bash scripts/check-release-version.sh v0.12.0
 
 Substitute the tag being cut. The published evidence for each release is recorded under
 [Release evidence](#release-evidence--published-2026-08-04) below, 0.11.0's alongside 0.10.0's.
+
+## Release evidence — published 2026-08-18 (0.12.0)
+
+Tag `v0.12.0` is annotated object `c63a1f1`, on commit `bc4c268`, cut after all workflows passed on
+that commit. Every hash below is the published artifact's own, read back from the release and the
+registry rather than from a local build.
+
+### GitHub Release assets
+
+| Asset | SHA-256 |
+|---|---|
+| `remoteble-agent-0.12.0-all.jar` | `5a0bc85bbe5d39f5b8cf290bcca2343646deb2298d3546ed5b7f481bf268fb84` |
+| `remoteble-agent-rs-linux-x86_64` | `d8158f5f950a122bb705c6c7fbec4d10f541896bcd91695a855de0c804bccfa8` |
+| `remoteble-agent-rs-linux-aarch64` | `3e0f56f5806c5cd86d750509efb0f8bfd75f957a54e7f9d933464ded67c14ea5` |
+| `remoteble-agent-rs-windows-x86_64.exe` | `e0459c4137a9b23b64ddec31812d479829d8135bb0ff256f9f909fd00e4c4731` |
+
+### Rust OCI image
+
+`ghcr.io/yahia-mohammad/remoteble-agent-rs`, tags `0.12.0` and `latest` resolving to the same index:
+
+| | Digest |
+|---|---|
+| **Manifest list (OCI index)** | `sha256:bfb135139514fcb2f66752b1b47f1c1dbd70cab61f558f3acf12f34798f19629` |
+| `linux/amd64` | `sha256:0068ca7fbd3ff1e94ad9b5c8be321a820afee8489123ced225f5a80fd1930334` |
+| `linux/arm64` | `sha256:ce496944b7e88999…` (plus the two Buildx attestation manifests) |
+
+Pushed on the first attempt; no GHCR rate-limit retry was needed, as with 0.11.0.
+
+### Maven Central
+
+Published by [`release.yml`](../.github/workflows/release.yml) (run `32187797842`), preceded by
+[`release-preflight.yml`](../.github/workflows/release-preflight.yml) (run `32187320908`) on the same
+runner image: four secrets present, every coordinate built, **84 detached signatures**, and the
+Portal credential check returning HTTP 200.
+
+All 15 coordinates became resolvable from `repo1.maven.org` **16 minutes** after the run completed —
+longer than 0.10.0's ~12, which is worth knowing before concluding a publish has failed.
+
+### Post-publish consumer resolution — 0.12.0
+
+Run 2026-08-18 against the **released** coordinates, all three pass:
+
+| Fixture | Task | Result |
+|---|---|---|
+| `consumer-tests/jvm` | `clean check` | ✅ |
+| `consumer-tests/android` | `clean compileDebugKotlin` | ✅ |
+| `consumer-tests/kmp` | `clean compileKotlinIosArm64`, `…SimulatorArm64` | ✅ |
+
+`mavenLocal()` was neutralized with `-Dmaven.repo.local` on an empty directory plus
+`--refresh-dependencies`. **This mattered more than usual here:** the preflight run publishes to the
+operator's Maven local, so `0.12.0` was already in `~/.m2` and all three fixtures would have resolved
+locally and proved nothing. The empty repository held **0 files** afterwards, which is the positive
+evidence that resolution came from Central.
+
+The closure was confirmed explicitly rather than inferred from a green build:
+`dependencies --configuration runtimeClasspath` resolves `client-sdk:0.12.0` →
+`client-sdk-jvm:0.12.0` → `protocol`/`protocol-jvm` + `log`/`log-jvm`, all at `0.12.0`.
+
+The Android fixture needs `ANDROID_HOME` when run outside CI — it fails with "SDK location not
+found" before reaching dependency resolution, which reads like a resolution failure and is not one.
+
+---
 
 ## Release evidence — published 2026-08-04
 

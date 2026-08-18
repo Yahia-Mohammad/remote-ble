@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
+    inputs:
+      churnIterations:
+        description: "How many times to run the rapid-session-churn harness"
+        required: false
+        default: "10"
 
 # One in-flight run per ref. Without this a superseded push leaves its predecessor running, and a
 # job that hangs (rather than fails) holds a runner for hours against a commit nobody is waiting on.
@@ -162,6 +167,60 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: simulated-e2e-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
+  session-churn:
+    name: Rapid session churn (repro harness)
+    # Deliberately not a pull-request gate. This harness reproduces an *unfixed* intermittent
+    # defect — short-lived sessions whose handshake never completes — so wiring it into every PR
+    # would block unrelated work precisely when it succeeds. It runs on demand and weekly instead.
+    #
+    # It also has to run here rather than locally: 80 sessions pass in about a second on an
+    # unloaded developer machine, and saturating every core does not change that. The two-core
+    # hosted runner is the only place it has ever been informative, which is the whole reason this
+    # job exists rather than a note telling someone to try it by hand.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Run the churn harness repeatedly
+        env:
+          # A single pass is close to meaningless against a defect that hit 1-8 of 35-45 sessions
+          # across otherwise identical runs; the loop is what turns it into a measurement.
+          ITERATIONS: ${{ github.event.inputs.churnIterations || '10' }}
+        run: |
+          reproduced=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            if ./gradlew :client-sdk:jvmTest --tests '*RapidSessionChurnTest' --rerun-tasks --console=plain; then
+              echo "iteration $i: all sessions completed their handshake"
+            else
+              reproduced=$((reproduced + 1))
+              echo "::warning::iteration $i reproduced the dropped handshake"
+            fi
+          done
+          {
+            echo "### Rapid session churn"
+            echo ""
+            echo "Reproduced in **$reproduced of $ITERATIONS** iterations."
+            echo ""
+            echo "A red job here means the harness *worked*: it caught the defect it exists to"
+            echo "catch. It does not mean the release gates are broken."
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$reproduced" -eq 0
+      - name: Archive Kotlin test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: session-churn-test-reports
           path: |
             **/build/reports/tests/**
             **/build/test-results/**

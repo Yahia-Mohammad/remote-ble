@@ -111,6 +111,14 @@ class WebSocketEndToEndTest {
         scope.cancel()
     }
 
+    /**
+     * A port nothing is listening on.
+     *
+     * Only for the tests that need an address *before* any server exists — a client that must fail
+     * to connect, or one that starts retrying before its agent comes up. Everywhere else, construct
+     * the server with `port = 0` and read [AgentWebSocketServer.resolvedPort]: probing here and
+     * binding a moment later is a race the OS can lose for you.
+     */
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
     /**
@@ -135,28 +143,17 @@ class WebSocketEndToEndTest {
             .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
             ?.hostAddress
 
-    private fun incompatibleProtocolServer(port: Int): EmbeddedServer<*, *> =
-        embeddedServer(CIO, port = port) {
+    /** The bare-Ktor server, bound to an OS-chosen port and returned with the port it took. */
+    private fun incompatibleProtocolServer(): Pair<EmbeddedServer<*, *>, Int> {
+        val server = embeddedServer(CIO, port = 0) {
             install(WebSockets)
             routing {
                 webSocket("/agent") {
                     close(CloseReason(CloseReason.Codes.PROTOCOL_ERROR, INCOMPATIBLE_PROTOCOL_CLOSE_REASON))
                 }
             }
-        }.startAndAwaitReady(port)
-
-    private fun EmbeddedServer<*, *>.startAndAwaitReady(port: Int): EmbeddedServer<*, *> {
-        start(wait = false)
-        val deadline = System.nanoTime() + 5.seconds.inWholeNanoseconds
-        while (true) {
-            try {
-                Socket().use { it.connect(InetSocketAddress("localhost", port), 200) }
-                return this
-            } catch (_: IOException) {
-                check(System.nanoTime() < deadline) { "server on port $port did not start" }
-                Thread.sleep(10)
-            }
         }
+        return server to server.startAndResolvePort()
     }
 
     private fun transportTo(
@@ -175,8 +172,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun fullOpSetAndStreamsOverWebSocket() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(transportTo(port), CborProtocolCodec(), scope)
             session.awaitConnected()
@@ -205,8 +202,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun requestTimesOutWhenAgentNeverReplies() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BlackholeBackend()).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BlackholeBackend()).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(transportTo(port), CborProtocolCodec(), scope)
             session.awaitConnected()
@@ -223,8 +220,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun incompatibleHelloClosesTheRealWebSocketWithTheStableProtocolSignal() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
             socket.send(Frame.Binary(true, CborProtocolCodec().encode(ClientHello(minVersion = 2, maxVersion = 3))))
@@ -239,8 +236,7 @@ class WebSocketEndToEndTest {
 
     @Test
     fun transportMapsARealIncompatibleCloseToTerminalStateWithoutReconnect() = runBlocking {
-        val port = freePort()
-        val server = incompatibleProtocolServer(port)
+        val (server, port) = incompatibleProtocolServer()
         try {
             val transport = transportTo(port, autoReconnect = false)
             transport.connect()
@@ -256,8 +252,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun incompatibleHelloStillClosesWhenACommandArrivesFirst() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
             socket.send(Frame.Binary(true, CborProtocolCodec().encode(Command(1, Op.Connect(device)))))
@@ -273,8 +269,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun rejectsASecondLiveSocketForTheSameStableClientIdentity() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val first = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent") {
                 header(CLIENT_ID_HEADER, "shared-test-client")
@@ -311,12 +307,12 @@ class WebSocketEndToEndTest {
      */
     @Test
     fun principalIsolationHoldsAcrossLeaseOperationsAndDuringTransportGrace() = runBlocking {
-        val port = freePort()
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             credentials = ClientCredentials.of(mapOf("alpha" to "secret-a", "beta" to "secret-b")),
             backend = BleAgentBackend(MinimalBleBackend()),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val sharedRawClientId = "shared-raw-client-id"
             fun sessionFor(secret: String) = DefaultAgentSession(
@@ -367,13 +363,13 @@ class WebSocketEndToEndTest {
      */
     @Test
     fun revokedCredentialCannotResumeALeaseDuringTransportGrace() = runBlocking {
-        val port = freePort()
         val credentials = ClientCredentials.of(mapOf("alpha" to "secret-a"))
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             credentials = credentials,
             backend = BleAgentBackend(MinimalBleBackend()),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val resumingClientId = "resuming-client"
             val session = DefaultAgentSession(
@@ -418,13 +414,13 @@ class WebSocketEndToEndTest {
 
     @Test
     fun dashboardReadsRequireTheirOwnOperatorCredential() = runBlocking {
-        val port = freePort()
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             authToken = TOKEN,
             operatorToken = "operator-secret",
             monitor = AgentMonitor(),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val endpoint = "http://localhost:$port/api/state"
             assertEquals(HttpStatusCode.Unauthorized, httpClient.get(endpoint).status)
@@ -457,12 +453,12 @@ class WebSocketEndToEndTest {
         // registered the routes unconditionally and relied on the credential check alone, an agent
         // with no operator token would start answering 401 here, and a misconfigured deployment
         // would look like a locked door instead of no door.
-        val port = freePort()
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             authToken = TOKEN,
             monitor = AgentMonitor(),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             for (path in listOf("/", "/api/state", "/api/strict", "/api/log-level")) {
                 assertEquals(
@@ -500,14 +496,14 @@ class WebSocketEndToEndTest {
         )
         checkNotNull(lanHost)
 
-        val port = freePort()
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             host = "0.0.0.0",
             authToken = TOKEN,
             operatorToken = "operator-secret",
             monitor = AgentMonitor(),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val authorized: suspend (String) -> HttpStatusCode = { hostPart ->
                 httpClient.get("http://$hostPart:$port/api/state") {
@@ -527,15 +523,15 @@ class WebSocketEndToEndTest {
 
         // Opted in, the same non-loopback request is served — which is what proves the refusal above
         // was the policy and not the address being unreachable in this environment.
-        val openPort = freePort()
         val openServer = AgentWebSocketServer(
-            port = openPort,
+            port = 0,
             host = "0.0.0.0",
             authToken = TOKEN,
             operatorToken = "operator-secret",
             allowRemoteDashboard = true,
             monitor = AgentMonitor(),
-        ).also { it.startAndAwaitReady(openPort) }
+        ).also { it.startAndAwaitReady() }
+        val openPort = openServer.resolvedPort
         try {
             assertEquals(
                 HttpStatusCode.OK,
@@ -558,15 +554,15 @@ class WebSocketEndToEndTest {
         // case 3). The mobile UI checks this before starting so the user gets an actionable message,
         // but the invariant belongs here, where it cannot be bypassed.
         assertFailsWith<IllegalArgumentException> {
-            AgentWebSocketServer(port = freePort(), authToken = TOKEN, operatorToken = TOKEN)
+            AgentWebSocketServer(port = 0, authToken = TOKEN, operatorToken = TOKEN)
         }
         Unit
     }
 
     @Test
     fun oversizedFrameIsRejectedBeforeProtocolDecoding() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val socket = httpClient.webSocketSession(urlString = "ws://localhost:$port/agent")
             socket.send(Frame.Binary(true, ByteArray(AgentWebSocketServer.MAX_FRAME_BYTES + 1)))
@@ -580,8 +576,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun serverRestartReconnectsAndInFlightFailsCleanly() = runBlocking {
-        val port = freePort()
-        var server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 transportTo(port, backoff = Backoff(50.milliseconds, 200.milliseconds)),
@@ -598,7 +594,8 @@ class WebSocketEndToEndTest {
             assertEquals(ErrorKind.TRANSPORT_LOST, assertIs<OpResult.Err>(lost).error.kind)
 
             // Server back -> transport reconnects -> new requests succeed.
-            server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+            // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port).also { it.startAndAwaitReady() }
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
         } finally {
@@ -609,8 +606,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun activeSubscriptionResumesAfterServerRestart() = runBlocking {
-        val port = freePort()
-        var server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 transportTo(port, backoff = Backoff(50.milliseconds, 200.milliseconds)),
@@ -631,7 +628,9 @@ class WebSocketEndToEndTest {
                 // Drop the agent. A fresh agent keeps NO subscription state.
                 server.stop()
                 withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
-                server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+                // Deliberately the same port: the client is retrying this exact endpoint.
+                // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port).also { it.startAndAwaitReady() }
                 withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
 
                 // Discard any pre-drop backlog, then prove a SUSTAINED stream resumes on the
@@ -650,7 +649,6 @@ class WebSocketEndToEndTest {
 
     @Test
     fun connParamsReplayedAfterServerRestart() = runBlocking {
-        val port = freePort()
         // A fresh FakeAgent per connection keeps no conn.params state of its own, so the only way
         // a *new* agent instance sees a "conn.params" command after the restart is the session's
         // own reconcileOnReconnect replaying it — this taps the wire to prove that, the same way
@@ -666,7 +664,10 @@ class WebSocketEndToEndTest {
             FakeAgent(tapped, outgoing, backendScope, FakeAgent.Config()).start()
         }
 
-        var server = AgentWebSocketServer(port, backend = spyBackend()).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0, backend = spyBackend()).also { it.startAndAwaitReady() }
+        // The restart below must land on the same endpoint the client is retrying, so the port is
+        // taken from the first bind rather than probed for.
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 transportTo(port, backoff = Backoff(50.milliseconds, 200.milliseconds)),
@@ -681,7 +682,8 @@ class WebSocketEndToEndTest {
 
             server.stop()
             withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
-            server = AgentWebSocketServer(port, backend = spyBackend()).also { it.startAndAwaitReady(port) }
+            // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port, backend = spyBackend()).also { it.startAndAwaitReady() }
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
 
             val replayed = withTimeout(10.seconds) { received.receive() }
@@ -695,8 +697,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun disconnectedDeviceIsNotReplayedOnReconnect() = runBlocking {
-        val port = freePort()
-        var server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(
                 transportTo(port, backoff = Backoff(50.milliseconds, 200.milliseconds)),
@@ -718,7 +720,9 @@ class WebSocketEndToEndTest {
 
                 server.stop()
                 withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
-                server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+                // Deliberately the same port: the client is retrying this exact endpoint.
+                // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port).also { it.startAndAwaitReady() }
                 withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
 
                 // The fresh agent never received a replayed observe.start, so the subscription
@@ -737,8 +741,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun acceptsConnectionWithValidToken() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, authToken = TOKEN).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = DefaultAgentSession(transportTo(port, authToken = TOKEN), CborProtocolCodec(), scope)
             session.awaitConnected()
@@ -751,8 +755,8 @@ class WebSocketEndToEndTest {
 
     @Test
     fun rejectsConnectionWithWrongToken() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, authToken = TOKEN).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             // No reconnect loop: the 401 fails the single handshake attempt outright.
             val session = DefaultAgentSession(
@@ -776,13 +780,13 @@ class WebSocketEndToEndTest {
 
     @Test
     fun authTokenProviderIsReadFreshOnEachReconnect() = runBlocking {
-        val port = freePort()
         // The provider hands back whatever `currentToken` holds *now* — never a cached first value.
         val currentToken = AtomicReference(TOKEN)
         val calls = AtomicInteger(0)
         val provider: suspend () -> String? = { calls.incrementAndGet(); currentToken.get() }
 
-        var server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0, authToken = TOKEN).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val transport = WebSocketAgentTransport(
                 "ws://localhost:$port/agent", scope, httpClient,
@@ -799,7 +803,8 @@ class WebSocketEndToEndTest {
             server.stop()
             withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
             currentToken.set(TOKEN2)
-            server = AgentWebSocketServer(port, authToken = TOKEN2).also { it.startAndAwaitReady(port) }
+            // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port, authToken = TOKEN2).also { it.startAndAwaitReady() }
 
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
@@ -812,7 +817,6 @@ class WebSocketEndToEndTest {
 
     @Test
     fun throwingAuthTokenProviderFoldsIntoBackoffAndRecovers() = runBlocking {
-        val port = freePort()
         val calls = AtomicInteger(0)
         // Succeeds for the initial connect, then throws on the next two attempts (as a token
         // refresh would on failure) before recovering — the backoff loop must survive the throw.
@@ -821,7 +825,8 @@ class WebSocketEndToEndTest {
             if (n in 2..3) throw RuntimeException("token refresh failed")
             TOKEN
         }
-        var server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0, authToken = TOKEN).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val transport = WebSocketAgentTransport(
                 "ws://localhost:$port/agent", scope, httpClient,
@@ -834,7 +839,8 @@ class WebSocketEndToEndTest {
             // Force a reconnect; attempts #2/#3 throw from the provider but must not kill the loop.
             server.stop()
             withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
-            server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady(port) }
+            // Deliberately the same port: the client is retrying this exact endpoint.
+            server = AgentWebSocketServer(port, authToken = TOKEN).also { it.startAndAwaitReady() }
 
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
@@ -847,6 +853,9 @@ class WebSocketEndToEndTest {
 
     @Test
     fun initialConnectRetriesUntilAgentAppears() = runBlocking {
+        // Probed rather than bound: the client must start retrying against an address where
+        // nothing listens yet, so there is no server to take the port from. The window this leaves
+        // is the test's premise rather than an oversight.
         val port = freePort()
         // No server yet — the first connect attempt fails. With reconnect enabled the transport
         // must keep trying (not strand the client), so a client that starts before its agent
@@ -857,7 +866,7 @@ class WebSocketEndToEndTest {
             scope,
         )
         delay(300) // let the initial attempt fail and the backoff loop take over
-        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port).also { it.startAndAwaitReady() }
         try {
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             assertIs<OpResult.Ok>(session.request(Op.Connect(device)))
@@ -892,7 +901,7 @@ class WebSocketEndToEndTest {
     fun onGaveUpSeesTheGiveUpStateItWasTriggeredBy() = runBlocking {
         // The callback is a caller's hook and may read the transport; it must not observe the
         // state that preceded its own trigger.
-        val port = freePort()
+        val port = freePort() // nothing ever listens here either
         val observed = CompletableDeferred<TransportState>()
         lateinit var transport: WebSocketAgentTransport
         transport = WebSocketAgentTransport(

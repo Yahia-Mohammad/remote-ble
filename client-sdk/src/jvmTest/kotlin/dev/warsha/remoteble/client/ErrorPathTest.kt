@@ -11,7 +11,6 @@ import dev.warsha.remoteble.protocol.Op
 import dev.warsha.remoteble.protocol.OpResult
 import com.juul.kable.Peripheral
 import com.juul.kable.State
-import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -49,8 +48,6 @@ class ErrorPathTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
     private suspend fun connectedSession(port: Int): AgentSession {
         val session = DefaultAgentSession(
             WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),
@@ -63,9 +60,9 @@ class ErrorPathTest {
 
     @Test
     fun writeRejectionSurfacesAndSessionStaysUsable() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend(failWrites = true)))
-            .also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend(failWrites = true)))
+            .also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral = RemoteGattClient(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -87,9 +84,9 @@ class ErrorPathTest {
 
     @Test
     fun readFailureMapsToErrorKind() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend(failReads = true)))
-            .also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend(failReads = true)))
+            .also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral = RemoteGattClient(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -107,8 +104,8 @@ class ErrorPathTest {
 
     @Test
     fun kablePeripheralReflectsAgentReportedDisconnect() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val handle = DeviceHandle(StubBleBackend.DEVICE)
@@ -135,9 +132,9 @@ class ErrorPathTest {
         // Rig B case 5 / follow-up 12: a killed agent sends no `conn.state` event — it cannot —
         // so `state` sat at Connected forever while every op failed TRANSPORT_LOST. A Kable app
         // gating on `state.collect { … }` waited for a transition that could never arrive.
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
-            .also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend()))
+            .also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         val session = DefaultAgentSession(
             WebSocketAgentTransport(
                 "ws://localhost:$port/agent", scope, httpClient,
@@ -173,9 +170,9 @@ class ErrorPathTest {
         // The other half of the decision, and the reason this is not "disconnect on any drop":
         // a transport blip is genuinely recoverable and the agent may still hold the BLE link, so
         // tearing down on every drop would be worse than the bug it fixes.
-        val port = freePort()
-        var server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
-            .also { it.startAndAwaitReady(port) }
+        var server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend()))
+            .also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         val session = DefaultAgentSession(
             WebSocketAgentTransport(
                 "ws://localhost:$port/agent", scope, httpClient,
@@ -195,8 +192,9 @@ class ErrorPathTest {
             // Unbounded reconnect: still trying, so the peripheral must NOT have been torn down.
             assertIs<State.Connected>(peripheral.state.value)
 
+            // Deliberately the same port: the client is retrying this exact endpoint.
             server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend()))
-                .also { it.startAndAwaitReady(port) }
+                .also { it.startAndAwaitReady() }
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             assertIs<State.Connected>(peripheral.state.value)
         } finally {

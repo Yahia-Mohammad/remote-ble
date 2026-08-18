@@ -140,20 +140,19 @@ class ScanConcurrencyWebSocketTest {
             mode = mode,
             transportGrace = transportGrace,
         )
-        val port = ServerSocket(0).use { it.localPort }
         val server = AgentWebSocketServer(
-            port = port,
+            port = 0,
             backend = BleAgentBackend(
                 backend = backend,
                 lifecycleScope = scope,
                 scanCoordinator = coordinator,
             ),
         )
-        server.startAndAwaitReady(port)
+        server.startAndAwaitReady()
         return RunningAgent(server, backend)
     }
 
-    private fun url(server: AgentWebSocketServer): String = "ws://localhost:${server.portForTest()}/agent"
+    private fun url(server: AgentWebSocketServer): String = "ws://localhost:${server.resolvedPort}/agent"
 
     /**
      * Bounds a blocking wait so a frame that never arrives fails one test instead of wedging the run.
@@ -737,8 +736,4 @@ class ScanConcurrencyWebSocketTest {
         }
         Unit
     }
-
-    /** Test-only access to the private port without changing the production server API. */
-    private fun AgentWebSocketServer.portForTest(): Int =
-        javaClass.getDeclaredField("port").apply { isAccessible = true }.getInt(this)
 }

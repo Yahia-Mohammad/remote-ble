@@ -45,4 +45,8 @@ against the Rust binary; both logged the permissive fallback before backend init
 Duplicate JSON-member rejection is deferred hardening. Portable policy files must use unique member
 names: Kotlin can retain a duplicate's last value, Rust rejects duplicate DTO fields, and duplicate
 principal-map behavior is not guaranteed. Phone-agent provisioning and live policy reload remain
-deliberately deferred design work. All changes remain uncommitted by request.
+deliberately deferred design work.
+
+**Shipped in 0.11.0.** This branch was merged into `feat/cli-readiness` and landed on `main` via
+PR #9; the optional `device` field on both rule kinds was added during that merge and is described
+in [`cli-readiness-progress.md`](cli-readiness-progress.md). The deferrals above are unchanged.

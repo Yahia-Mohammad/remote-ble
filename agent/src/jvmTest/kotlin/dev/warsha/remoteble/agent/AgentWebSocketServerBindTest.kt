@@ -40,17 +40,16 @@ class AgentWebSocketServerBindTest {
         // internal cleanup — an earlier version of this test claimed `stop()` after a failed start
         // was a no-op, which no mutation could falsify because stopping an already-stopped engine
         // is harmless either way. It proved nothing and has been replaced.
-        val free = ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1", 0)); it.localPort }
         ServerSocket().use { squatter ->
             squatter.bind(InetSocketAddress("127.0.0.1", 0))
             val doomed = AgentWebSocketServer(port = squatter.localPort, host = "127.0.0.1")
             assertFailsWith<AgentBindException> { doomed.start() }
             doomed.stop() // the runner's teardown calls this unconditionally; it must not throw
         }
-        val server = AgentWebSocketServer(port = free, host = "127.0.0.1")
+        val server = AgentWebSocketServer(port = 0, host = "127.0.0.1")
         try {
             server.start()
-            java.net.Socket().use { it.connect(InetSocketAddress("127.0.0.1", free), 500) }
+            java.net.Socket().use { it.connect(InetSocketAddress("127.0.0.1", server.resolvedPort), 500) }
         } finally {
             server.stop()
         }
@@ -58,13 +57,32 @@ class AgentWebSocketServerBindTest {
 
     @Test
     fun startSucceedsAndIsListeningWhenItReturns() = runBlocking {
-        val port = ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1", 0)); it.localPort }
-        val server = AgentWebSocketServer(port = port, host = "127.0.0.1")
+        val server = AgentWebSocketServer(port = 0, host = "127.0.0.1")
         try {
             server.start()
             // The point of suspending: by the time start() returns the socket is genuinely
             // accepting, so no caller has to poll for readiness.
-            java.net.Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 500) }
+            java.net.Socket().use { it.connect(InetSocketAddress("127.0.0.1", server.resolvedPort), 500) }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun bindingZeroReportsThePortTheOsActuallyChose() = runBlocking {
+        // Port 0 is what every caller that just needs *a* port should ask for: the OS assigns one
+        // during the bind, so there is no window between choosing a port and taking it. Probing
+        // first (ServerSocket(0), note the port, close, bind it) can lose that port to anything on
+        // the host — including this process's own outbound sockets, which the OS draws from the
+        // same ephemeral range — and the bind then fails with AgentBindException.
+        val server = AgentWebSocketServer(port = 0, host = "127.0.0.1")
+        assertEquals(0, server.resolvedPort, "before start it must report what was asked for")
+        try {
+            server.start()
+            val bound = server.resolvedPort
+            assertTrue(bound > 0, "expected a real port after a successful bind, got $bound")
+            // Not merely a plausible number: it is the port that accepts connections.
+            java.net.Socket().use { it.connect(InetSocketAddress("127.0.0.1", bound), 500) }
         } finally {
             server.stop()
         }
@@ -75,8 +93,10 @@ class AgentWebSocketServerBindTest {
         // The Stop -> Start sequence from Rig B case 4, now asserted at the server level: if stop()
         // did not truly release the socket, this second start() would raise AgentBindException
         // instead of hanging or aborting.
-        val port = ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1", 0)); it.localPort }
-        AgentWebSocketServer(port = port, host = "127.0.0.1").apply { start(); stop() }
+        val first = AgentWebSocketServer(port = 0, host = "127.0.0.1")
+        first.start()
+        val port = first.resolvedPort // the port under test is the one stop() must release
+        first.stop()
         val second = AgentWebSocketServer(port = port, host = "127.0.0.1")
         try {
             second.start()

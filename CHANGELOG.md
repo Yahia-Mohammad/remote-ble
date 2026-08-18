@@ -18,6 +18,38 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-18
+
+> A correctness release for **simulated agents** and a diagnosability release for everything else.
+> The wire protocol version is unchanged at **1**: no op, event, capability string or
+> `@SerialName` moved, and the agent's own identifier format is never sent — only the client
+> declares one.
+>
+> **One consumer-visible behaviour change, and only against a simulated agent:**
+> `advertisement.device` no longer always equals the profile `id`, because a client whose platform
+> identifier cannot hold an arbitrary string is now handed a synthesized handle it can parse. Match
+> on `advertisement.name` or a service UUID instead of a literal id — see
+> [`docs/migrate-to-0.12.0.md`](docs/migrate-to-0.12.0.md). Code that talks to a real radio is
+> unaffected.
+>
+> This is a **minor**, not a patch, release: it adds public API (`AgentWebSocketServer.resolvedPort`,
+> `BleBackend.handleFormat`) that an out-of-tree backend or embedder can see.
+
+### Added
+
+- **`AgentWebSocketServer.resolvedPort`** — the port the server actually bound. Equal to the
+  requested port unless that was `0`, in which case the OS chooses one during the bind and this is
+  the only way to learn it. Binding `0` and reading this back is the race-free way to take a free
+  port: probing for one first (`ServerSocket(0)`, note the port, close it, bind it) leaves a window
+  in which anything on the host — including the same process's outbound sockets, drawn from the same
+  ephemeral range — can take the port and turn the bind into an `AgentBindException`.
+
+- **A diagnostic for a connection that never handshakes.** The agent now warns on teardown when a
+  connection ended without ever delivering a `ClientHello`, naming the connection id and peer.
+  Previously the only trace was a `client connected` line with no `handshake` line after it, which
+  is not something anyone finds without already suspecting it — see
+  [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12).
+
 ### Fixed
 
 - **A simulated agent declared the host radio's handle format instead of its own.** Under
@@ -43,6 +75,15 @@ protocol version: **1**.
   present. Owners now render as `principal/clientId` at every lease log site. Found while
   investigating [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12); the ownership key
   itself is unchanged, so nothing on the wire or in lease behaviour moves.
+
+- **The client SDK reported a handshake it had not sent.** `sendHello` logged `hello sent`
+  unconditionally and put the real failure at `debug`. Its own justification for ignoring a failure
+  — that the transport drop path would fire and a reconnect would re-handshake — holds only if the
+  socket is dead, but any throwable from `send` is wrapped as a transport failure, so a send can
+  fail on a live socket. The session then waits for a `ServerHello` nobody will send, with
+  `capabilities` null and readiness stuck at `NEGOTIATING`, while the log says otherwise. The
+  failure is now a warning that says the session will not retry, and success is reported only when
+  the frame actually went out.
 
 ## [0.11.0] - 2026-08-10
 
@@ -674,6 +715,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.12.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0
 [0.8.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.8.0

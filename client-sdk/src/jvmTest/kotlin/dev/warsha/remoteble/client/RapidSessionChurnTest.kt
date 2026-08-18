@@ -11,10 +11,6 @@ import io.ktor.client.request.header
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
-import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.fail
@@ -61,22 +57,6 @@ class RapidSessionChurnTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
-    private fun AgentWebSocketServer.startAndAwaitReady(port: Int): AgentWebSocketServer {
-        runBlocking { start() }
-        val deadline = System.nanoTime() + 5.seconds.inWholeNanoseconds
-        while (true) {
-            try {
-                Socket().use { it.connect(InetSocketAddress("localhost", port), 200) }
-                return this
-            } catch (_: IOException) {
-                check(System.nanoTime() < deadline) { "agent on port $port did not start" }
-                Thread.sleep(10)
-            }
-        }
-    }
-
     private suspend fun DefaultClientWebSocketSession.awaitServerHello(codec: CborProtocolCodec): ServerHello? =
         withTimeoutOrNull(HANDSHAKE_TIMEOUT) {
             while (true) {
@@ -91,8 +71,10 @@ class RapidSessionChurnTest {
 
     @Test
     fun everyShortSessionCompletesItsHandshake() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port).startAndAwaitReady(port)
+        // Port 0, not a probed one: this harness churns sockets as fast as it can, which is the
+        // worst place to leave a window between choosing a port and binding it.
+        val server = AgentWebSocketServer(port = 0).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         val codec = CborProtocolCodec()
         try {
             repeat(SESSIONS) { attempt ->

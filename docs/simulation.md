@@ -91,7 +91,7 @@ slot accounting, and the status contract are all exercisable with **no Bluetooth
 which is the whole point of having a scriptable agent, and the reason a hostile advertised name can
 be a CI fixture rather than a thought experiment.
 
-There is no scripting language, record/replay, or Rust profile interpreter as of 0.11.0.
+There is no scripting language, record/replay, or Rust profile interpreter as of 0.12.0.
 
 The profile parser rejects unknown fields, duplicate handles/services/characteristics, invalid UUIDs
 or hex, unsupported property combinations, unsafe cardinalities, and excessive schedules. See

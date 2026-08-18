@@ -76,6 +76,25 @@ kotlin {
     }
 }
 
+// The rapid-session-churn harness is a *reproduction* for an unfixed intermittent defect
+// (issue #12), not a regression test: when it fails it is reporting that the bug it hunts appeared,
+// which is indistinguishable — to anyone reading a red build — from something in this change having
+// regressed. It has its own CI job (`Rapid session churn`, dispatch/schedule only), and gating that
+// job alone proved insufficient: `conformanceTest` depends on `:client-sdk:jvmTest`, so the harness
+// still ran on every push and duly failed a release candidate on 2026-08-18.
+//
+// Opt in with `-Premoteble.churnHarness=true`, which is what that job passes.
+tasks.named<Test>("jvmTest") {
+    if (!providers.gradleProperty("remoteble.churnHarness").isPresent) {
+        filter {
+            excludeTestsMatching("*RapidSessionChurnTest")
+            // The exclusion must not make an otherwise-empty filter fail the task when a caller
+            // runs `--tests` for something else in this module.
+            isFailOnNoMatchingTests = false
+        }
+    }
+}
+
 // iOS test binaries only link under a full Xcode toolchain, not the bare Command Line
 // Tools. Run them when Xcode is active (DEVELOPER_DIR set, or `xcode-select -p` points
 // inside an Xcode.app); otherwise skip so a CLT-only `./gradlew build` still succeeds

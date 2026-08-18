@@ -18,6 +18,23 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-18
+
+> A correctness release for **simulated agents** and a diagnosability release for everything else.
+> The wire protocol version is unchanged at **1**: no op, event, capability string or
+> `@SerialName` moved, and the agent's own identifier format is never sent — only the client
+> declares one.
+>
+> **One consumer-visible behaviour change, and only against a simulated agent:**
+> `advertisement.device` no longer always equals the profile `id`, because a client whose platform
+> identifier cannot hold an arbitrary string is now handed a synthesized handle it can parse. Match
+> on `advertisement.name` or a service UUID instead of a literal id — see
+> [`docs/migrate-to-0.12.0.md`](docs/migrate-to-0.12.0.md). Code that talks to a real radio is
+> unaffected.
+>
+> This is a **minor**, not a patch, release: it adds public API (`AgentWebSocketServer.resolvedPort`,
+> `BleBackend.handleFormat`) that an out-of-tree backend or embedder can see.
+
 ### Added
 
 - **`AgentWebSocketServer.resolvedPort`** — the port the server actually bound. Equal to the
@@ -698,6 +715,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.12.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0
 [0.8.0]: https://central.sonatype.com/artifact/dev.warsha.remoteble/client-sdk/0.8.0

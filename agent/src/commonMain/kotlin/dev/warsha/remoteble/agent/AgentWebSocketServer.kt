@@ -238,6 +238,11 @@ class AgentWebSocketServer(
                     }
                     statusMonitor?.clientConnected(clientId, address)
                     Logger.info(LogTags.SERVER) { "client connected [c=$clientId from=$address]" }
+                    // Whether this connection ever delivered a ClientHello. A connection that ends
+                    // without one is the signature of #12, and it used to be invisible: the only
+                    // trace was a `client connected` line with no `handshake` line after it, which
+                    // nobody finds without already suspecting it.
+                    var sawHello = false
                     try {
                         val outgoing: suspend (ByteArray) -> Unit = { send(Frame.Binary(fin = true, data = it)) }
                         val codec = CborProtocolCodec()
@@ -260,6 +265,7 @@ class AgentWebSocketServer(
                                     val hello = runCatching { codec.decode(bytes) as? ClientHello }.getOrNull()
                                     if (hello != null) {
                                         protocolRangeChecked = true
+                                        sawHello = true
                                         if (selectProtocolVersion(hello.minVersion, hello.maxVersion) !is ProtocolVersionSelection.Selected) {
                                             Logger.warn(LogTags.SERVER) {
                                                 "client rejected: incompatible protocol v${hello.minVersion}..${hello.maxVersion}"
@@ -280,6 +286,14 @@ class AgentWebSocketServer(
                         // live session instead of rejecting it.
                         liveSessions.release(clientKey, clientId)
                         statusMonitor?.clientDisconnected(clientId)
+                        if (!sawHello) {
+                            // Not necessarily this agent's fault — the client may never have sent
+                            // one — but it is the fact a diagnosis starts from, and the agent is
+                            // the only side that can state it about its own accepted connections.
+                            Logger.warn(LogTags.SERVER) {
+                                "client disconnected before sending ClientHello [c=$clientId from=$address]"
+                            }
+                        }
                         Logger.info(LogTags.SERVER) { "client disconnected [c=$clientId]" }
                     }
                 }

@@ -26,7 +26,6 @@ import io.ktor.websocket.Frame as WsFrame
 import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
 import io.ktor.websocket.send
-import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -69,11 +68,8 @@ class WritePolicyEndToEndTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
     @Test
     fun theSamePolicyMatrixIsEnforcedForSdkAndRawWebSocketClients() = runBlocking {
-        val port = freePort()
         val writePolicy = WritePolicy.decode(
             """{"version":1,"principals":{
                 "lab-a":{"writes":[{"service":"${allowedChar.service}","characteristic":"${allowedChar.characteristic}"}]},
@@ -82,10 +78,11 @@ class WritePolicyEndToEndTest {
             knownPrincipals = setOf("lab-a", "lab-b"),
         )
         val server = AgentWebSocketServer(
-            port,
+            port = 0,
             backend = BleAgentBackend(StubBleBackend(), writePolicy = writePolicy),
             credentials = ClientCredentials.of(mapOf("lab-a" to "secret-a", "lab-b" to "secret-b")),
-        ).also { it.startAndAwaitReady(port) }
+        ).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             // Sequential ownership: disconnect releases this test device immediately, so both
             // independently implemented clients exercise the same policy matrix on one server.

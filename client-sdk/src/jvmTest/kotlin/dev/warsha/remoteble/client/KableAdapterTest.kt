@@ -7,7 +7,6 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import com.juul.kable.Peripheral
 import com.juul.kable.State
 import com.juul.kable.WriteType
-import java.net.ServerSocket
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -55,8 +54,6 @@ class KableAdapterTest {
         scope.cancel()
     }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
     private suspend fun connectedSession(port: Int): AgentSession {
         val session = DefaultAgentSession(
             WebSocketAgentTransport("ws://localhost:$port/agent", scope, httpClient),
@@ -77,8 +74,8 @@ class KableAdapterTest {
 
     @Test
     fun appLogicRunsUnchangedAgainstRemotePeripheral() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -96,8 +93,8 @@ class KableAdapterTest {
 
     @Test
     fun observeViaKableCharacteristicStreamsNotifications() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral: Peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -117,8 +114,8 @@ class KableAdapterTest {
 
     @Test
     fun negotiatedMtuFeedsMaximumWriteValueLength() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session, requestedMtu = 185)
@@ -142,8 +139,8 @@ class KableAdapterTest {
 
     @Test
     fun structuredShutdownReleasesRemotePeripheralAndLocalState() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             val peripheral = RemotePeripheral(DeviceHandle(StubBleBackend.DEVICE), session)
@@ -161,8 +158,8 @@ class KableAdapterTest {
 
     @Test
     fun factoryThreadsInjectedDispatcherIntoPeripheralScope() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
             // A provider whose `default` is a distinct, tracked dispatcher: prove the factory
@@ -189,8 +186,8 @@ class KableAdapterTest {
 
     @Test
     fun scannerEmitsRemoteAdvertisementsAndFactoryBuildsPeripheral() = runBlocking {
-        val port = freePort()
-        val server = AgentWebSocketServer(port, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady(port) }
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(StubBleBackend())).also { it.startAndAwaitReady() }
+        val port = server.resolvedPort
         try {
             val session = connectedSession(port)
 

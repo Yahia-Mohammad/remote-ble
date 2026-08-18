@@ -95,6 +95,11 @@ class AgentWebSocketServer(
     // leaving a SupervisorJob (and its exception handler) alive for the process's lifetime.
     private var engineJob: CoroutineScope? = null
     private val nextClientId = atomic(0L)
+
+    // The port [start] actually bound. Equal to [port] whenever that is nonzero; when a caller asks
+    // for port 0 the OS picks one and this is the only way to learn it. Held atomically because it
+    // is written on the starting coroutine and read from whichever thread wants the address.
+    private val boundPort = atomic(port)
     private val liveSessions = LiveSessionRegistry()
     private val failedAuthLimiter = FailedAuthLimiter()
     // Separate from the client-plane limiter so a brute-force against the management dashboard and a
@@ -109,6 +114,18 @@ class AgentWebSocketServer(
                 credentials.authenticate("Bearer $operatorToken") == null,
         ) { "operator token must be distinct from every client credential" }
     }
+
+    /**
+     * The port this server is listening on: [port] once bound, unless [port] was 0, in which case
+     * it is the ephemeral port the OS chose. Before a successful [start] it is whatever was asked
+     * for, so reading it early cannot silently look like a real address.
+     *
+     * Binding 0 and reading this back is the race-free way to get a free port. Probing for one
+     * first (`ServerSocket(0)`, note the port, close, bind it here) leaves a window in which
+     * anything on the host — including this process's own outbound connections, which draw from
+     * the same ephemeral range — can take the port and turn the bind into an [AgentBindException].
+     */
+    val resolvedPort: Int get() = boundPort.value
 
     /**
      * Starts the server and **does not return until the listening socket is actually bound**,
@@ -350,7 +367,10 @@ class AgentWebSocketServer(
             Logger.warn(LogTags.SERVER) { "bind did not complete within $BIND_TIMEOUT [$host:$port]" }
             throw AgentBindException(host, port, null)
         }
-        Logger.info(LogTags.SERVER) { "listening on $host:$port$path" }
+        // Authoritative only now: with port 0 the requested port describes nothing, and even with a
+        // fixed port this is what the engine reports rather than what was asked for.
+        boundPort.value = connectors.first().port
+        Logger.info(LogTags.SERVER) { "listening on $host:${boundPort.value}$path" }
     }
 
     private fun abandon(instance: EmbeddedServer<*, *>, engineScope: CoroutineScope) {

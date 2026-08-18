@@ -58,6 +58,8 @@ class BleAgentBackend(
             monitor = monitor,
             operatorScope = operatorScope,
             writePolicy = writePolicy,
+            // agentFormat is left to BleAgent's default (backend.handleFormat) — one source of
+            // truth for the format the wire's handles are in.
         ).start()
 }
 

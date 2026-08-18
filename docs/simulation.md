@@ -31,7 +31,8 @@ The top-level shape is:
 }
 ```
 
-- `id` is the stable remote device handle (`[A-Za-z0-9._-]`, up to 128 characters).
+- `id` is the stable remote device handle (`[A-Za-z0-9._-]`, up to 128 characters). It is a
+  simulation identity, not a platform one — see [Handles and `.identifier`](#handles-and-identifier).
 - `advertisement` accepts `name`, `serviceUuids`, `rssi`, optional `rssiJitter`, and `intervalMs`
   (50–60,000 ms). Short 16-/32-bit Bluetooth UUIDs expand to their standard base UUID.
 - `connect` accepts `latencyMs`, `failFirst`, and optional `dropAfterMs`. The latter produces one
@@ -43,6 +44,35 @@ The top-level shape is:
   are even-length hexadecimal with a 512-byte maximum; sequence values loop and counters are
   big-endian integers (`start`, `step`, `widthBytes` 1–4). `notify` supplies an `intervalMs` and a
   value source. `write` supplies `accept` and optional `storesValue` readback behavior.
+
+## Handles and `.identifier`
+
+A profile `id` like `sim-hrm-1` is deliberately readable, so it is not a valid platform identifier
+on any host (a macOS UUID, a Windows MAC, a Linux bluez id). The simulated backend therefore
+declares `IdentifierFormat.STRING` — the same thing Android's radio declares — and the ordinary
+`identifier.translate` handshake takes it from there:
+
+| Client | Handle it sees | `.identifier` |
+| --- | --- | --- |
+| Android, or any `STRING` client | the profile `id` verbatim | works (Android holds any string) |
+| Apple, macOS-host JVM, Windows-host JVM | a synthesized UUID/MAC, deterministic per `id` | works |
+| Linux-host JVM | the profile `id` verbatim | throws `RemoteIdentifierUnavailableException` |
+
+Two preconditions apply to the middle row, and they are the ordinary translation rules rather than
+anything simulation-specific: the client must negotiate `identifier.translate` (the bundled client
+SDK requests it by default), and the agent's strict mode must be off. Under strict mode the agent
+deliberately stops rewriting so a format mismatch surfaces on the client instead of being papered
+over — against a simulated agent that means the profile `id` reaches a client that cannot parse it.
+
+The last row is the pre-existing stubbed `BLUEZ_JSON` synthesizer described in
+[`HandleTranslator`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/HandleTranslator.kt),
+not something simulation-specific; it applies to a real cross-platform agent the same way.
+
+So don't hard-code a profile `id` on the client side — the portable identity is `.handle`
+(`DeviceHandle`), and it is what ops key off. Match on `advertisement.name` or a service UUID to
+find a simulated peripheral, exactly as you would against a real radio.
+
+## Capabilities
 
 **Backend-level**, the simulator models exactly one capability beyond the v1 baseline: connected
 RSSI. Descriptor, pairing, and connection-parameter operations remain unsupported, so those surfaces

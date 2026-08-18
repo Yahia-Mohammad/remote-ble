@@ -13,6 +13,7 @@ import dev.warsha.remoteble.protocol.ConnProfile
 import dev.warsha.remoteble.protocol.DescRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
+import dev.warsha.remoteble.protocol.IdentifierFormat
 import dev.warsha.remoteble.protocol.ScanFilter
 import dev.warsha.remoteble.protocol.ServiceNode
 import kotlinx.coroutines.flow.Flow
@@ -43,6 +44,18 @@ interface BleBackend {
      * [ErrorKind.UNSUPPORTED]). Defaults to none (the v1 baseline).
      */
     val capabilities: Set<String> get() = emptySet()
+
+    /**
+     * The [IdentifierFormat] the handles *this backend* mints are actually in. [HandleTranslator]
+     * reads it to decide whether a client's declared format can hold them as-is; getting it wrong
+     * silently disables translation and ships the client a handle it can't parse.
+     *
+     * Defaults to [agentIdentifierFormat] — the host radio's native format — which is right for
+     * every backend whose handles come from the radio. A backend that mints handles some other way
+     * must override it: [SimulatedBleBackend] declares [IdentifierFormat.STRING] because its
+     * handles are profile-declared strings, not radio ids, no matter which host it runs on.
+     */
+    val handleFormat: IdentifierFormat get() = agentIdentifierFormat()
 
     /**
      * A hot stream of unsolicited BLE drops the backend detects *natively* — e.g. Kable's

@@ -602,8 +602,20 @@ class DefaultAgentSession(
     /**
      * Best-effort handshake: announce our version range + capabilities. Not a [Command]
      * (no cid/reply matching) — the agent answers with a `ServerHello` that lands in the
-     * decode loop and populates [capabilities]. A send failure is ignored; the transport
-     * drop path will fire and a reconnect will re-handshake.
+     * decode loop and populates [capabilities].
+     *
+     * A send failure is **not** self-healing, which this used to claim it was. The old note said
+     * "the transport drop path will fire and a reconnect will re-handshake" — true only if the
+     * failure means the socket is dead. [WebSocketAgentTransport.send] wraps *any* throwable as a
+     * transport failure, so a send can fail with the socket still open: no drop fires, nothing
+     * re-sends, and the session waits for a `ServerHello` that will never arrive while
+     * [capabilities] stays null and readiness stays NEGOTIATING. That is indistinguishable, from
+     * the agent's side, from a client that never sent a hello at all — see
+     * [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12).
+     *
+     * It is still not thrown: the caller is a state-flow collector, and failing it would take the
+     * session's supervisor down over one connection. It is logged at `warn` instead, and the
+     * success line is only written when the frame actually went out.
      */
     private suspend fun sendHello() {
         val caps = clientCapabilities + ALWAYS_OFFERED_CAPABILITIES
@@ -614,10 +626,14 @@ class DefaultAgentSession(
                     ClientHello(capabilities = caps, identifierFormat = fmt),
                 ),
             )
+        }.onSuccess {
+            Logger.info(LogTags.SESSION) { "hello sent (caps=${caps.size}, fmt=$fmt)" }
         }.onFailure {
-            Logger.debug(LogTags.SESSION) { "sendHello failed: ${it.message}" }
+            Logger.warn(LogTags.SESSION) {
+                "hello NOT sent: ${it.message}. This session cannot negotiate and will not retry " +
+                    "on its own; capabilities stay unresolved until it reconnects."
+            }
         }
-        Logger.info(LogTags.SESSION) { "hello sent (caps=${caps.size}, fmt=$fmt)" }
     }
 
     private suspend fun failAllPending(kind: ErrorKind = ErrorKind.TRANSPORT_LOST) {

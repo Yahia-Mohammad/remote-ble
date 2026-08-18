@@ -192,19 +192,19 @@ class PeripheralRegistry(
         val lease = leases[handle]
         when {
             lease == null && leases.size >= maxSlots -> {
-                Logger.info(LogTags.REGISTRY) { "lease refused, no slot [dev=$handle owner=$clientKey]" }
+                Logger.info(LogTags.REGISTRY) { "lease refused, no slot [dev=$handle owner=${ClientCredentials.describeSessionKey(clientKey)}]" }
                 Acquisition.NoSlot
             }
             lease == null -> {
                 leases[handle] = Lease(clientKey, connected = false, graceJob = null)
                 publishOccupancy()
-                Logger.info(LogTags.REGISTRY) { "lease acquired [dev=$handle owner=$clientKey]" }
+                Logger.info(LogTags.REGISTRY) { "lease acquired [dev=$handle owner=${ClientCredentials.describeSessionKey(clientKey)}]" }
                 Acquisition.Granted(linkAlreadyLive = false)
             }
             lease.owner == clientKey -> {
                 lease.cancelGrace()
                 Logger.info(LogTags.REGISTRY) {
-                    "lease resumed [dev=$handle owner=$clientKey live=${lease.connected}]"
+                    "lease resumed [dev=$handle owner=${ClientCredentials.describeSessionKey(clientKey)} live=${lease.connected}]"
                 }
                 // Read under the same lock that cancelled the grace, so the answer cannot be
                 // invalidated between here and the caller's decision to skip the backend.

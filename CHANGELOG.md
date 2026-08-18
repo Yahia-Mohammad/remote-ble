@@ -37,6 +37,12 @@ protocol version: **1**.
   gains a per-platform table. No wire-protocol change: the agent's own format is never sent — only
   the client declares one, in `ClientHello.identifierFormat`, and this decides whether the agent
   rewrites a handle before putting it on the wire.
+- **The agent wrote raw NUL bytes into its log.** An ownership key joins principal and client id
+  with `\u0000`, and three lease log sites interpolated one directly, so `agent.log` was a binary
+  file: `file` reports `data`, and `grep` silently reports no match for strings that are plainly
+  present. Owners now render as `principal/clientId` at every lease log site. Found while
+  investigating [#12](https://github.com/Yahia-Mohammad/remote-ble/issues/12); the ownership key
+  itself is unchanged, so nothing on the wire or in lease behaviour moves.
 
 ## [0.11.0] - 2026-08-10
 

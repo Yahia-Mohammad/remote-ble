@@ -7,8 +7,11 @@ name: Agent artifacts
 # linux/darwin/win × x86_64+aarch64, so the one JAR runs on x86_64/ARM Linux, Apple Silicon, and
 # Windows), plus native agent-rs binaries for Linux x86_64, Linux aarch64 (Pi/ARM SBCs), and Windows
 # x86_64 — for devs who want a single-file agent without a JRE.
-# Not built here (by decision): macOS .app bundles (a bare binary can't hold CoreBluetooth/TCC — macOS
-# devs build from source via agent/run-agent.sh) and the on-device Android APK.
+# macOS ships as a universal RemoteBleAgentRs.app rather than a bare binary: TCC kills any process
+# that touches CoreBluetooth without an NSBluetoothAlwaysUsageDescription in its main bundle, and
+# honours the grant only when LaunchServices started the app. That is the same bundle
+# agent-rs/run-agent-rs.sh assembles locally, so the distributed and from-source paths match.
+# Not built here (by decision): the on-device Android APK.
 #
 # Runs automatically on a release tag, and can be dispatched manually against an existing tag
 # (e.g. to backfill) without pushing a tag. Note: pushing a `v*` tag builds+attaches these agent
@@ -170,6 +173,79 @@ jobs:
           files: |
             agent-rs/dist/remoteble-agent-rs-linux-aarch64
             agent-rs/dist/remoteble-agent-rs-linux-aarch64.sha256
+
+  agent-rs-macos:
+    needs: release-version
+    name: agent-rs (macOS universal .app)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: agent-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent-rs/target
+          key: ${{ runner.os }}-cargo-release-macos-universal-${{ hashFiles('agent-rs/Cargo.lock') }}
+
+      # Both architectures, so one asset serves Apple Silicon and Intel. The runner is arm64; the
+      # x86_64 half is an ordinary cross-compile with no extra toolchain.
+      - name: Build (release, both architectures)
+        run: |
+          cargo build --release --locked --bin agent-rs --target aarch64-apple-darwin
+          cargo build --release --locked --bin agent-rs --target x86_64-apple-darwin
+
+      # The bundle is the deliverable, not the binary. macOS resolves the Bluetooth usage
+      # description through the main bundle, and only honours a grant for an app LaunchServices
+      # started -- a loose executable in a bin directory gets neither, which is why this ships as
+      # an .app and is installed as a cask.
+      - name: Assemble RemoteBleAgentRs.app
+        run: |
+          set -euo pipefail
+          app="dist/RemoteBleAgentRs.app"
+          rm -rf dist && mkdir -p "$app/Contents/MacOS"
+          cp macos/Info.plist "$app/Contents/Info.plist"
+          lipo -create -output "$app/Contents/MacOS/agent-rs" \
+            target/aarch64-apple-darwin/release/agent-rs \
+            target/x86_64-apple-darwin/release/agent-rs
+          lipo -info "$app/Contents/MacOS/agent-rs"
+          # Ad-hoc, matching run-agent-rs.sh. TCC keys a grant to the signature, so each new build
+          # is a new identity and the Bluetooth prompt returns after an upgrade. A Developer ID
+          # signature would make the identity stable; that needs an Apple account and secrets, and
+          # is deliberately not half-built here.
+          codesign -f -s - --identifier com.warsha.remoteble.agent-rs "$app/Contents/MacOS/agent-rs"
+          codesign -f -s - "$app"
+          codesign --verify --strict --verbose=2 "$app"
+
+      - name: Stage the archive
+        run: |
+          set -euo pipefail
+          cd dist
+          # `ditto` keeps the bundle's permissions and signature intact; a plain `zip` does not.
+          ditto -c -k --sequesterRsrc --keepParent RemoteBleAgentRs.app remoteble-agent-rs-macos-universal.app.zip
+          shasum -a 256 remoteble-agent-rs-macos-universal.app.zip > remoteble-agent-rs-macos-universal.app.zip.sha256
+          rm -rf RemoteBleAgentRs.app
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            agent-rs/dist/remoteble-agent-rs-macos-universal.app.zip
+            agent-rs/dist/remoteble-agent-rs-macos-universal.app.zip.sha256
 
   agent-rs-windows:
     needs: release-version

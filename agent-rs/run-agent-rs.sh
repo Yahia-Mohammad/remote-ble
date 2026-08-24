@@ -142,7 +142,7 @@ if [ "$OS" = "Darwin" ]; then
   # Embed the Info.plist into the Mach-O too, so TCC sees it however it resolves the
   # responsible binary, then ad-hoc sign (TCC keys a permission grant to the signature).
   codesign -f -s - \
-    --identifier com.warsha.remoteble.agent-rs \
+    --identifier dev.warsha.remoteble.agent-rs \
     "$APP/Contents/MacOS/agent-rs" >/dev/null 2>&1 || true
   codesign -f -s - "$APP" >/dev/null 2>&1 || true
 

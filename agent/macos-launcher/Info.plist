@@ -5,7 +5,7 @@
   <key>CFBundleExecutable</key>
   <string>agent-launcher</string>
   <key>CFBundleIdentifier</key>
-  <string>com.warsha.remoteble.agent</string>
+  <string>dev.warsha.remoteble.agent</string>
   <key>CFBundleName</key>
   <string>RemoteBleAgent</string>
   <key>CFBundlePackageType</key>

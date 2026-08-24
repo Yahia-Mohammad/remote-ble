@@ -226,7 +226,7 @@ jobs:
           # is a new identity and the Bluetooth prompt returns after an upgrade. A Developer ID
           # signature would make the identity stable; that needs an Apple account and secrets, and
           # is deliberately not half-built here.
-          codesign -f -s - --identifier com.warsha.remoteble.agent-rs "$app/Contents/MacOS/agent-rs"
+          codesign -f -s - --identifier dev.warsha.remoteble.agent-rs "$app/Contents/MacOS/agent-rs"
           codesign -f -s - "$app"
           codesign --verify --strict --verbose=2 "$app"
 

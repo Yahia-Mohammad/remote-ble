@@ -3,6 +3,7 @@ package dev.warsha.remoteble.client
 import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.CborProtocolCodec
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -32,7 +33,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 class HelloSendFailureLogTest {
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val captured = mutableListOf<String>()
+    // The sink runs on the agent's and transport's threads while the test polls it.
+    private val captured = CopyOnWriteArrayList<String>()
 
     @AfterTest
     fun tearDown() {

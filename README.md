@@ -99,7 +99,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.12.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.13.0")
 }
 ```
 
@@ -107,11 +107,12 @@ dependencies {
 > README shows the version actually resolvable right now** — if you're reading between a version
 > bump and its Central publish, use that number.
 
-Upgrading? Read the concise [0.12.0 migration guide](docs/migrate-to-0.12.0.md) — no source change
-is required unless you hard-code a simulation profile's id. Coming from 0.10.x, read the
-[0.11.0 guide](docs/migrate-to-0.11.0.md) too, where two agent defaults move; from older than
-0.10.0, start with the [0.10.0 guide](docs/migrate-to-0.10.0.md) and its breaking `authToken`
-provider change.
+Upgrading? Read the concise [0.13.0 migration guide](docs/migrate-to-0.13.0.md) — no source change
+is required; an Android app reaching a `ws://` agent now gets a named failure instead of a silent
+retry loop. From 0.11.x, read the [0.12.0 guide](docs/migrate-to-0.12.0.md) too, which matters if
+you hard-code a simulation profile's id; from 0.10.x, the [0.11.0 guide](docs/migrate-to-0.11.0.md),
+where two agent defaults move; from older than 0.10.0, start with the
+[0.10.0 guide](docs/migrate-to-0.10.0.md) and its breaking `authToken` provider change.
 
 **iOS** is covered by the same coordinate: it's a Kotlin Multiplatform publication, so an
 iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) resolves the
@@ -393,8 +394,8 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 
 ## Status
 
-0.10.0 shipped on 2026-08-04 and 0.11.0 on 2026-08-10, each with a tag, GitHub Release, GHCR image
-and Maven Central. **0.12.0 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
+0.10.0 shipped on 2026-08-04, 0.11.0 on 2026-08-10 and 0.12.0 on 2026-08-18, each with a tag,
+GitHub Release, GHCR image and Maven Central. **0.13.0 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
 unchanged against a `RemotePeripheral` talking to an agent over WebSocket — connect, discover,
 read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
 complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
@@ -405,7 +406,12 @@ found, are in [`docs/`](docs/). One boundary is worth stating plainly rather tha
 detail: the container was validated on **one amd64 Linux host**, so arm64, AppArmor,
 SELinux-enforcing and rootless Podman are *not* covered, and the image is labelled accordingly.
 
-0.12.0 corrects the identifier format a **simulated** agent declares — it reported the host radio's,
+0.13.0 widens where the client SDK runs: a native **macOS** target, Android consumers back on
+compileSdk 36, and a plain `ws://` agent reachable from an Android app with no network security
+config through `cioWebSocketHttpClient()` — see
+[`docs/migrate-to-0.13.0.md`](docs/migrate-to-0.13.0.md).
+
+0.12.0 corrected the identifier format a **simulated** agent declares — it reported the host radio's,
 so a client on a matching host was handed a handle no platform parser accepts — and makes two silent
 failure modes speak: a connection that never completes its handshake, and a `ClientHello` that fails
 to send. See [`docs/migrate-to-0.12.0.md`](docs/migrate-to-0.12.0.md); the one behaviour change

@@ -18,6 +18,68 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-29
+
+> A reach release for the **client SDK**: it now runs on macOS, it no longer forces Android
+> consumers onto the newest compileSdk, and a plain `ws://` agent works from an Android app with no
+> network security config. The wire protocol version is unchanged at **1**.
+>
+> **One behaviour change, and only where nothing could have worked:** when the platform refuses a
+> cleartext connection, `WebSocketAgentTransport` now goes `GAVE_UP` at once and `connect()` throws
+> `CleartextTrafficNotPermittedException`, instead of retrying a refusal that can never succeed —
+> see [`docs/migrate-to-0.13.0.md`](docs/migrate-to-0.13.0.md).
+>
+> This is a **minor** release: it adds targets and public API.
+
+### Added
+
+- **macOS client.** `log`, `protocol` and `client-sdk` publish `macosArm64` klibs (Apple Silicon;
+  no Intel target, matching the absence of `iosX64`). The Apple actuals moved from `iosMain` to
+  `appleMain`, so iOS and macOS share one implementation: Ktor's Darwin engine, Kable's `Uuid`
+  identifier and the characteristic-equality workaround. The commonTest suites now run on
+  `macosArm64` in CI, and a native macOS executable was driven through a scan, connect, two reads,
+  a write and a notification against the simulated agent — see
+  [#22](https://github.com/Yahia-Mohammad/remote-ble/issues/22).
+- **`cioWebSocketHttpClient()`** (Android) — a WebSocket client on Ktor's CIO engine, whose plain
+  sockets Android's cleartext policy does not govern. Pass it to `WebSocketAgentTransport` to reach
+  a `ws://` agent from an app that has not opted into cleartext. CIO's TLS stops at 1.2, so keep
+  the default client for `wss://` behind a TLS 1.3-only proxy.
+- **`CleartextTrafficNotPermittedException`** — what `connect()` now throws when the platform
+  refuses a cleartext connection, carrying the URL and a message that names the three fixes.
+- **A macOS agent app bundle** among the release assets: `remoteble-agent-rs-macos-universal.app.zip`
+  holds the same signed `RemoteBleAgentRs.app` that `run-agent-rs.sh` assembles, as one universal
+  binary, since a bare macOS binary cannot hold Bluetooth permission.
+
+### Changed
+
+- **The Android AARs declare `minCompileSdk` 36, not 37.** AGP wrote the library's own compileSdk
+  there because nothing set it, so 0.12.0 made every consumer compile against API 37. 36 is the real
+  floor: Kable depends on `androidx.core` 1.18, whose AAR already requires it. The Android consumer
+  gate now compiles at 36 and runs `checkDebugAarMetadata`, which is where the metadata is read —
+  see [#24](https://github.com/Yahia-Mohammad/remote-ble/issues/24).
+- **A cleartext refusal is no longer retried.** OkHttp, the Android default engine, enforces the
+  app's network security policy, which forbids `ws://` from targetSdk 28. The refusal used to fold
+  into the reconnect loop and look like an unreachable agent retried forever; it now logs at ERROR,
+  sets `GAVE_UP`, fires `ReconnectPolicy.onGaveUp`, and throws from `connect()` — see
+  [#23](https://github.com/Yahia-Mohammad/remote-ble/issues/23).
+- **macOS agent bundle identifiers moved to `dev.warsha.*`**, matching the packages and Maven group.
+  The agent's macOS Bluetooth grant is keyed on the identifier, so the first launch after upgrading
+  prompts again; that is expected.
+
+### Fixed
+
+- **`./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json"` works as
+  documented.** The task ran in `agent/`, so a profile or policy path written relative to the
+  repository root failed with `NoSuchFileException`; it now runs from the root.
+
+### Security
+
+- **netty in AGP's test tooling raised to 4.1.138.Final.** AGP's Unified Test Platform pulled
+  netty 4.1.93 and 4.1.110 through `grpc-netty`, both inside GHSA-c4c3-7fpv-j4q5 (critical) and
+  four high advisories fixed in 4.1.137. It is host-side instrumented-test tooling that never
+  ships in an APK or a published artifact, so no consumer was exposed; the pin removes it from the
+  scanned dependency graph.
+
 ## [0.12.0] - 2026-08-18
 
 > A correctness release for **simulated agents** and a diagnosability release for everything else.
@@ -715,6 +777,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.13.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.10.0

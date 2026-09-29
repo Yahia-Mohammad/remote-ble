@@ -91,9 +91,9 @@ jobs:
           echo "Verifying version $version under $repo"
           missing=0
           for artifact in \
-            protocol protocol-jvm protocol-android protocol-iosarm64 protocol-iossimulatorarm64 \
-            log log-jvm log-android log-iosarm64 log-iossimulatorarm64 \
-            client-sdk client-sdk-jvm client-sdk-android client-sdk-iosarm64 client-sdk-iossimulatorarm64
+            protocol protocol-jvm protocol-android protocol-iosarm64 protocol-iossimulatorarm64 protocol-macosarm64 \
+            log log-jvm log-android log-iosarm64 log-iossimulatorarm64 log-macosarm64 \
+            client-sdk client-sdk-jvm client-sdk-android client-sdk-iosarm64 client-sdk-iossimulatorarm64 client-sdk-macosarm64
           do
             dir="$repo/$artifact/$version"
             if [ -d "$dir" ]; then

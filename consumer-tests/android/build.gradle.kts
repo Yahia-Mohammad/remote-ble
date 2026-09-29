@@ -15,9 +15,12 @@ val remoteBleVersion = providers.gradleProperty("remoteBleVersion").orNull
 // The Android variant of a KMP publication resolves through a separate `*-android` module and an
 // `.aar`, selected by Gradle metadata attributes the JVM consumer never exercises. A closure that is
 // complete for `jvm` can still be broken here, so this is a distinct gate rather than a duplicate.
+// compileSdk sits one below the SDK's own on purpose: a consumer must not be forced up to whatever
+// the SDK happens to compile against. 36 is the floor the SDK's AAR metadata declares (Kable's
+// androidx.core requires it anyway); the gate runs `checkDebugAarMetadata` to hold it there.
 android {
     namespace = "dev.warsha.remoteble.consumer.android"
-    compileSdk = 37
+    compileSdk = 36
     defaultConfig {
         minSdk = 24
     }

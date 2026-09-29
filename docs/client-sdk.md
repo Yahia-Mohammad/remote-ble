@@ -217,6 +217,14 @@ expect fun defaultWebSocketHttpClient(): HttpClient   // commonMain
 This is a convenience only — the transport accepts any `HttpClient { install(WebSockets) }`,
 so an app needing proxy/TLS-pinning/timeout config builds its own and hands it in.
 
+**Android cleartext.** OkHttp enforces the app's network security policy, which forbids `ws://`
+by default from targetSdk 28. The refusal is not retried: `connect()` throws
+`CleartextTrafficNotPermittedException`, the transport goes `GAVE_UP`, and the reason is logged at
+ERROR. For a plain `ws://` agent, Android also offers
+[`cioWebSocketHttpClient()`](../client-sdk/src/androidMain/kotlin/dev/warsha/remoteble/client/CioWebSocketClient.kt),
+a CIO client on plain sockets the policy does not govern. Its TLS stack stops at TLS 1.2, so keep
+the default for `wss://` behind a TLS 1.3-only proxy.
+
 ---
 
 ## Layer 2 — Session (`AgentSession`)
@@ -770,7 +778,7 @@ Logger.level = LogLevel.DEBUG
 
 | Level | What | Where |
 |---|---|---|
-| **ERROR** | Reconnect gave up; initial connect failed (reconnect disabled) | `WebSocketAgentTransport` |
+| **ERROR** | Reconnect gave up; initial connect failed (reconnect disabled); cleartext refused by the platform's network security policy | `WebSocketAgentTransport` |
 | **WARN** | Reconnect attempt N failed (backing off); sendCommand transport error; **hello NOT sent** (the session cannot negotiate and will not retry) | `WebSocketAgentTransport`, `DefaultAgentSession` |
 | **INFO** | CONNECTED / DISCONNECTED; transport lost; reconciled N connections/subs/scans in Xms; hello sent (**only when it actually went out**); negotiated caps | `WebSocketAgentTransport`, `DefaultAgentSession`, `RemotePeripheral` |
 | **DEBUG** | Request ok / failed / retry; sendCommand not connected; fireAndForget failure; MTU failure; cleanup/teardown; WWR burst item failure | `DefaultAgentSession`, `RemotePeripheral` |

@@ -54,6 +54,23 @@ the whole point of RemoteBLE. Full walkthrough with expected output at every ste
 [getting-started.md](docs/getting-started.md); every public class in
 [client-sdk.md](docs/client-sdk.md).
 
+> **Android and plain `ws://`.** From targetSdk 28, Android's network security policy forbids
+> cleartext traffic unless the app opts in, and `defaultWebSocketHttpClient()` runs on OkHttp, which
+> enforces it. An app with no network security config therefore cannot reach a `ws://` agent through
+> the default client: `connect()` throws `CleartextTrafficNotPermittedException` and the transport
+> goes `GAVE_UP` without retrying. Pass the CIO-backed client instead, which uses plain sockets the
+> policy does not govern:
+>
+> ```kotlin
+> val transport = WebSocketAgentTransport("ws://192.168.1.20:8080/agent", scope, cioWebSocketHttpClient())
+> ```
+>
+> With the Koin module, override the binding:
+> `modules(remoteBleClientModule(config), module { single<HttpClient> { cioWebSocketHttpClient() } })`.
+> The alternatives are a network security config that permits cleartext for the agent's host (the
+> repo's `android-client` does this for the emulator's `10.0.2.2`), or reaching the agent over
+> `wss://` through a [TLS proxy](docs/tls-proxy-recipe.md).
+
 ## System at a glance
 
 RemoteBLE has three core parts:
@@ -100,6 +117,11 @@ provider change.
 iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) resolves the
 `iosArm64`/`iosSimulatorArm64` klibs from Central automatically. There is no separate
 Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
+
+**Android** consumers need `compileSdk` 36 or later and `minSdk` 24 or later. The compileSdk floor
+is not the SDK's own: Kable depends on `androidx.core` 1.18, whose AAR already demands 36, and the
+SDK's AARs declare the same floor rather than their own compileSdk (37). On AGP 9, also put KGP 2.4+
+on the build classpath — see [build-and-testing.md](docs/build-and-testing.md#common-commands).
 
 **macOS** works the same way through the `macosArm64` klibs (Apple Silicon; no Intel target).
 Driving a device through an agent needs no Bluetooth permission, because the client never touches
@@ -202,7 +224,7 @@ the accepted security/lifecycle hardening. The future
 | kotlinx-coroutines | 1.11.0 |
 | kotlinx-serialization (+cbor) | 1.9.0 |
 | Gradle | 9.5.1 (wrapper) |
-| Android Gradle Plugin | 9.2.1 (compileSdk 37, minSdk 24) |
+| Android Gradle Plugin | 9.3.0 (compileSdk 37, minSdk 24; consumers need compileSdk 36+) |
 | JDK toolchain | 17 |
 | Kable | `com.juul.kable:kable-core:0.43.1` (Maven Central) — powers **both** the client SDK and the JVM agent's radio engine (the JVM `btleplug` backend ships in this release) |
 

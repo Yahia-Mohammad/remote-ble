@@ -76,11 +76,17 @@ independently — a closure that is complete for one can be broken for another.
 ./gradlew -p consumer-tests/jvm     clean compileKotlin        -PremoteBleVersion=0.10.0
 ./gradlew -p consumer-tests/kmp     compileKotlinIosArm64 compileKotlinIosSimulatorArm64 \
   -PremoteBleVersion=0.10.0
-ANDROID_HOME=<sdk> ./gradlew -p consumer-tests/android compileDebugKotlin -PremoteBleVersion=0.10.0
+ANDROID_HOME=<sdk> ./gradlew -p consumer-tests/android checkDebugAarMetadata compileDebugKotlin \
+  -PremoteBleVersion=0.10.0
 ```
 
 Each fixture is a standalone Gradle build resolving **coordinates only**, never a project dependency,
 and each fails on an unpublished version — verified, so the gates have teeth.
+
+The Android fixture compiles at `compileSdk 36`, one below the SDK's own, and runs
+`checkDebugAarMetadata`: the AARs' `minCompileSdk` metadata is only read there, never by a compile.
+0.12.0 failed it, forcing every consumer onto 37; the floor is now pinned by `android-minCompile` in
+the version catalog.
 
 > **Android consumers on AGP 9 must put KGP 2.4+ on the build classpath.** AGP 9.3.0's *built-in*
 > Kotlin compiler is 2.2.0, which reads metadata only up to 2.3.0, while this SDK publishes 2.4.0

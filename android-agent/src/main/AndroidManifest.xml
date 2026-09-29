@@ -16,6 +16,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <!-- The AgentWebSocketServer + dashboard listen on a plain TCP socket. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- API 37+, runtime-requested (see MainActivity). Without it an app targeting 37 can neither
+         accept nor open local-network connections: the listener binds and loopback works, but
+         nothing else on the Wi-Fi gets an answer, not even a TCP handshake. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <!-- LanAddress reads the active network's LinkProperties to show the agent's ws:// address. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Fallback IPv4 source (WifiManager) on OS/network combos where LinkProperties omits it. -->

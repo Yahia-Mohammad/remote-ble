@@ -60,7 +60,7 @@ jobs:
       # :agent applies the Android KMP library plugin, so configuring the project needs the SDK
       # even though jvmFatJar only touches the jvm() target.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Build fat JAR
         run: ./gradlew :agent:jvmFatJar --no-configuration-cache

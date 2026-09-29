@@ -12,7 +12,7 @@ plugins {
 kotlin {
     jvmToolchain(libs.versions.jvm.toolchain.get().toInt())
 
-    // v1 client targets are Android + iOS; JVM is kept for fast tests of the
+    // Client targets are Android, iOS and macOS; JVM is kept for fast tests of the
     // session/transport layers (which are BLE-agnostic). Each target supplies its own
     // Ktor engine for the default HttpClient (see WebSocketClient.<platform>.kt).
     jvm()
@@ -27,6 +27,10 @@ kotlin {
     // Central Portal monthly file-count quota (see ai-context/maven-central-publish-footprint notes).
     iosArm64()
     iosSimulatorArm64()
+    // A native macOS client (Apple Silicon). Every Apple actual lives in appleMain: CoreBluetooth,
+    // NSURLSession and Kable's Apple identifier are the same on both platforms. No macosX64, for
+    // the same quota reason as iosX64.
+    macosArm64()
 
     sourceSets {
         commonMain.dependencies {
@@ -52,7 +56,7 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)
         }
-        iosMain.dependencies {
+        appleMain.dependencies {
             implementation(libs.ktor.client.darwin)
         }
         commonTest.dependencies {

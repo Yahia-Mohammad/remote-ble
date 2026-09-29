@@ -29,6 +29,8 @@ kotlin {
     // ai-context/maven-central-publish-footprint notes).
     iosArm64()
     iosSimulatorArm64()
+    // Apple Silicon Macs only, for a native macOS client; no macosX64 for the same quota reason.
+    macosArm64()
 
     sourceSets {
         commonMain.dependencies {

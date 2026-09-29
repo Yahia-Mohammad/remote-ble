@@ -212,7 +212,7 @@ expect fun defaultWebSocketHttpClient(): HttpClient   // commonMain
 |---|---|---|
 | JVM | CIO | [`WebSocketClient.jvm.kt`](../client-sdk/src/jvmMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.jvm.kt) |
 | Android | OkHttp | [`WebSocketClient.android.kt`](../client-sdk/src/androidMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.android.kt) |
-| iOS | Darwin (NSURLSession) | [`WebSocketClient.ios.kt`](../client-sdk/src/iosMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.ios.kt) |
+| iOS, macOS | Darwin (NSURLSession) | [`WebSocketClient.apple.kt`](../client-sdk/src/appleMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.apple.kt) |
 
 This is a convenience only — the transport accepts any `HttpClient { install(WebSockets) }`,
 so an app needing proxy/TLS-pinning/timeout config builds its own and hands it in.

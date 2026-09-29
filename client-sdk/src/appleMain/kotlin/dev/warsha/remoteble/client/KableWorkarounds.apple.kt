@@ -12,7 +12,7 @@ import com.juul.kable.PeripheralBuilder
  *
  * Rig B measured exactly that against the iOS *agent* and fixed it there
  * (`agent/.../PeripheralByIdentifier.ios.kt`). The same defect is reachable from this module, whose
- * [BleMode.LOCAL] path builds an ordinary Kable peripheral against the client's own radio — an iOS
+ * [BleMode.LOCAL] path builds an ordinary Kable peripheral against the client's own radio — an iOS or macOS
  * app using LOCAL mode hits it with no agent involved. Apple is the only target where the option is
  * read back at all: the Android and JVM factories drop it and hardcode reference equality.
  */

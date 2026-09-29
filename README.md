@@ -77,7 +77,7 @@ Kotlin agent.
 ## Installation
 
 The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client-sdk`
-(Kotlin Multiplatform: JVM, Android, iOS). It pulls `:protocol` and Kable transitively.
+(Kotlin Multiplatform: JVM, Android, iOS, macOS). It pulls `:protocol` and Kable transitively.
 
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
@@ -101,6 +101,11 @@ iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) res
 `iosArm64`/`iosSimulatorArm64` klibs from Central automatically. There is no separate
 Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
 
+**macOS** works the same way through the `macosArm64` klibs (Apple Silicon; no Intel target).
+Driving a device through an agent needs no Bluetooth permission, because the client never touches
+CoreBluetooth. `BleMode.LOCAL` does, and macOS only grants that to a signed app bundle that declares
+`NSBluetoothAlwaysUsageDescription` — the same [TCC rule](#macos-tcc) as the agent.
+
 The **agent** is run from a prebuilt binary ([download from a release](https://github.com/Yahia-Mohammad/remote-ble/releases/latest))
 or from source (`agent/run-agent.sh`, the `agent-rs` binary, or the phone apps), not consumed as a
 dependency — see [Running the agent](#running-the-agent).
@@ -122,7 +127,7 @@ dependency — see [Running the agent](#running-the-agent).
 ## Features
 
 - **Minimal changes for Kable apps** — remote is a construction choice, not an app-code change (proven by `KableAdapterTest`).
-- **Multiplatform** — client on JVM/Android/iOS; agents on macOS/Linux (JVM *or* native Rust), Android, and iOS.
+- **Multiplatform** — client on JVM/Android/iOS/macOS; agents on macOS/Linux (JVM *or* native Rust), Android, and iOS.
 - **Lightweight agent** — one self-bootstrapping script to run; the Rust agent is a single native binary, and phones run it from an app.
 - **Full GATT surface over the wire** — scan, connect, discover, read, write, observe (notify), descriptors, MTU, pairing, connection priority, connection slots, batched scan.
 - **Multi-client with exclusive peripheral ownership** — one agent serves many clients; each
@@ -172,9 +177,9 @@ the accepted security/lifecycle hardening. The future
 
 | Module | Role | Deps |
 |---|---|---|
-| `:log` | Shared multiplatform logging facade used across the Kotlin components | No external dependencies. Targets: JVM + Android + iOS |
-| `:protocol` | The wire contract (`Frame`/`Op`/`OpResult`/`AgentEvent`) + CBOR/JSON codec | kotlinx-serialization only — **no BLE/network**. Targets: JVM + Android + iOS |
-| `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, `:log`, coroutines, Kable. Targets: JVM (tests) + Android + iOS |
+| `:log` | Shared multiplatform logging facade used across the Kotlin components | No external dependencies. Targets: JVM + Android + iOS + macOS |
+| `:protocol` | The wire contract (`Frame`/`Op`/`OpResult`/`AgentEvent`) + CBOR/JSON codec | kotlinx-serialization only — **no BLE/network**. Targets: JVM + Android + iOS + macOS |
+| `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, `:log`, coroutines, Kable. Targets: JVM (tests) + Android + iOS + macOS |
 | `:agent` | Remote Bluetooth agent (Kotlin) + live status dashboard + a Compose Multiplatform status UI (Android/iOS). Run via `agent/run-agent.sh` (JVM) or the `android-agent`/`ios-agent` apps | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform. Targets: JVM + Android + iOS |
 | `agent-rs` | Native cross-platform Bluetooth agent (Rust 2024). Run via the self-bootstrapping `run-agent-rs.sh` | tokio, tokio-tungstenite, btleplug, serde/ciborium. Targets: macOS + Linux |
 | `:e2e-runner` | Live E2E runner (`jvmRun`) + radio-less scan smoke test (`scanRun`) | `:client-sdk` (JVM). See [README](e2e-runner/README.md) |

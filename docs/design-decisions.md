@@ -423,7 +423,7 @@ class of assumption that has cost this project real defects.
 What follows from it:
 
 - **`forceCharacteristicEqualityByUuid = true` is set on Apple only**, in
-  `agent/…/PeripheralByIdentifier.ios.kt` and `client-sdk/…/KableWorkarounds.ios.kt`. CoreBluetooth
+  `agent/…/PeripheralByIdentifier.ios.kt` and `client-sdk/…/KableWorkarounds.apple.kt`. CoreBluetooth
   can hand back a different `CBCharacteristic` instance than the one an operation was issued
   against, so Kable's default reference comparison never matches the completion and the operation
   suspends forever. Android and the JVM ignore the option, and correctly so: their stacks return the

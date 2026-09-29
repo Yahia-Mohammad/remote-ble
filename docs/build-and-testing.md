@@ -11,18 +11,19 @@ compile checks) and [`.github/workflows/rust.yml`](../.github/workflows/rust.yml
 
 | Module | Targets | Plugin set |
 |---|---|---|
-| [`:log`](../log/build.gradle.kts) | JVM, Android, iOS (arm64/sim) | `kotlin.multiplatform`, `android.kotlin.multiplatform.library` |
-| [`:protocol`](../protocol/build.gradle.kts) | JVM, Android, iOS (arm64/x64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library` |
-| [`:client-sdk`](../client-sdk/build.gradle.kts) | JVM (tests), Android, iOS (arm64/x64/sim) | same |
+| [`:log`](../log/build.gradle.kts) | JVM, Android, iOS (arm64/sim), macOS (arm64) | `kotlin.multiplatform`, `android.kotlin.multiplatform.library` |
+| [`:protocol`](../protocol/build.gradle.kts) | JVM, Android, iOS (arm64/sim), macOS (arm64) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library` |
+| [`:client-sdk`](../client-sdk/build.gradle.kts) | JVM (tests), Android, iOS (arm64/sim), macOS (arm64) | same |
 | [`:agent`](../agent/build.gradle.kts) | JVM, Android, iOS (arm64/sim) | `kotlin.multiplatform`, `kotlin.serialization`, `android.kotlin.multiplatform.library`, Compose Multiplatform |
 | [`:e2e-runner`](../e2e-runner/build.gradle.kts) | JVM only | `kotlin.multiplatform` |
 | [`:android-client`](../android-client/build.gradle.kts) | Android app | `com.android.application` (AGP 9 built-in Kotlin — no separate kotlin-android) |
 | [`:android-agent`](../android-agent/build.gradle.kts) | Android app | same as `:android-client` |
 
-`:protocol` is pure `commonMain`, so its Android/iOS targets add **no source** — they
+`:protocol` is pure `commonMain`, so its Android/Apple targets add **no source** — they
 just publish the klibs the client SDK consumes. `:client-sdk` keeps a `jvm()` target
 **only for fast tests** (the session/transport/adapters are BLE-agnostic); the shipping
-targets are Android + iOS. `:agent` targets all three — JVM for a host beside the device
+targets are Android, iOS and macOS. Every Apple actual lives in `appleMain`, shared by iOS and
+macOS: CoreBluetooth, NSURLSession and Kable's `Uuid` identifier are the same on both. `:agent` targets all three — JVM for a host beside the device
 (radio engine: Kable's JVM `btleplug` backend), Android/iOS for the phone itself as the
 agent (radio engine: Kable's own native Android BLE / CoreBluetooth backends, no
 `btleplug`). Its Compose UI + mobile entry points (`AgentRunner`, `AgentService`,
@@ -38,12 +39,12 @@ client-sdk/src/
   commonMain/…/WebSocketClient.kt          expect fun defaultWebSocketHttpClient()
   jvmMain/…/WebSocketClient.jvm.kt          actual → Ktor CIO
   androidMain/…/WebSocketClient.android.kt  actual → Ktor OkHttp
-  iosMain/…/WebSocketClient.ios.kt          actual → Ktor Darwin
+  appleMain/…/WebSocketClient.apple.kt      actual → Ktor Darwin (iOS + macOS)
 
   commonMain/…/RemoteIdentifier.kt         expect fun deviceHandleToIdentifier(value)
   jvmMain/…/RemoteIdentifier.jvm.kt         actual → value.toIdentifier() (opaque PeripheralId)
   androidMain/…/RemoteIdentifier.android.kt actual → the String as-is (no MAC check)
-  iosMain/…/RemoteIdentifier.ios.kt         actual → Uuid.parse(value)
+  appleMain/…/RemoteIdentifier.apple.kt     actual → Uuid.parse(value) (iOS + macOS)
 ```
 
 ## Common commands
@@ -154,6 +155,11 @@ tasks.matching { it.name.contains("Test") && it.name.contains("ios", ignoreCase 
 The shared logic is fully covered by the JVM suite (and would run on iOS once a
 simulator toolchain is selected). To re-enable: `sudo xcode-select -s
 /Applications/Xcode.app` and drop those two blocks.
+
+**macOS is the exception.** A `macosArm64` test executable runs directly on the host, with no
+simulator, and the name filter above does not match it. CI's macOS job runs
+`:log:macosArm64Test :protocol:macosArm64Test :client-sdk:macosArm64Test`, so the commonTest
+suites execute natively on an Apple target on every push.
 
 ## The test suite
 

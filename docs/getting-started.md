@@ -140,6 +140,7 @@ val transport = WebSocketAgentTransport(
     url = "ws://192.168.1.50:8080/agent",   // the agent host
     scope = scope,
     httpClient = defaultWebSocketHttpClient(),  // platform engine (JVM CIO / Android OkHttp / iOS Darwin)
+                                                // Android + ws://: cioWebSocketHttpClient(), see below
     authToken = { "s3cr3t" },                // suspend provider; omit if the agent has no auth
 )
 
@@ -340,6 +341,12 @@ import io.ktor.client.plugins.websocket.*
 val httpClient = HttpClient(/* your engine */) { install(WebSockets) }
 val transport = WebSocketAgentTransport(url, scope, httpClient)
 ```
+
+**Android and `ws://`.** The Android default is OkHttp, which honours the app's network security
+policy — and that forbids cleartext from targetSdk 28 unless the app opts in. Without an opt-in,
+`connect()` throws `CleartextTrafficNotPermittedException` rather than retrying. Pass
+`cioWebSocketHttpClient()` (plain sockets, outside the policy) or add a network security config
+that permits cleartext for the agent's host.
 
 **Bursting write-without-response writes.** A serial loop of `peripheral.write(char, data,
 WriteType.WithoutResponse)` pays one full client↔agent round trip per write — fine for occasional

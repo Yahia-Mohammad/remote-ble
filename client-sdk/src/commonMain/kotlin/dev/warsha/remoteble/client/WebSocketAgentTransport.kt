@@ -130,6 +130,10 @@ class WebSocketAgentTransport(
             try {
                 openSession()
             } catch (e: Throwable) {
+                e.asCleartextRefusal(url)?.let { refusal ->
+                    giveUpOnPolicyRefusal(refusal)
+                    throw refusal
+                }
                 if (reconnect.enabled && !closed) {
                     Logger.warn(LogTags.TRANSPORT) {
                         "initial connect failed, starting reconnect loop: ${e.message}"
@@ -265,7 +269,11 @@ class WebSocketAgentTransport(
                 }
                 Logger.info(LogTags.TRANSPORT) { "reconnected after $attempt attempt(s) [cid=$clientId]" }
                 return
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                e.asCleartextRefusal(url)?.let { refusal ->
+                    giveUpOnPolicyRefusal(refusal)
+                    return
+                }
                 if (maxAttempts != null && attempt >= maxAttempts) {
                     Logger.error(LogTags.TRANSPORT) { "reconnect gave up after $attempt attempt(s) [cid=$clientId]" }
                     // Publish the give-up *before* the callback: an onGaveUp handler that reads
@@ -282,6 +290,18 @@ class WebSocketAgentTransport(
                 }
             }
         }
+    }
+
+    /**
+     * A platform policy refusal fails every attempt identically, so retrying it only turns a
+     * configuration error into a silent loop that looks like an unreachable agent. Give up at once,
+     * whatever [reconnect] says, and say why at ERROR.
+     */
+    private fun giveUpOnPolicyRefusal(refusal: CleartextTrafficNotPermittedException) {
+        Logger.error(LogTags.TRANSPORT) { "${refusal.message} [cid=$clientId]" }
+        if (closed) return
+        _state.value = TransportState.GAVE_UP
+        reconnect.onGaveUp?.invoke()
     }
 
     private companion object {

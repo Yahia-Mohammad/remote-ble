@@ -123,7 +123,7 @@ is not the SDK's own: Kable depends on `androidx.core` 1.18, whose AAR already d
 SDK's AARs declare the same floor rather than their own compileSdk (37). On AGP 9, also put KGP 2.4+
 on the build classpath — see [build-and-testing.md](docs/build-and-testing.md#common-commands).
 
-**macOS** works the same way through the `macosArm64` klibs (Apple Silicon; no Intel target).
+**macOS** resolves the same way as iOS, through the `macosArm64` klibs (Apple Silicon; no Intel target).
 Driving a device through an agent needs no Bluetooth permission, because the client never touches
 CoreBluetooth. `BleMode.LOCAL` does, and macOS only grants that to a signed app bundle that declares
 `NSBluetoothAlwaysUsageDescription` — the same [TCC rule](#macos-tcc) as the agent.

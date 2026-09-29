@@ -751,7 +751,12 @@ Everything above — `EngineBleBackend`, `AgentWebSocketServer`, `Dashboard`, `A
   requests the runtime `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` permissions (API 31+;
   `ACCESS_FINE_LOCATION` below it) and **gates Start on the grant** — a denial disables Start and
   shows an inline warning with a shortcut to app settings — since a `connectedDevice` foreground
-  service can't legally start without a qualifying Bluetooth permission on API 34+.
+  service can't legally start without a qualifying Bluetooth permission on API 34+. On API 37+ it
+  also requests `ACCESS_LOCAL_NETWORK`, a runtime permission without which the platform drops
+  every LAN connection before the TCP handshake completes. That one does **not** gate Start,
+  because loopback and `adb forward` still work; a denial instead replaces the LAN address with a
+  "not reachable" line and shows a warning. Settings files it under **Nearby devices**, the same
+  group as the Bluetooth permissions, so it is usually granted with them without a second prompt.
 - **iOS**: [`IosAgentEntry.kt`](../agent/src/iosMain/kotlin/dev/warsha/remoteble/agent/IosAgentEntry.kt)
   has no foreground-service equivalent to reach for — iOS does not support a backgrounded,
   listening TCP server at all (new inbound connections can't be accepted once the app backgrounds

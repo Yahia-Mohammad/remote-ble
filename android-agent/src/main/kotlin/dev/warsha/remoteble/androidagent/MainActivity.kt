@@ -33,7 +33,8 @@ import kotlinx.coroutines.launch
  * Entry point for the on-device RemoteBLE agent. The BLE/server logic ([AgentRunner]), the
  * Compose UI ([AgentApp]), and the foreground service ([AgentService]) all live in `:agent`;
  * this Activity only requests the runtime Bluetooth permissions Android requires before a scan
- * (none of which `:android-client` needed — it never touches a local radio) and starts
+ * (none of which `:android-client` needed — it never touches a local radio), plus local-network
+ * access on API 37+ so LAN clients can reach the listener, and starts
  * [AgentService] (handing it the [AgentRunner] it should observe) whenever [AgentRunner.running]
  * flips true — [AgentService] is responsible for stopping itself in lockstep from there, so the
  * agent survives backgrounding without depending on this composition staying alive. It also holds
@@ -44,19 +45,18 @@ class MainActivity : ComponentActivity() {
     private val viewModel: AgentViewModel by viewModels()
 
     private val requestPermissions =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-            viewModel.bluetoothPermissionsGranted.value = requiredBluetoothPermissions().all { grants[it] == true }
-        }
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refreshGrants() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         initAndroidAgentContext(this)
-        viewModel.bluetoothPermissionsGranted.value = hasBluetoothPermissions()
+        refreshGrants()
         requestPermissions.launch(requiredPermissions())
         setContent {
             val running by viewModel.runner.running.collectAsState()
             val bluetoothGranted by viewModel.bluetoothPermissionsGranted
+            val localNetworkGranted by viewModel.localNetworkPermissionGranted
             LaunchedEffect(running) {
                 if (running) {
                     AgentService.start(this@MainActivity, viewModel.runner)
@@ -75,8 +75,14 @@ class MainActivity : ComponentActivity() {
                 // before it will start this plaintext listener.
                 config = AgentConfig(bindHost = "0.0.0.0"),
                 addressLabel = { port ->
-                    lanIPv4Address()?.let { "ws://$it:$port/agent" }
-                        ?: "No Wi-Fi — connect to a network to reach this agent"
+                    // A LAN address the platform will not let anyone reach is worse than none: a
+                    // client pointed at it just times out, which reads as "agent not running".
+                    if (!localNetworkGranted) {
+                        "Not reachable from the network — local network access is denied"
+                    } else {
+                        lanIPv4Address()?.let { "ws://$it:$port/agent" }
+                            ?: "No Wi-Fi — connect to a network to reach this agent"
+                    }
                 },
                 startEnabled = bluetoothGranted,
                 permissionWarning = if (bluetoothGranted) {
@@ -85,8 +91,29 @@ class MainActivity : ComponentActivity() {
                     "Bluetooth permission is required to start the agent."
                 },
                 onRequestPermissionSettings = if (bluetoothGranted) null else ::openAppSettings,
+                // Not a Start gate: the agent still serves this device's loopback (and so
+                // `adb forward`), exactly as it does with the Bluetooth adapter switched off.
+                localNetworkWarning = if (localNetworkGranted) {
+                    null
+                } else {
+                    "Local network permission is denied, so devices on this Wi-Fi cannot reach the " +
+                        "agent. Allow \"Nearby devices\" / local network access for this app."
+                },
+                onRequestLocalNetworkSettings = if (localNetworkGranted) null else ::openAppSettings,
             )
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Returning from the settings page is the usual way a denied permission gets granted, and
+        // no result callback fires for it.
+        refreshGrants()
+    }
+
+    private fun refreshGrants() {
+        viewModel.bluetoothPermissionsGranted.value = hasBluetoothPermissions()
+        viewModel.localNetworkPermissionGranted.value = hasLocalNetworkPermission()
     }
 
     private fun openAppSettings() {
@@ -100,6 +127,11 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED
         }
 
+    private fun hasLocalNetworkPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN ||
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
     private fun requiredBluetoothPermissions(): Array<String> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
@@ -112,6 +144,9 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+            add(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
     }.toTypedArray()
 }
 
@@ -119,6 +154,7 @@ class MainActivity : ComponentActivity() {
 class AgentViewModel : ViewModel() {
     val runner = AgentRunner()
     val bluetoothPermissionsGranted = mutableStateOf(false)
+    val localNetworkPermissionGranted = mutableStateOf(true)
 
     override fun onCleared() {
         // A dedicated scope, not viewModelScope: by onCleared() that scope may already be

@@ -364,7 +364,8 @@ Tap **Start** in the app; a laptop on the same network can then point a client (
 `:e2e-runner:scanRun`) at `ws://<phone-ip>:8080/agent`, same as the macOS agent.
 
 > **Android** keeps running backgrounded via a foreground service (`AgentService`) — the
-> app requests `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` on first launch. **iOS has no
+> app requests `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` on first launch, plus `ACCESS_LOCAL_NETWORK` on
+> Android 17+, without which no other device on the Wi-Fi can connect. **iOS has no
 > equivalent**: it does not support a backgrounded, listening TCP server, so the agent is
 > only reachable while the app is open and the screen is unlocked. The app disables the
 > screen's auto-lock while running and shows an on-screen reminder, since there's no way

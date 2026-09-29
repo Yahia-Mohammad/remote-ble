@@ -63,7 +63,9 @@ import kotlinx.coroutines.launch
  * agent is running (iOS: reminds the user the agent stops the moment the app backgrounds/locks).
  * [startEnabled] gates the Start button (e.g. on required runtime permissions); when `false`,
  * [permissionWarning] explains why and [onRequestPermissionSettings], if supplied, renders a
- * button routing to the app's settings page.
+ * button routing to the app's settings page. [localNetworkWarning], if non-null, says the platform
+ * blocks LAN clients; it does not gate Start, since the agent still serves this device's loopback,
+ * and [onRequestLocalNetworkSettings] routes to the fix.
  *
  * Mobile agents intentionally bind to all interfaces so their LAN address is reachable by a
  * companion client. A non-blank token is required before starting: the UI makes the unencrypted
@@ -78,6 +80,8 @@ fun AgentApp(
     startEnabled: Boolean = true,
     permissionWarning: String? = null,
     onRequestPermissionSettings: (() -> Unit)? = null,
+    localNetworkWarning: String? = null,
+    onRequestLocalNetworkSettings: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val running by runner.running.collectAsState()
@@ -185,6 +189,8 @@ fun AgentApp(
                         onStop = onStop,
                         permissionWarning = permissionWarning,
                         onRequestPermissionSettings = onRequestPermissionSettings,
+                        localNetworkWarning = localNetworkWarning,
+                        onRequestLocalNetworkSettings = onRequestLocalNetworkSettings,
                         radioNotice = radioNoticeFor(radioState),
                         startFailure = startFailure,
                     )
@@ -237,6 +243,8 @@ private fun AgentHeader(
     onStop: () -> Unit,
     permissionWarning: String?,
     onRequestPermissionSettings: (() -> Unit)?,
+    localNetworkWarning: String?,
+    onRequestLocalNetworkSettings: (() -> Unit)?,
     radioNotice: String?,
     startFailure: String?,
 ) {
@@ -322,6 +330,20 @@ private fun AgentHeader(
         )
         if (onRequestPermissionSettings != null) {
             OutlinedButton(onClick = onRequestPermissionSettings) {
+                Text("Open settings")
+            }
+        }
+    }
+    // Shown whether or not the agent is running: the listener starts fine without this permission,
+    // so the only symptom a LAN client would otherwise see is a connect timeout.
+    if (localNetworkWarning != null) {
+        Text(
+            localNetworkWarning,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        if (onRequestLocalNetworkSettings != null) {
+            OutlinedButton(onClick = onRequestLocalNetworkSettings) {
                 Text("Open settings")
             }
         }

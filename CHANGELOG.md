@@ -18,6 +18,26 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+> Agent app changes only. The Android and iOS agent apps are built from source rather than shipped
+> as release assets, and none of the published packages change, so these need no release of their
+> own.
+
+### Added
+
+- **Show/Hide on the agent app's token fields, and Copy token while the agent runs.** A token must
+  match on every client character for character, and a typo behind the mask surfaced only as an
+  unexplained 401. The copied value is flagged sensitive on Android, so the system clipboard preview
+  masks it — see [#34](https://github.com/Yahia-Mohammad/remote-ble/issues/34).
+
+### Fixed
+
+- **The Android agent is reachable over the LAN on Android 17.** API 37 makes local-network traffic
+  depend on `ACCESS_LOCAL_NETWORK`, a runtime permission; without it the listener bound but no other
+  device on the Wi-Fi could complete a TCP handshake, which read as an agent that was not running.
+  The app now requests it with the Bluetooth permissions, and if it is denied says so and shows no
+  unreachable LAN address. Start is not gated on it, since loopback and `adb forward` still work —
+  see [#33](https://github.com/Yahia-Mohammad/remote-ble/issues/33).
+
 ## [0.13.0] - 2026-09-29
 
 > A reach release for the **client SDK**: it now runs on macOS, it no longer forces Android

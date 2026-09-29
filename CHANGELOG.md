@@ -66,6 +66,20 @@ protocol version: **1**.
   The agent's macOS Bluetooth grant is keyed on the identifier, so the first launch after upgrading
   prompts again; that is expected.
 
+### Fixed
+
+- **`./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json"` works as
+  documented.** The task ran in `agent/`, so a profile or policy path written relative to the
+  repository root failed with `NoSuchFileException`; it now runs from the root.
+
+### Security
+
+- **netty in AGP's test tooling raised to 4.1.138.Final.** AGP's Unified Test Platform pulled
+  netty 4.1.93 and 4.1.110 through `grpc-netty`, both inside GHSA-c4c3-7fpv-j4q5 (critical) and
+  four high advisories fixed in 4.1.137. It is host-side instrumented-test tooling that never
+  ships in an APK or a published artifact, so no consumer was exposed; the pin removes it from the
+  scanned dependency graph.
+
 ## [0.12.0] - 2026-08-18
 
 > A correctness release for **simulated agents** and a diagnosability release for everything else.

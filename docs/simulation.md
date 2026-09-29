@@ -10,7 +10,9 @@ not change the client API or wire protocol.
 java -jar remoteble-agent-<version>-all.jar --simulate sim-hrm.json
 ```
 
-`REMOTE_BLE_SIMULATE=sim-hrm.json` is equivalent to `--simulate`. The profile is decoded and
+`:agent:jvmRun` runs from the repository root, so a relative profile path resolves against the root
+exactly as it would for the fat JAR run from there. `REMOTE_BLE_SIMULATE=sim-hrm.json` is
+equivalent to `--simulate`. The profile is decoded and
 validated before Koin or the WebSocket listener starts, so malformed/unbounded input never opens a
 port. Normal bind and credential policy still applies.
 

@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -17,6 +18,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -24,9 +26,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentRadio
@@ -61,7 +67,7 @@ import kotlinx.coroutines.launch
  *
  * Mobile agents intentionally bind to all interfaces so their LAN address is reachable by a
  * companion client. A non-blank token is required before starting: the UI makes the unencrypted
- * LAN exposure explicit without rendering the bearer credential itself.
+ * LAN exposure explicit, and keeps the bearer credential masked unless the user asks to see it.
  */
 @Composable
 fun AgentApp(
@@ -250,19 +256,20 @@ private fun AgentHeader(
     if (running && keepScreenOnNotice != null) {
         Text(keepScreenOnNotice, style = MaterialTheme.typography.bodySmall)
     }
-    OutlinedTextField(
+    SecretField(
         value = token.orEmpty(),
         onValueChange = onTokenChange,
-        label = { Text("Auth token (required for LAN access)") },
-        visualTransformation = PasswordVisualTransformation(),
+        label = "Auth token (required for LAN access)",
         enabled = !running,
-        modifier = Modifier.fillMaxWidth(),
     )
     if (running) {
         Text(
             "LAN exposure over unencrypted ws://. Clients need the configured bearer credential.",
             style = MaterialTheme.typography.bodySmall,
         )
+        // Every client must present this token character for character, and retyping it is where
+        // the typos come from; pasting it removes the chance.
+        if (!token.isNullOrBlank()) CopyTokenButton(token)
     }
     // Optional second secret, and deliberately a separate field rather than a reuse of the one above.
     // The dashboard exposes every client's address, every lease and the activity log — the
@@ -270,13 +277,11 @@ private fun AgentHeader(
     // make every client an observer of all the others. `AgentWebSocketServer.init` requires them to
     // differ. Left blank (the default) nothing changes: no operator credential, no dashboard routes,
     // and `/` keeps answering 404, which is the pre-0.10.0 behaviour.
-    OutlinedTextField(
+    SecretField(
         value = operatorToken.orEmpty(),
         onValueChange = onOperatorTokenChange,
-        label = { Text("Operator token (optional — enables the status dashboard)") },
-        visualTransformation = PasswordVisualTransformation(),
+        label = "Operator token (optional — enables the status dashboard)",
         enabled = !running,
-        modifier = Modifier.fillMaxWidth(),
     )
     // Shown only once an operator token is present, because the choice is meaningless without one.
     // Default off: the dashboard is the high-privilege plane and travels unencrypted, so it answers
@@ -335,6 +340,60 @@ private fun AgentHeader(
         startFailure?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
+    }
+}
+
+/**
+ * A credential field, masked by default with a Show/Hide control. A token has to match on every
+ * client character for character, and a typo behind a mask is invisible until a client is refused
+ * with a 401 the user cannot explain. The control stays usable while the field is locked by a
+ * running agent, so the value in force can still be read back.
+ */
+@Composable
+private fun SecretField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    enabled: Boolean,
+) {
+    var revealed by rememberSaveable { mutableStateOf(false) }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+        // Password keyboards neither autocorrect nor learn the value, which matters more once it
+        // can be shown in the clear.
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+        singleLine = true,
+        trailingIcon = {
+            TextButton(onClick = { revealed = !revealed }) {
+                Text(if (revealed) "Hide" else "Show")
+            }
+        },
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun CopyTokenButton(token: String) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2_000)
+            copied = false
+        }
+    }
+    TextButton(onClick = {
+        scope.launch {
+            clipboard.setClipEntry(secretClipEntry(token))
+            copied = true
+        }
+    }) {
+        Text(if (copied) "Copied" else "Copy token")
     }
 }
 

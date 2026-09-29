@@ -15,6 +15,9 @@ kotlin {
         namespace = "dev.warsha.remoteble.log"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
+        aarMetadata {
+            minCompileSdk = libs.versions.android.minCompile.get().toInt()
+        }
     }
     iosArm64()
     iosSimulatorArm64()

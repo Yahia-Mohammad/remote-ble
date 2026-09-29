@@ -13,6 +13,10 @@ datastore = "1.1.7"
 agp = "9.3.0"
 android-compile = "37"
 android-min = "24"
+# The compileSdk the published AARs demand of a consumer (their `minCompileSdk` metadata). Left
+# unset, AGP writes our own compileSdk there. 36 is the real floor: Kable pulls in androidx.core
+# 1.18, whose own AAR already requires it, and nothing in this repo needs an API above it.
+android-minCompile = "36"
 
 # Publishing to Maven Central (Central Portal) for :protocol + :client-sdk.
 vanniktech-publish = "0.37.0"

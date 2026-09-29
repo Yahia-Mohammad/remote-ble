@@ -141,13 +141,13 @@ jobs:
       - name: Publish SDK dependency closure to Maven local
         run: ./gradlew :protocol:publishToMavenLocal :log:publishToMavenLocal :client-sdk:publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false
 
-      # Resolves the klib variants (client-sdk-iosarm64 / -iossimulatorarm64 and their protocol/log
-      # counterparts). Explicit compile tasks rather than `check`: these fixtures carry no tests, so
+      # Resolves the klib variants (client-sdk-iosarm64 / -iossimulatorarm64 / -macosarm64 and their
+      # protocol/log counterparts). Explicit compile tasks rather than `check`: these fixtures carry no tests, so
       # `check` would pass without compiling anything.
       - name: Compile a clean KMP/Apple consumer against published coordinates
         run: |
           VERSION="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
-          ./gradlew -p consumer-tests/kmp compileKotlinIosArm64 compileKotlinIosSimulatorArm64 -PremoteBleVersion="$VERSION"
+          ./gradlew -p consumer-tests/kmp compileKotlinIosArm64 compileKotlinIosSimulatorArm64 compileKotlinMacosArm64 -PremoteBleVersion="$VERSION"
 
   simulated-socket-e2e:
     name: Simulated agent socket E2E

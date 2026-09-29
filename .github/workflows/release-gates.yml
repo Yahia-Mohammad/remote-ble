@@ -117,11 +117,12 @@ jobs:
 
       # Resolves the `.aar` variant (client-sdk-android -> protocol-android, log-android), which the
       # JVM gate never touches: Android selects through different Gradle metadata attributes and can
-      # break independently of a healthy `jvm` closure.
+      # break independently of a healthy `jvm` closure. `checkDebugAarMetadata` holds the AARs'
+      # `minCompileSdk` to the fixture's compileSdk, one below our own; compiling alone never reads it.
       - name: Compile a clean Android consumer against published coordinates
         run: |
           VERSION="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
-          ./gradlew -p consumer-tests/android compileDebugKotlin -PremoteBleVersion="$VERSION"
+          ./gradlew -p consumer-tests/android checkDebugAarMetadata compileDebugKotlin -PremoteBleVersion="$VERSION"
 
   consumer-apple:
     name: Published KMP/Apple consumer

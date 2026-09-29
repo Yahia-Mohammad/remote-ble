@@ -101,6 +101,11 @@ iOS app that shares Kotlin code (your Kable app logic lives in `commonMain`) res
 `iosArm64`/`iosSimulatorArm64` klibs from Central automatically. There is no separate
 Swift Package / XCFramework — this SDK is consumed as Kotlin, alongside Kable itself.
 
+**Android** consumers need `compileSdk` 36 or later and `minSdk` 24 or later. The compileSdk floor
+is not the SDK's own: Kable depends on `androidx.core` 1.18, whose AAR already demands 36, and the
+SDK's AARs declare the same floor rather than their own compileSdk (37). On AGP 9, also put KGP 2.4+
+on the build classpath — see [build-and-testing.md](docs/build-and-testing.md#common-commands).
+
 The **agent** is run from a prebuilt binary ([download from a release](https://github.com/Yahia-Mohammad/remote-ble/releases/latest))
 or from source (`agent/run-agent.sh`, the `agent-rs` binary, or the phone apps), not consumed as a
 dependency — see [Running the agent](#running-the-agent).
@@ -197,7 +202,7 @@ the accepted security/lifecycle hardening. The future
 | kotlinx-coroutines | 1.11.0 |
 | kotlinx-serialization (+cbor) | 1.9.0 |
 | Gradle | 9.5.1 (wrapper) |
-| Android Gradle Plugin | 9.2.1 (compileSdk 37, minSdk 24) |
+| Android Gradle Plugin | 9.3.0 (compileSdk 37, minSdk 24; consumers need compileSdk 36+) |
 | JDK toolchain | 17 |
 | Kable | `com.juul.kable:kable-core:0.43.1` (Maven Central) — powers **both** the client SDK and the JVM agent's radio engine (the JVM `btleplug` backend ships in this release) |
 

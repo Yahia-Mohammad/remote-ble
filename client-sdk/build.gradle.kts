@@ -21,6 +21,9 @@ kotlin {
         namespace = "dev.warsha.remoteble.client"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
+        aarMetadata {
+            minCompileSdk = libs.versions.android.minCompile.get().toInt()
+        }
     }
     // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
     // simulator): matches :protocol and the rest of the repo, and trims ~24 files per release off the

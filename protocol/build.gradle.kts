@@ -21,6 +21,9 @@ kotlin {
         namespace = "dev.warsha.remoteble.protocol"
         compileSdk = libs.versions.android.compile.get().toInt()
         minSdk = libs.versions.android.min.get().toInt()
+        aarMetadata {
+            minCompileSdk = libs.versions.android.minCompile.get().toInt()
+        }
     }
     // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
     // simulator): the rest of the repo already omits it (:agent, :client-ui), Apple Silicon is the

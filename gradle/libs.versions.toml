@@ -17,6 +17,8 @@ android-min = "24"
 # unset, AGP writes our own compileSdk there. 36 is the real floor: Kable pulls in androidx.core
 # 1.18, whose own AAR already requires it, and nothing in this repo needs an API above it.
 android-minCompile = "36"
+# Pinned into AGP's Unified Test Platform configurations only; see the root build.gradle.kts.
+netty = "4.1.138.Final"
 
 # Publishing to Maven Central (Central Portal) for :protocol + :client-sdk.
 vanniktech-publish = "0.37.0"

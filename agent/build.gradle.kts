@@ -133,6 +133,14 @@ kotlin {
 tasks.matching { it.name.contains("Test") && it.name.contains("ios", ignoreCase = true) }
     .configureEach { enabled = false }
 
+// Run from the repository root rather than this module's directory. Every path the JVM agent reads
+// is supplied by the caller (--simulate / REMOTE_BLE_SIMULATE, REMOTE_BLE_POLICY_FILE), and a caller
+// running ./gradlew from the root writes it relative to the root: the documented
+// `--simulate agent/simulation/sim-hrm.json` failed with NoSuchFileException otherwise.
+tasks.withType<JavaExec>().matching { it.name == "jvmRun" }.configureEach {
+    workingDir = rootDir
+}
+
 // Prints the agent's JVM runtime classpath (compiled classes + dependencies) so the
 // macOS launcher (agent/run-agent.sh) can pass it to the in-process JVM. See
 // agent/macos-launcher/launcher.c for why the agent must run from a signed .app.

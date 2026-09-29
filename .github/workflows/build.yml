@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: ignore
 
   ios-klibs:
-    name: iOS klib compile check
+    name: Apple klib compile + macOS tests
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -126,3 +126,9 @@ jobs:
             :client-sdk:compileKotlinIosArm64 :client-sdk:compileKotlinIosSimulatorArm64 \
             :client-ui:compileKotlinIosArm64 :client-ui:compileKotlinIosSimulatorArm64 \
             :agent:compileKotlinIosArm64 :agent:compileKotlinIosSimulatorArm64
+
+      # The published client closure also targets macosArm64. Unlike the iOS test binaries, a macOS
+      # test executable runs directly on this host with no simulator, so the commonTest suites run
+      # here rather than only compiling.
+      - name: Run commonTest on macOS
+        run: ./gradlew :log:macosArm64Test :protocol:macosArm64Test :client-sdk:macosArm64Test

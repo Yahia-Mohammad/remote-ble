@@ -21,6 +21,9 @@ kotlin {
     }
     iosArm64()
     iosSimulatorArm64()
+    // Apple Silicon Macs only, matching the iOS side's lack of x64 simulator targets. The Apple
+    // actuals live in appleMain, shared by iOS and macOS.
+    macosArm64()
 
     sourceSets {
         commonTest.dependencies {

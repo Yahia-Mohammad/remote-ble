@@ -51,6 +51,9 @@ kotlin {
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)
+            // Backs cioWebSocketHttpClient(): plain sockets for `ws://` agents, outside the
+            // cleartext policy OkHttp enforces.
+            implementation(libs.ktor.client.cio)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)

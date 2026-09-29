@@ -8,5 +8,9 @@ import io.ktor.client.HttpClient
  * (JVM: CIO, Android: OkHttp, iOS: Darwin). Apps that need custom engine config
  * (proxies, TLS pinning, timeouts) can build their own `HttpClient { WebSockets }`
  * and hand it to the transport instead.
+ *
+ * On Android, OkHttp enforces the app's network security policy, which forbids `ws://` by default
+ * from targetSdk 28; the transport then fails with [CleartextTrafficNotPermittedException]. Use
+ * `cioWebSocketHttpClient()` there for a plain `ws://` agent.
  */
 expect fun defaultWebSocketHttpClient(): HttpClient

@@ -56,3 +56,48 @@ interface AgentTransport {
 
 /** Thrown by [AgentTransport.send] when the link is not (or no longer) usable. */
 class TransportClosedException(message: String? = null) : Exception(message)
+
+/**
+ * The platform refused to open a cleartext (`ws://`) connection to [url]. This is a configuration
+ * failure, not an unreachable agent, so the transport does not retry it: it goes
+ * [TransportState.GAVE_UP] at once and [AgentTransport.connect] throws this.
+ *
+ * On Android it means the app's network security policy forbids cleartext traffic, which is the
+ * default from targetSdk 28. The SDK's default client runs on OkHttp, which enforces that policy.
+ * Any one of these fixes it: pass `cioWebSocketHttpClient()` (plain sockets, which the policy does
+ * not govern) to [WebSocketAgentTransport], permit cleartext for the agent's host in a network
+ * security config, or reach the agent over `wss://`.
+ */
+class CleartextTrafficNotPermittedException(
+    val url: String,
+    cause: Throwable? = null,
+) : Exception(
+    "Cleartext connection to $url refused by the platform's network security policy. On Android, " +
+        "pass cioWebSocketHttpClient() to WebSocketAgentTransport, permit cleartext for the agent's " +
+        "host in a network security config, or use wss://.",
+    cause,
+)
+
+/**
+ * Recognises the platform's cleartext refusal anywhere in this throwable's cause chain. OkHttp,
+ * which also backs Android's own `HttpURLConnection`, reports it as `UnknownServiceException` with
+ * exactly this wording; the engine may wrap it, hence the walk. Matched on the message rather than
+ * the class so the check stays in common code and is testable off-device.
+ */
+internal fun Throwable.asCleartextRefusal(url: String): CleartextTrafficNotPermittedException? {
+    var current: Throwable? = this
+    repeat(MAX_CAUSE_DEPTH) {
+        val t = current ?: return null
+        if (t is CleartextTrafficNotPermittedException) return t
+        val message = t.message
+        if (message != null && CLEARTEXT_REFUSAL in message && SECURITY_POLICY in message) {
+            return CleartextTrafficNotPermittedException(url, this)
+        }
+        current = t.cause?.takeIf { it !== t }
+    }
+    return null
+}
+
+private const val CLEARTEXT_REFUSAL = "CLEARTEXT communication"
+private const val SECURITY_POLICY = "not permitted by network security policy"
+private const val MAX_CAUSE_DEPTH = 16

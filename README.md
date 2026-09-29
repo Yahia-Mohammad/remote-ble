@@ -54,6 +54,23 @@ the whole point of RemoteBLE. Full walkthrough with expected output at every ste
 [getting-started.md](docs/getting-started.md); every public class in
 [client-sdk.md](docs/client-sdk.md).
 
+> **Android and plain `ws://`.** From targetSdk 28, Android's network security policy forbids
+> cleartext traffic unless the app opts in, and `defaultWebSocketHttpClient()` runs on OkHttp, which
+> enforces it. An app with no network security config therefore cannot reach a `ws://` agent through
+> the default client: `connect()` throws `CleartextTrafficNotPermittedException` and the transport
+> goes `GAVE_UP` without retrying. Pass the CIO-backed client instead, which uses plain sockets the
+> policy does not govern:
+>
+> ```kotlin
+> val transport = WebSocketAgentTransport("ws://192.168.1.20:8080/agent", scope, cioWebSocketHttpClient())
+> ```
+>
+> With the Koin module, override the binding:
+> `modules(remoteBleClientModule(config), module { single<HttpClient> { cioWebSocketHttpClient() } })`.
+> The alternatives are a network security config that permits cleartext for the agent's host (the
+> repo's `android-client` does this for the emulator's `10.0.2.2`), or reaching the agent over
+> `wss://` through a [TLS proxy](docs/tls-proxy-recipe.md).
+
 ## System at a glance
 
 RemoteBLE has three core parts:

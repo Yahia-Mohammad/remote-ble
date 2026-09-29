@@ -1,7 +1,6 @@
 # Release-candidate inventory and release evidence
 
-The **currently released line is 0.12.0** (2026-08-18), with **0.13.0 prepared and awaiting its
-tag**; the inventory and checklist below were
+The **currently released line is 0.13.0** (2026-09-29); the inventory and checklist below were
 written for 0.10.0 and remain the procedure of record for every release since. Every version source
 a release touches is checked by
 [`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
@@ -13,6 +12,74 @@ bash scripts/check-release-version.sh v0.13.0
 
 Substitute the tag being cut. The published evidence for each release is recorded under
 [Release evidence](#release-evidence--published-2026-08-04) below, 0.11.0's alongside 0.10.0's.
+
+## Release evidence — published 2026-09-29 (0.13.0)
+
+Tag `v0.13.0` is annotated object `abedcba`, on commit `e993f6c`, cut after all five workflows
+passed on that commit. Every hash below is the published artifact's own, read back from the release
+and the registry rather than from a local build.
+
+### GitHub Release assets
+
+GitHub's server-side digest for each asset matches its published `.sha256` sidecar. The macOS
+bundle is new in this release: the first tagged run of the `agent-rs (macOS universal .app)` job
+(`agent-artifacts.yml` run `36572222201`).
+
+| Asset | SHA-256 |
+|---|---|
+| `remoteble-agent-0.13.0-all.jar` | `cab38bb898d25227e0762e78bb73a43db4292990f9e633d3ad4588fbb740ae6a` |
+| `remoteble-agent-rs-linux-x86_64` | `cb64aa6868ae8331fc3e4e280a1544d77d46e41a2db5d61b0f15b56ec39f3ef6` |
+| `remoteble-agent-rs-linux-aarch64` | `fa79647703db95aeb24cba8b752d1c967d96a5e1a267549ab96fa78681407729` |
+| `remoteble-agent-rs-windows-x86_64.exe` | `a5bf635188492aef9112563f70c05e8b0e82c2ab5d2bcb16cdf274293045ae85` |
+| `remoteble-agent-rs-macos-universal.app.zip` | `cbccb9a9720267a6128321aee4e9d2511c4d3ca7de23dd13f273286cab98e71d` |
+
+### Rust OCI image
+
+`ghcr.io/yahia-mohammad/remoteble-agent-rs`, tags `0.13.0` and `latest` resolving to the same index
+(`agent-container.yml` run `36572222122`):
+
+| | Digest |
+|---|---|
+| **Manifest list (OCI index)** | `sha256:bbd63594cb948f240529741b779f8c7d13e26e6c52d2223222b655b74aabb7d7` |
+| `linux/amd64` | `sha256:506f7898f8dc31b94256922c821d16f45eec016e0daf0842de9b3e9d611c4877` |
+| `linux/arm64` | `sha256:5a8a73047abc0ecd98d7a630c3d222594b91f7da5dbe1da99c6fbc7ef78d9e3d` (plus the two Buildx attestation manifests) |
+
+### Maven Central
+
+Published by [`release.yml`](../.github/workflows/release.yml) (run `36573626091`), preceded by
+[`release-preflight.yml`](../.github/workflows/release-preflight.yml) (run `36572240296`) on the same
+runner image: four secrets present, **all 18 coordinates** built, **102 detached signatures**, and the
+Portal credential check returning HTTP 200.
+
+18 rather than 15 because `protocol`, `log` and `client-sdk` each gained a `-macosarm64` klib. The
+release runner is Linux, so those klibs are cross-compiled there, as the iOS ones always were. The
+preflight's coordinate list predated them and would have passed a publish missing all three; it was
+extended before the tag (#32), so this run is the first to check them.
+
+The `client-sdk` POM on `repo1.maven.org` reports `Last-Modified: 13:21:49 GMT`, about three
+minutes after the publish run finished. That is far quicker than 0.12.0's 16 minutes, but it is
+read from the server rather than observed: the poll watching for it had a shell word-splitting bug
+and never saw anything, so do not quote this as a typical sync time.
+
+### Post-publish consumer resolution — 0.13.0
+
+Run 2026-09-29 against the **released** coordinates, all three pass:
+
+| Fixture | Task | Result |
+|---|---|---|
+| `consumer-tests/jvm` | `clean check` | ✅ |
+| `consumer-tests/android` | `clean checkDebugAarMetadata compileDebugKotlin`, at `compileSdk 36` | ✅ |
+| `consumer-tests/kmp` | `clean compileKotlinIosArm64`, `…SimulatorArm64`, `…MacosArm64` | ✅ |
+
+`mavenLocal()` was neutralized with `-Dmaven.repo.local` on an empty directory plus
+`--refresh-dependencies`, and the directory held **0 files** afterwards, so every artifact came from
+Central. The Android row is the #24 acceptance against the real artifacts: at `compileSdk 36`
+`checkDebugAarMetadata` passes, where 0.12.0 fails it. The released `client-sdk-android`,
+`protocol-android` and `log-android` AARs each declare `minCompileSdk=36`, read from the files
+downloaded from Central. The JVM closure resolves `client-sdk:0.13.0` → `client-sdk-jvm` →
+`protocol`/`protocol-jvm` + `log`/`log-jvm`, all at `0.13.0`.
+
+---
 
 ## Release evidence — published 2026-08-18 (0.12.0)
 

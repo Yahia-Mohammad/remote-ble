@@ -12,9 +12,10 @@ use Kable.
 For quickstart/build commands see [`../README.md`](../README.md).
 
 Release scope is tracked separately from this implementation reference. The current release is
-**0.12.0** — see [`migrate-to-0.12.0.md`](migrate-to-0.12.0.md) for what it carries and why, and
+**0.13.0** — see [`migrate-to-0.13.0.md`](migrate-to-0.13.0.md) for what it carries and why, and
+[`migrate-to-0.12.0.md`](migrate-to-0.12.0.md) for the line before it;
 [`migrate-to-0.11.0.md`](migrate-to-0.11.0.md) with
-[`proposals/cli-readiness-progress.md`](proposals/cli-readiness-progress.md) for the line before it. Earlier scope records are [`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md) and the
+[`proposals/cli-readiness-progress.md`](proposals/cli-readiness-progress.md) covers 0.11.0. Earlier scope records are [`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md) and the
 [`0.9.1-hardening-decisions.md`](proposals/0.9.1-hardening-decisions.md) record; the
 [CHANGELOG](../CHANGELOG.md) is the shipped history. Detailed day-to-day planning notes are kept
 maintainer-internal and are not part of the published docs.
@@ -37,6 +38,7 @@ that matches your role; the final sections are for extending the protocol or aud
 | Document | Covers |
 |---|---|
 | [scanning.md](scanning.md) | **Discovery, for app developers** — filters and their exact semantics, holding two scanners at once, the three agent scan-concurrency modes, replay/late-join, reconnect behaviour, limits |
+| [migrate-to-0.13.0.md](migrate-to-0.13.0.md) | Upgrade to 0.13.0; no source change required; macOS target, Android compileSdk 36, and the cleartext `ws://` failure on Android |
 | [migrate-to-0.12.0.md](migrate-to-0.12.0.md) | Upgrade to 0.12.0; no source change required unless you match on a simulation profile's literal id |
 | [migrate-to-0.11.0.md](migrate-to-0.11.0.md) | Upgrade to 0.11.0; no source change required, but two agent defaults move and three capabilities are added |
 | [migrate-to-0.10.0.md](migrate-to-0.10.0.md) | Upgrade a Maven Central consumer to 0.10.0; `authToken` provider change and platform compatibility |

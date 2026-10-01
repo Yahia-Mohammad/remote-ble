@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import dev.warsha.remoteble.agent.AgentRunner
+import dev.warsha.remoteble.agent.AndroidKeystoreTls
 import dev.warsha.remoteble.agent.AgentService
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.initAndroidAgentContext
@@ -72,15 +73,15 @@ class MainActivity : ComponentActivity() {
             AgentApp(
                 runner = viewModel.runner,
                 // Phone agents are intentionally LAN-facing; AgentApp requires an auth token
-                // before it will start this plaintext listener.
+                // before it will start this listener, encrypted or not.
                 config = AgentConfig(bindHost = "0.0.0.0"),
-                addressLabel = { port ->
+                addressLabel = { port, scheme ->
                     // A LAN address the platform will not let anyone reach is worse than none: a
                     // client pointed at it just times out, which reads as "agent not running".
                     if (!localNetworkGranted) {
                         "Not reachable from the network — local network access is denied"
                     } else {
-                        lanIPv4Address()?.let { "ws://$it:$port/agent" }
+                        lanIPv4Address()?.let { "$scheme://$it:$port/agent" }
                             ?: "No Wi-Fi — connect to a network to reach this agent"
                     }
                 },
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
                         "agent. Allow \"Nearby devices\" / local network access for this app."
                 },
                 onRequestLocalNetworkSettings = if (localNetworkGranted) null else ::openAppSettings,
+                tls = AndroidKeystoreTls,
             )
         }
     }

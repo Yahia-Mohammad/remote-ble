@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -38,10 +40,14 @@ import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentRadio
 import dev.warsha.remoteble.agent.AgentRunner
 import dev.warsha.remoteble.agent.AgentStartResult
+import dev.warsha.remoteble.agent.AgentTls
+import dev.warsha.remoteble.agent.AgentTlsProvider
+import dev.warsha.remoteble.agent.LogTags
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.AgentSecret
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.persistToken
+import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.BleRadioState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,9 +63,10 @@ import kotlinx.coroutines.launch
  * cadence the HTML dashboard's own `poll()` uses — there's no HTTP round-trip since the UI and
  * server share one process here.
  *
- * [addressLabel] is how to reach this agent (e.g. `"ws://192.168.1.23:8080/agent"`) — resolving
- * the device's LAN IP is platform-specific, so the caller supplies it rather than this shared
- * composable owning networking APIs. [keepScreenOnNotice], if non-null, is shown whenever the
+ * [addressLabel] is how to reach this agent on a port with a scheme, `ws` or `wss` (e.g.
+ * `"wss://192.168.1.23:8080/agent"`) — resolving the device's LAN IP is platform-specific, so the
+ * caller supplies it rather than this shared composable owning networking APIs. [tls], if non-null,
+ * is the platform's identity store, and offers the encrypted mode. [keepScreenOnNotice], if non-null, is shown whenever the
  * agent is running (iOS: reminds the user the agent stops the moment the app backgrounds/locks).
  * [startEnabled] gates the Start button (e.g. on required runtime permissions); when `false`,
  * [permissionWarning] explains why and [onRequestPermissionSettings], if supplied, renders a
@@ -68,20 +75,22 @@ import kotlinx.coroutines.launch
  * and [onRequestLocalNetworkSettings] routes to the fix.
  *
  * Mobile agents intentionally bind to all interfaces so their LAN address is reachable by a
- * companion client. A non-blank token is required before starting: the UI makes the unencrypted
- * LAN exposure explicit, and keeps the bearer credential masked unless the user asks to see it.
+ * companion client. A non-blank token is required before starting: the UI makes the LAN exposure
+ * explicit, says whether it is encrypted, and keeps the bearer credential masked unless the user
+ * asks to see it.
  */
 @Composable
 fun AgentApp(
     runner: AgentRunner,
     config: AgentConfig = AgentConfig(bindHost = MOBILE_LAN_BIND_HOST),
-    addressLabel: (Int) -> String = { port -> "ws://<this device>:$port/agent" },
+    addressLabel: (port: Int, scheme: String) -> String = { port, scheme -> "$scheme://<this device>:$port/agent" },
     keepScreenOnNotice: String? = null,
     startEnabled: Boolean = true,
     permissionWarning: String? = null,
     onRequestPermissionSettings: (() -> Unit)? = null,
     localNetworkWarning: String? = null,
     onRequestLocalNetworkSettings: (() -> Unit)? = null,
+    tls: AgentTlsProvider? = null,
 ) {
     val scope = rememberCoroutineScope()
     val running by runner.running.collectAsState()
@@ -98,6 +107,34 @@ fun AgentApp(
     var allowRemoteDashboard by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }
+    // Off by default until the phone agents switch to TLS by default, which needs every client able
+    // to pin first (docs/proposals/agent-transport-encryption.md, phase 5).
+    var encrypt by remember { mutableStateOf(false) }
+    // Loaded when encryption is switched on, so the fingerprint can be read before Start.
+    var identity by remember { mutableStateOf<AgentTls?>(null) }
+    var identityFailure by remember { mutableStateOf<String?>(null) }
+    // The scheme the running agent was started with, which a later toggle must not misreport.
+    var servingTls by remember { mutableStateOf(false) }
+
+    // Loading may create the key, and both block on the key store, so it runs off the UI thread
+    // inside the provider. A failure is shown rather than thrown: the agent can still run without.
+    val loadIdentity: suspend (Boolean) -> AgentTls? = { reset ->
+        val provider = tls
+        if (provider == null) {
+            null
+        } else {
+            try {
+                provider.load(reset).also { identity = it; identityFailure = null }
+            } catch (e: Exception) {
+                Logger.error(LogTags.AGENT, e) { "could not load the agent identity" }
+                identityFailure = "Could not load this agent's identity; check the local log."
+                null
+            }
+        }
+    }
+    LaunchedEffect(encrypt) {
+        if (encrypt && identity == null) loadIdentity(false)
+    }
 
     LaunchedEffect(Unit) {
         val persisted = loadPersistedToken()
@@ -136,12 +173,23 @@ fun AgentApp(
             // from a Start that did nothing: the button simply stayed on "Start". Now that a bind
             // failure is reportable at all (it used to kill the process), it has to be reported.
             startFailure = null
+            // Never falls back to cleartext: an agent the user asked to encrypt does not start bare.
+            val front = if (encrypt) {
+                (identity ?: loadIdentity(false))?.front ?: run {
+                    startFailure = identityFailure
+                    return@launch
+                }
+            } else {
+                null
+            }
+            servingTls = front != null
             startFailure = (
                 runner.start(
                     config.copy(
                         authToken = effectiveToken,
                         operatorToken = effectiveOperator,
                         allowRemoteDashboard = effectiveOperator != null && allowRemoteDashboard,
+                        tlsFront = front,
                     ),
                 ) as? AgentStartResult.Failed
                 )?.message
@@ -177,7 +225,9 @@ fun AgentApp(
                     AgentHeader(
                         running = running,
                         startEnabled = startEnabled && !token.isNullOrBlank(),
-                        address = if (running) addressLabel(config.port) else "Stopped",
+                        address = if (running) addressLabel(config.port, if (servingTls) "wss" else "ws") else "Stopped",
+                        // While stopped, what the next Start will serve; while running, what it does.
+                        encrypted = if (running) servingTls else encrypt,
                         keepScreenOnNotice = keepScreenOnNotice,
                         token = token,
                         onTokenChange = { tokenEdited = true; token = it },
@@ -194,6 +244,18 @@ fun AgentApp(
                         radioNotice = radioNoticeFor(radioState),
                         startFailure = startFailure,
                     )
+                }
+                if (tls != null) {
+                    item {
+                        EncryptionPanel(
+                            running = running,
+                            encrypt = encrypt,
+                            onEncryptChange = { encrypt = it },
+                            fingerprint = identity?.fingerprint?.toString(),
+                            failure = identityFailure,
+                            onReset = { scope.launch { loadIdentity(true) } },
+                        )
+                    }
                 }
 
                 val s = snapshot
@@ -232,6 +294,7 @@ private fun AgentHeader(
     running: Boolean,
     startEnabled: Boolean,
     address: String,
+    encrypted: Boolean,
     keepScreenOnNotice: String?,
     token: String?,
     onTokenChange: (String) -> Unit,
@@ -272,7 +335,12 @@ private fun AgentHeader(
     )
     if (running) {
         Text(
-            "LAN exposure over unencrypted ws://. Clients need the configured bearer credential.",
+            if (encrypted) {
+                "LAN exposure over encrypted wss://. Clients need the bearer credential and this " +
+                    "agent's fingerprint."
+            } else {
+                "LAN exposure over unencrypted ws://. Clients need the configured bearer credential."
+            },
             style = MaterialTheme.typography.bodySmall,
         )
         // Every client must present this token character for character, and retyping it is where
@@ -311,15 +379,21 @@ private fun AgentHeader(
             )
         }
         Text(
-            if (allowRemoteDashboard) {
-                "Dashboard reachable from the network over unencrypted http:// — anyone on it can " +
-                    "capture the operator token and read every client, lease and log line."
-            } else {
-                "Dashboard is limited to this device. Reach it from this phone's browser, or tunnel: " +
-                    "adb forward tcp:8080 tcp:8080 (Android) / iproxy (iOS)."
+            when {
+                !allowRemoteDashboard ->
+                    "Dashboard is limited to this device. Reach it from this phone's browser, or tunnel: " +
+                        "adb forward tcp:8080 tcp:8080 (Android) / iproxy (iOS)."
+                // Browsers cannot pin, so the first visit warns about the self-signed certificate,
+                // and accepting it is the operator's call.
+                encrypted ->
+                    "Dashboard reachable from the network over https://. Browsers warn about this " +
+                        "agent's self-signed certificate on the first visit."
+                else ->
+                    "Dashboard reachable from the network over unencrypted http:// — anyone on it can " +
+                        "capture the operator token and read every client, lease and log line."
             },
             style = MaterialTheme.typography.bodySmall,
-            color = if (allowRemoteDashboard) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            color = if (allowRemoteDashboard && !encrypted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
         )
     }
     if (!startEnabled && permissionWarning != null) {
@@ -362,6 +436,63 @@ private fun AgentHeader(
         startFailure?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
+    }
+}
+
+/**
+ * The encryption switch, this agent's fingerprint, and the control that replaces its identity.
+ *
+ * The fingerprint is selectable rather than behind a Copy button: it is not a secret, and a client
+ * needs it exactly, so pasting beats retyping 64 hex digits. A reset is confirmed first, because it
+ * breaks every client already pinned to this agent until each is given the new fingerprint.
+ */
+@Composable
+private fun EncryptionPanel(
+    running: Boolean,
+    encrypt: Boolean,
+    onEncryptChange: (Boolean) -> Unit,
+    fingerprint: String?,
+    failure: String?,
+    onReset: () -> Unit,
+) {
+    var confirmReset by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text("Encrypt connections (wss://)", style = MaterialTheme.typography.bodySmall)
+        Switch(checked = encrypt, onCheckedChange = onEncryptChange, enabled = !running)
+    }
+    if (!encrypt) return
+    failure?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    }
+    if (fingerprint != null) {
+        Text("Agent fingerprint — clients pin this:", style = MaterialTheme.typography.bodySmall)
+        SelectionContainer {
+            Text(fingerprint, style = MaterialTheme.typography.bodySmall)
+        }
+        if (!running) {
+            TextButton(onClick = { confirmReset = true }) { Text("New identity") }
+        }
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Replace this agent's identity?") },
+            text = {
+                Text(
+                    "Every client paired with this agent will refuse to connect until it is given " +
+                        "the new fingerprint.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmReset = false; onReset() }) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

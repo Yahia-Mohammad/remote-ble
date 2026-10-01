@@ -65,8 +65,8 @@ class IosAgentSession internal constructor() {
         val denied = bluetoothPermissionDenied(radio)
         AgentApp(
             runner = runner,
-            addressLabel = { port ->
-                lanIPv4Address()?.let { "ws://$it:$port/agent" }
+            addressLabel = { port, scheme ->
+                lanIPv4Address()?.let { "$scheme://$it:$port/agent" }
                     ?: "No Wi-Fi — connect to a network to reach this agent"
             },
             keepScreenOnNotice = "Keep this screen open — a backgrounded agent stops accepting " +

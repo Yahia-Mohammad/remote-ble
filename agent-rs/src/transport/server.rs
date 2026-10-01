@@ -5689,4 +5689,108 @@ mod tests {
         assert!(!running.is_finished(), "the accept loop must keep running");
         running.abort();
     }
+
+    /// TLS-PIN-04 (docs/agent-conformance-spec.md §3.1): a lease held through a transport drop
+    /// resumes over TLS for the same principal and stable client id, while another principal is
+    /// still refused it. The Rust counterpart of LEASE-GRACE-01, with every leg pinned.
+    #[tokio::test]
+    async fn tls_pin_04_a_lease_held_through_a_drop_resumes_over_tls() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let identity = tls_identity("pin04");
+        let acceptor = tokio_rustls::TlsAcceptor::from(
+            crate::transport::identity::server_config(&identity).unwrap(),
+        );
+        let backend: Arc<dyn BleBackend> = Arc::new(FakeBackend::default());
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        let credentials = Arc::new(HashMap::from([
+            ("alpha".to_string(), "secret-a".to_string()),
+            ("beta".to_string(), "secret-b".to_string()),
+        ]));
+        let strict = Arc::new(AtomicBool::new(false));
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let failed_auth_limiter = Arc::new(AuthFailureLimiter::default());
+        let revoked_principals = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let device = || DeviceHandle {
+            value: "dev".into(),
+        };
+
+        // One pinned TLS connection into the exact upgrade path `run()` uses.
+        let connect = |secret: &'static str, client: &'static str| {
+            let acceptor = acceptor.clone();
+            let backend = backend.clone();
+            let registry = registry.clone();
+            let credentials = credentials.clone();
+            let strict = strict.clone();
+            let live_sessions = live_sessions.clone();
+            let failed_auth_limiter = failed_auth_limiter.clone();
+            let revoked_principals = revoked_principals.clone();
+            let pin = identity.fingerprint.clone();
+            async move {
+                let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+                let accepted = tokio::spawn(async move {
+                    let tls = acceptor.accept(server_io).await.unwrap();
+                    AgentServer::accept_connection(
+                        tls,
+                        "127.0.0.1:1".parse().unwrap(),
+                        backend,
+                        registry,
+                        credentials,
+                        strict,
+                        live_sessions,
+                        failed_auth_limiter,
+                        revoked_principals,
+                        None,
+                    )
+                    .await
+                });
+                let tls = pinned_connector(&pin, &[&rustls::version::TLS13])
+                    .connect(
+                        rustls::pki_types::ServerName::try_from(
+                            crate::transport::identity::TLS_SERVER_NAME,
+                        )
+                        .unwrap(),
+                        client_io,
+                    )
+                    .await
+                    .unwrap();
+                let mut request = "wss://agent.remoteble.invalid/agent"
+                    .into_client_request()
+                    .unwrap();
+                request
+                    .headers_mut()
+                    .insert("Authorization", format!("Bearer {secret}").parse().unwrap());
+                request
+                    .headers_mut()
+                    .insert("X-RemoteBle-Client", client.parse().unwrap());
+                let (ws, _) = tokio_tungstenite::client_async(request, tls)
+                    .await
+                    .expect("the upgrade must succeed over TLS");
+                (ws, accepted)
+            }
+        };
+
+        let (mut first, first_accept) = connect("secret-a", "resume-me").await;
+        send_command(&mut first, 1, Op::Connect { device: device() }).await;
+        assert!(matches!(recv_reply(&mut first).await, OpResult::Ok { .. }));
+        // The transport drops; the lease is held within grace.
+        drop(first);
+        first_accept
+            .await
+            .expect("first connection task must not panic");
+
+        let (mut other, _) = connect("secret-b", "someone-else").await;
+        send_command(&mut other, 2, Op::Connect { device: device() }).await;
+        match recv_reply(&mut other).await {
+            OpResult::Err { error } => assert_eq!(error.kind, ErrorKind::PeripheralBusy),
+            other => panic!("another principal must be refused the held lease, got {other:?}"),
+        }
+
+        let (mut resumed, _) = connect("secret-a", "resume-me").await;
+        send_command(&mut resumed, 3, Op::Connect { device: device() }).await;
+        assert!(
+            matches!(recv_reply(&mut resumed).await, OpResult::Ok { .. }),
+            "the same principal and client id must resume the lease over TLS"
+        );
+    }
 }

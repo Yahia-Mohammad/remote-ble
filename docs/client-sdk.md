@@ -235,6 +235,7 @@ TLS handshake, before the bearer token is sent; the transport goes `GAVE_UP` wit
 |---|---|---|
 | JVM | CIO, with a pinning trust manager | Presents `agent.remoteble.invalid`, which every agent certificate carries |
 | Android | OkHttp, with the same trust manager | OkHttp's host-name check defers to the pin, since agents are reached by IP |
+| iOS, macOS | Darwin (NSURLSession), whose challenge handler accepts the server trust only for the pinned key | Not checked: the handler decides trust, since agents are reached by IP |
 
 ```kotlin
 val fingerprint = AgentFingerprint.parse("sha256:…") // shown by the agent
@@ -246,8 +247,9 @@ val transport = WebSocketAgentTransport(
 )
 ```
 
-Apple targets follow in a later phase of
-[proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+On Apple targets NSURLSession reports a refused challenge as a plain cancellation, so the client
+records the mismatch in its challenge handler and raises `AgentIdentityMismatchException` in place of
+that cancellation.
 
 ---
 

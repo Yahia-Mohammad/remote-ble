@@ -194,7 +194,7 @@ handling, and the checks that prove the proxy forwards the bearer header and fai
 untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
 hook, not a framework.
 
-### Built-in TLS with a pinned identity (desktop and Android agents, opt-in)
+### Built-in TLS with a pinned identity (all agents, opt-in)
 
 `--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent, and `agent-rs` likewise, serve `wss://`
 itself, with no proxy or CA. Both use the same identity file, so on one host they present the same
@@ -216,8 +216,7 @@ Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) term
 each connection to CIO on an ephemeral loopback port. The front records which relay port belongs to
 which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
-client look local. The design and the remaining phases (iOS agent, pairing QR codes,
-encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+client look local. The design and the remaining phases (pairing QR codes, encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
 
 **Android agent.** The app's **Encrypt connections (wss://)** switch does the same, off by default
 for now and chosen per run. The key is generated in Android Keystore and never leaves it. The
@@ -226,7 +225,15 @@ its certificate as the desktop agents do, signs it with the keystore key, and st
 generated one. The fingerprint shows under the switch, selectable for pasting into a client, and
 **New identity** replaces the key after a confirmation. The front is the same `JsseTlsFront`, on
 Conscrypt: Android 10 (API 29) and later negotiate TLS 1.3 or 1.2, and earlier versions only 1.2,
-which every client speaks. The iOS agent offers no switch until its Keychain identity lands.
+which every client speaks.
+
+**iOS agent.** The same switch, fingerprint and **New identity**. The key is generated in the Keychain
+and never leaves it. iOS can neither create a certificate nor make an identity from a key and a
+certificate, so the agent signs its certificate with the Keychain key and stores it beside the key,
+and the Keychain pairs the two. An `NWListener` serves it (`NetworkTlsFront`), TLS 1.3 or 1.2, relaying
+to CIO on loopback with the same peer registry. Its byte pump is Objective-C
+(`agent/src/nativeInterop/cinterop/tlsrelay.def`), because Kotlin/Native cannot take
+Network.framework's receive callback; the record has the details.
 
 ---
 

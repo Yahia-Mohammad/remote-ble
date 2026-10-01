@@ -95,6 +95,11 @@ only a device can show is checked on hardware: `./gradlew :e2e-runner:pinRun` dr
 `02` and `06` against a running agent, the app's restart and **New identity** give `03`, and its
 activity log shows the peer address for `07`.
 
+**The iOS agent** runs the same server behind a Network.framework front of its own, so its scenarios
+are checked the same way, on the simulator so far: `pinRun` for `01`, `02` and `06`, and the app's
+relaunch and **New identity** for `03`. `07` needs a physical iPhone, since the simulator shares the
+Mac's loopback.
+
 **The Android client** pins through OkHttp: `OkHttpPinningTest`, an Android host test, runs
 `TLS-PIN-01` and `02` against the Kotlin agent's front.
 

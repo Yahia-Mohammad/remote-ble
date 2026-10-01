@@ -82,6 +82,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
 | [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Implemented on both agents with paired conformance evidence, and [hardware-validated](scan-concurrency-validation.md) 2026-08-03** |
+| [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md) | Encrypted LAN transport: `wss://` served by every agent with a pinned self-signed identity, pairing URI, and cleartext by explicit choice only ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)) | **Accepted 2026-10-01 (TLS, option A); not started** |
 | [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | Making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host | **Not started, bar two landed precedents** (`REMOTE_BLE_WRITE_FAIL_FAST`, `REMOTE_BLE_SCAN_CONCURRENCY`) |
 
 ### Release process & evidence

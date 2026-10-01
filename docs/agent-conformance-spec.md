@@ -100,6 +100,10 @@ are checked the same way, on the simulator so far: `pinRun` for `01`, `02` and `
 relaunch and **New identity** for `03`. `07` needs a physical iPhone, since the simulator shares the
 Mac's loopback.
 
+**The Apple client** pins in NSURLSession's challenge handler. No host test can stand a TLS server up
+for it, so `01` and `02` are checked on the iOS simulator against the JVM agent; the SPKI it pins is
+read by `certificateSpki`, which `CertificateSpkiTest` checks against the JDK.
+
 **The Android client** pins through OkHttp: `OkHttpPinningTest`, an Android host test, runs
 `TLS-PIN-01` and `02` against the Kotlin agent's front.
 

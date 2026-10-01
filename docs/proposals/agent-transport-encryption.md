@@ -319,3 +319,20 @@ simulator shares the Mac's loopback. That is the remaining hardware check for th
   (`agent/src/nativeInterop/cinterop/tlsrelay.def`), and Kotlin hears only that a direction ended.
 - A relay whose upstream sat in *waiting* was never closed, since the handshake timer only checked
   that an upstream existed. Waiting now counts as failure, and the timer checks that relaying began.
+
+**Phase 3, Darwin client (2026-10-01).** `pinnedWebSocketHttpClient(fingerprint)` on iOS and macOS is
+Ktor's Darwin engine with a challenge handler that accepts the server trust only when the leaf
+certificate's SPKI hashes to the pin. Apple exports only a bare key, so the SPKI is read from the
+certificate's DER by `certificateSpki`, in common code, where `CertificateSpkiTest` checks it against the
+JDK on real agent certificates; that test caught a length that could overflow the bounds check.
+NSURLSession reports a refused challenge as a plain cancellation, so the handler records the mismatch
+and an `HttpSend` interceptor raises `AgentIdentityMismatchException` in its place.
+
+Evidence, on the iOS simulator, with a client app built to use the pinned client: pinned to the JVM
+agent serving `wss://`, it connected and its scan found the simulated peripheral. With a wrong pin it
+made one TLS attempt in 29 s, which the agent saw reset, and no handshake, so the transport gave up
+rather than retrying. No CI test runs the Darwin client end to end, since that needs a TLS server
+holding a Keychain identity inside the test process.
+
+**Phase 3 is code-complete.** Its one open check is the iOS agent on a physical iPhone, for the real
+peer address (`TLS-PIN-07`). Next is phase 4, pairing.

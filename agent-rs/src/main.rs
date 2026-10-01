@@ -7,6 +7,7 @@ mod transport;
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -16,6 +17,7 @@ use ble::btleplug_impl::BtleplugBackend;
 use protocol::op::DeviceHandle;
 use registry::peripheral_lease::{LeaseConfig, PeripheralRegistry};
 use registry::write_policy::WritePolicy;
+use transport::identity;
 use transport::server::{AgentServer, ScanConcurrencyMode, ServerConfig};
 
 #[derive(Parser, Debug)]
@@ -105,6 +107,21 @@ struct Args {
     /// the backend's independent legacy paths.
     #[arg(long, value_enum, default_value_t = ScanConcurrencyMode::Multiplexed, env = "REMOTE_BLE_SCAN_CONCURRENCY")]
     scan_concurrency: ScanConcurrencyMode,
+
+    /// Serve `wss://` with the agent's persistent, pinned TLS identity (#39). Off by default for
+    /// now; see docs/proposals/agent-transport-encryption.md.
+    #[arg(long, default_value_t = false, env = "REMOTE_BLE_TLS")]
+    tls: bool,
+
+    /// Where the TLS identity lives (PEM). Defaults to the per-user config directory, the same
+    /// file the Kotlin JVM agent uses.
+    #[arg(long, env = "REMOTE_BLE_IDENTITY_FILE")]
+    identity_file: Option<PathBuf>,
+
+    /// Discard the TLS identity; a new one is created on the next TLS start. Every paired client
+    /// then fails with an identity error until it re-pairs.
+    #[arg(long, default_value_t = false, env = "REMOTE_BLE_RESET_IDENTITY")]
+    reset_identity: bool,
 }
 
 #[tokio::main]
@@ -190,6 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let tls = tls_config(&args)?;
     let addr = SocketAddr::new(args.bind, args.port);
     let server_config = ServerConfig {
         addr,
@@ -199,6 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport_grace: Duration::from_millis(args.transport_grace_ms),
         operator_token: args.operator_token.clone(),
         write_policy,
+        tls,
     };
 
     let backend_for_shutdown = ble_backend.clone();
@@ -215,6 +234,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// The rustls configuration presenting the agent's identity, or `None` to serve cleartext. A reset
+/// applies whether or not TLS is on, since an operator discarding a compromised key should not
+/// have to enable anything to do it. Mirrors the Kotlin agent's `tlsFrontFor`.
+fn tls_config(args: &Args) -> Result<Option<Arc<rustls::ServerConfig>>, identity::IdentityError> {
+    let path = args
+        .identity_file
+        .clone()
+        .unwrap_or_else(identity::default_path_for_host);
+    if !args.tls {
+        if args.reset_identity && identity::remove(&path)? {
+            tracing::info!("agent identity reset: removed {}", path.display());
+        }
+        return Ok(None);
+    }
+    let agent_identity = identity::load_or_create(&path, args.reset_identity)?;
+    // The value a client pins. Printed rather than a pairing URI, so the token stays out of logs.
+    tracing::info!("Agent identity: {}", agent_identity.fingerprint);
+    Ok(Some(identity::server_config(&agent_identity)?))
 }
 
 /// The operator secret must not be one of the client secrets.

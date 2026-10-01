@@ -50,10 +50,13 @@ class OkHttpPinningTest {
         return AgentTlsIdentity(held.keyPair.private, held.certificate)
     }
 
+    // No bound of its own: start() is already bounded by the server's BIND_TIMEOUT. A 5 s bound here
+    // failed CI's coverage job every time, where this host-test JVM starts cold under Kover and its
+    // first server start runs ten times slower than locally.
     private fun tlsServer(monitor: AgentMonitor? = null): AgentWebSocketServer =
         AgentWebSocketServer(port = 0, host = "127.0.0.1", monitor = monitor, tls = JsseTlsFront(identity))
             .also { servers += it }
-            .also { runBlocking { withTimeout(5.seconds) { it.start() } } }
+            .also { runBlocking { it.start() } }
 
     private fun pinnedTransport(port: Int, pin: dev.warsha.remoteble.protocol.AgentFingerprint, reconnect: ReconnectPolicy = ReconnectPolicy()) =
         WebSocketAgentTransport(

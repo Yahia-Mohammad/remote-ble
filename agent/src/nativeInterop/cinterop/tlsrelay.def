@@ -1,0 +1,36 @@
+# The iOS TLS front's byte pump (NetworkTlsFront.kt), in Objective-C rather than Kotlin.
+#
+# Kotlin/Native cannot take Network.framework's receive callback: at end of stream it passes the
+# framework's statically allocated final-message context, which Kotlin/Native mistakes for a block
+# and terminates the process converting ("Converting Obj-C blocks with non-reference-typed return
+# value to kotlin.Any is not supported"). Every callback parameter is converted before Kotlin code
+# runs, so no Kotlin callback can avoid it. Here the content, contexts and errors never reach Kotlin;
+# it hears only that a direction ended.
+language = Objective-C
+package = dev.warsha.remoteble.agent.tlsrelay
+---
+#import <Network/Network.h>
+
+typedef void (*remoteble_pump_ended_t)(void *context);
+
+/**
+ * Relays `from` to `to` one read at a time, reading again only once the write completed. Calls
+ * `ended(context)` exactly once, when either side ends or fails; never after.
+ */
+static void remoteble_pump(nw_connection_t from, nw_connection_t to, remoteble_pump_ended_t ended, void *context) {
+    nw_connection_receive(from, 1, UINT32_MAX, ^(dispatch_data_t content, nw_content_context_t message, bool is_complete, nw_error_t error) {
+        if (content != NULL) {
+            nw_connection_send(to, content, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t send_error) {
+                if (send_error != NULL || is_complete) {
+                    ended(context);
+                } else {
+                    remoteble_pump(from, to, ended, context);
+                }
+            });
+        } else if (is_complete || error != NULL) {
+            ended(context);
+        } else {
+            remoteble_pump(from, to, ended, context);
+        }
+    });
+}

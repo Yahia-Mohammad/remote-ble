@@ -38,6 +38,12 @@ kotlin {
     // 1.11.1 doesn't publish for it — same call :client-ui makes. Apple Silicon Macs cover
     // iosArm64 (device) + iosSimulatorArm64 (simulator) either way.
     val appleTargets = listOf(iosArm64(), iosSimulatorArm64())
+    // The TLS front's byte pump, in Objective-C: see the .def file for why it cannot be Kotlin.
+    appleTargets.forEach { target ->
+        target.compilations.getByName("main").cinterops.create("tlsrelay") {
+            definitionFile.set(project.file("src/nativeInterop/cinterop/tlsrelay.def"))
+        }
+    }
 
     // Opt-in Obj-C/Swift framework export for the ios-agent launcher shell. Off by default so a
     // plain CLT-only `./gradlew build` stays green (framework *linking* needs a full Xcode

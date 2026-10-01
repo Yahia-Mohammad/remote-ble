@@ -194,6 +194,29 @@ handling, and the checks that prove the proxy forwards the bearer header and fai
 untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
 hook, not a framework.
 
+### Built-in TLS with a pinned identity (JVM agent, opt-in)
+
+`--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent serve `wss://` itself, with no proxy or CA.
+On first start it creates a long-lived ECDSA P-256 key and self-signed certificate, and logs the
+**identity** a client pins: `Agent identity: sha256:<hex>`, the SHA-256 of the key's SPKI. The
+pairing client uses `pinnedWebSocketHttpClient(fingerprint)` (JVM SDK) or any TLS client that can
+pin a public key, e.g. `curl --pinnedpubkey sha256//<base64>`, with the TLS server name set to
+`agent.remoteble.invalid`, which every agent certificate carries. A client pinning a different key
+fails inside the TLS handshake, before the bearer token is sent.
+
+| Setting | Meaning |
+|---|---|
+| `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Off by default for now. |
+| `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions. |
+| `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
+
+Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
+each connection to CIO on an ephemeral loopback port. The front records which relay port belongs to
+which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
+peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
+client look local. The design and the remaining phases (Rust agent, phones, pairing QR codes,
+encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+
 ---
 
 ## The protocol handler — `BleAgent`

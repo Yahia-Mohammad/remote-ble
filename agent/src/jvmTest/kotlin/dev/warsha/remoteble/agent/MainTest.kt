@@ -53,6 +53,41 @@ class MainTest {
     }
 
     @Test
+    fun tlsAndIdentityResetAreOptInFlags() {
+        assertEquals(
+            Cli(bindHost = null, port = 8443, simulationPath = null, tls = true, resetIdentity = true),
+            parseCli(arrayOf("8443", "--tls", "--reset-identity")),
+        )
+        assertFalse(parseCli(emptyArray()).tls)
+    }
+
+    @Test
+    fun tlsFrontForCreatesTheIdentityOnlyWhenTlsIsOn() {
+        val dir = Files.createTempDirectory("remoteble-main-tls")
+        val path = dir.resolve("id.pem")
+        val env = mutableMapOf("REMOTE_BLE_IDENTITY_FILE" to path.toString())
+        try {
+            assertEquals(null, tlsFrontFor(Cli(null, 8080, null), env::get))
+            assertFalse(Files.exists(path), "no identity is created while TLS is off")
+
+            env["REMOTE_BLE_TLS"] = "true"
+            val first = tlsFrontFor(Cli(null, 8080, null), env::get)!!.first
+            assertEquals(first.fingerprint, tlsFrontFor(Cli(null, 8080, null), env::get)!!.first.fingerprint)
+
+            // A reset discards the key even with TLS off, so an operator never has to enable it to do so.
+            env.remove("REMOTE_BLE_TLS")
+            assertEquals(null, tlsFrontFor(Cli(null, 8080, null, resetIdentity = true), env::get))
+            assertFalse(Files.exists(path))
+
+            env["REMOTE_BLE_TLS"] = "yes"
+            assertFailsWith<IllegalStateException> { tlsFrontFor(Cli(null, 8080, null), env::get) }
+        } finally {
+            Files.deleteIfExists(path)
+            Files.deleteIfExists(dir)
+        }
+    }
+
+    @Test
     fun simulationFlagAndProfileLoaderFailBeforeServerStartup() {
         assertEquals(
             Cli(bindHost = "127.0.0.1", port = 9000, simulationPath = "sim.json"),

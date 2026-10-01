@@ -76,12 +76,14 @@ internal fun Routing.dashboardRoutes(
  * **404, not 403** — consistent with an unconfigured operator credential, and it does not advertise
  * that a dashboard exists here.
  *
- * The check is sound because `origin.remoteHost` is the real TCP peer: a source address cannot be
- * forged through a completed handshake. That holds only while Ktor's `ForwardedHeaders` plugin is
+ * The check is sound because [peer] is the real TCP peer: a source address cannot be forged through a
+ * completed handshake. Behind a [TlsFront] every request reaches CIO from loopback, so [peer] resolves
+ * the relayed connection through the front's registry instead; reading `request.origin` here would
+ * open the dashboard to the whole network. That holds only while Ktor's `ForwardedHeaders` plugin is
  * **not** installed — it isn't, and installing it would make this attacker-controlled.
  */
 private suspend fun ApplicationCall.allowedOrigin(allowRemoteDashboard: Boolean): Boolean {
-    if (allowRemoteDashboard || request.origin.remoteHost.isLoopback()) return true
+    if (allowRemoteDashboard || peer.host.isLoopback()) return true
     Logger.warn(LogTags.SERVER) {
         "dashboard request from a non-loopback address refused; tunnel to it, or opt in explicitly"
     }
@@ -118,7 +120,7 @@ private suspend fun ApplicationCall.requireOperator(
     // Only a *provided but wrong* credential is a brute-force attempt worth rate-limiting; a missing
     // credential is the normal first leg of the Basic challenge and must not lock out an operator.
     if (candidate != null) {
-        val decision = authLimiter.recordFailure(request.origin.remoteHost)
+        val decision = authLimiter.recordFailure(peer.host)
         if (!decision.allowed) {
             if (decision.shouldLog) {
                 Logger.warn(LogTags.SERVER) { "operator rejected: authentication rate limited (429)" }

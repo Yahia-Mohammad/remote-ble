@@ -39,6 +39,7 @@ fun main(args: Array<String>) {
         namedCredentials.keys + setOfNotNull(token?.let { ClientCredentials.DEFAULT_PRINCIPAL })
     }
     val writePolicy = loadWritePolicy(System.getenv("REMOTE_BLE_POLICY_FILE"), knownPrincipals)
+    val tlsFront = tlsFrontFor(cli)
     val bindHost = validateBind(
         requested = cli.bindHost ?: System.getenv("REMOTE_BLE_BIND") ?: AgentConfig.DEFAULT_BIND_HOST,
         hasCredential = token != null || namedCredentials.isNotEmpty(),
@@ -72,6 +73,7 @@ fun main(args: Array<String>) {
             ?: AgentConfig().failFastOnDegradedWrites,
         simulationProfile = simulationProfile,
         writePolicy = writePolicy,
+        tlsFront = tlsFront?.second,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -91,7 +93,12 @@ fun main(args: Array<String>) {
     val auth = if (config.authToken != null || config.namedCredentials.isNotEmpty()) "bearer-token required" else "no auth"
     val host = System.getProperty("os.name") ?: "jvm"
     val radio = if (simulationProfile == null) "Kable engine on $host" else "simulation profile (${simulationProfile.peripherals.size} peripherals)"
-    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on ws://${config.bindHost}:${config.port}/agent ($auth, exclusive peripherals, $radio)" }
+    val scheme = if (tlsFront != null) "wss" else "ws"
+    Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on $scheme://${config.bindHost}:${server.resolvedPort}/agent ($auth, exclusive peripherals, $radio)" }
+    tlsFront?.first?.let { identity ->
+        // The value a client pins. Printed rather than the pairing URI, so the token stays out of logs.
+        Logger.info(LogTags.AGENT) { "Agent identity: ${identity.fingerprint}" }
+    }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
     Logger.info(LogTags.AGENT) {
         "Scan concurrency: ${config.scanConcurrency.name.lowercase()} (REMOTE_BLE_SCAN_CONCURRENCY)"
@@ -106,7 +113,7 @@ fun main(args: Array<String>) {
         }
     }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
-    Logger.info(LogTags.AGENT) { "Status dashboard: http://localhost:${config.port}/" }
+    Logger.info(LogTags.AGENT) { "Status dashboard: ${if (tlsFront != null) "https" else "http"}://localhost:${server.resolvedPort}/" }
 
     Runtime.getRuntime().addShutdownHook(
         Thread {
@@ -124,12 +131,48 @@ fun main(args: Array<String>) {
     CountDownLatch(1).await()
 }
 
-internal data class Cli(val bindHost: String?, val port: Int, val simulationPath: String?)
+internal data class Cli(
+    val bindHost: String?,
+    val port: Int,
+    val simulationPath: String?,
+    val tls: Boolean = false,
+    val resetIdentity: Boolean = false,
+)
+
+/**
+ * The agent's identity and the TLS front holding it, or `null` to serve cleartext. Opt-in for now
+ * (`--tls` / `REMOTE_BLE_TLS=true`); making it the default is a later phase of
+ * `docs/proposals/agent-transport-encryption.md`. A reset applies whether or not TLS is on, since
+ * an operator discarding a compromised key should not have to enable anything to do it.
+ */
+internal fun tlsFrontFor(
+    cli: Cli,
+    env: (String) -> String? = System::getenv,
+): Pair<AgentTlsIdentity, TlsFront.Factory>? {
+    val tls = cli.tls || strictFlag(env, "REMOTE_BLE_TLS")
+    val reset = cli.resetIdentity || strictFlag(env, "REMOTE_BLE_RESET_IDENTITY")
+    val path = env("REMOTE_BLE_IDENTITY_FILE")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+        ?: AgentIdentityStore.defaultPath()
+    if (!tls) {
+        if (reset && Files.deleteIfExists(path)) Logger.info(LogTags.AGENT) { "agent identity reset: removed $path" }
+        return null
+    }
+    val identity = AgentIdentityStore.loadOrCreate(path, reset)
+    return identity to JsseTlsFront(identity)
+}
+
+/** Strict, like REMOTE_BLE_WRITE_FAIL_FAST: a typo fails startup instead of silently meaning false. */
+private fun strictFlag(env: (String) -> String?, name: String): Boolean =
+    env(name)?.takeIf { it.isNotBlank() }?.let {
+        it.toBooleanStrictOrNull() ?: error("$name must be 'true' or 'false', got '$it'")
+    } ?: false
 
 internal fun parseCli(args: Array<String>): Cli {
     var bind: String? = null
     var port = AgentConfig.DEFAULT_PORT
     var simulation: String? = null
+    var tls = false
+    var resetIdentity = false
     var index = 0
     if (args.firstOrNull()?.toIntOrNull() != null) {
         port = args[0].toInt()
@@ -141,12 +184,14 @@ internal fun parseCli(args: Array<String>): Cli {
             "--port" -> port = args.getOrNull(++index)?.toIntOrNull() ?: error("--port requires a valid port")
             "--simulate" -> simulation = args.getOrNull(++index)?.takeIf { it.isNotBlank() }
                 ?: error("--simulate requires a profile path")
-            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind, --simulate")
+            "--tls" -> tls = true
+            "--reset-identity" -> resetIdentity = true
+            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind, --simulate, --tls, --reset-identity")
         }
         index++
     }
     require(port in 1..65535) { "port must be between 1 and 65535" }
-    return Cli(bind, port, simulation)
+    return Cli(bind, port, simulation, tls, resetIdentity)
 }
 
 /** Resolves a simulation profile before Koin/server startup, so malformed input never opens a port. */

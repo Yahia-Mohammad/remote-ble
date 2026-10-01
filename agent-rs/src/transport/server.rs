@@ -394,7 +394,15 @@ pub struct ServerConfig {
     pub operator_token: Option<String>,
     /// Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks.
     pub write_policy: WritePolicy,
+    /// Serve `wss://` presenting the agent's pinned identity (#39); `None` serves cleartext
+    /// `ws://`. The TLS handshake completes before the upgrade request is read, so a client that
+    /// rejects the identity never sends its bearer token.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
 }
+
+/// How long a connection may take to complete the TLS handshake, so a peer that opens TCP and
+/// never speaks TLS cannot hold a task forever.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
     let expected = expected.as_bytes();
@@ -686,9 +694,17 @@ impl AgentServer {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(self.config.addr).await?;
+        self.run_on(listener).await
+    }
+
+    /// [Self::run] on an already bound listener, so a test can bind port 0, learn the port, and
+    /// drive the real accept loop.
+    pub async fn run_on(&self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error>> {
+        let acceptor = self.config.tls.clone().map(tokio_rustls::TlsAcceptor::from);
         tracing::info!(
-            "Agent WebSocket server listening on ws://{}",
-            self.config.addr
+            "Agent WebSocket server listening on {}://{}",
+            if acceptor.is_some() { "wss" } else { "ws" },
+            listener.local_addr()?
         );
 
         // A transient accept() error (fd exhaustion, ECONNABORTED, a peer that
@@ -724,21 +740,51 @@ impl AgentServer {
             let status_source = self.status_source.clone();
             let operator_token = self.config.operator_token.clone();
 
-            tokio::spawn(Self::accept_connection_with_scan(
-                stream,
-                peer_addr,
-                backend,
-                registry,
-                credentials,
-                strict,
-                live_sessions,
-                failed_auth_limiter,
-                revoked_principals,
-                scan_coordinator,
-                scan_mode,
-                status_source,
-                operator_token,
-            ));
+            let Some(acceptor) = acceptor.clone() else {
+                tokio::spawn(Self::accept_connection_with_scan(
+                    stream,
+                    peer_addr,
+                    backend,
+                    registry,
+                    credentials,
+                    strict,
+                    live_sessions,
+                    failed_auth_limiter,
+                    revoked_principals,
+                    scan_coordinator,
+                    scan_mode,
+                    status_source,
+                    operator_token,
+                ));
+                continue;
+            };
+            // The handshake runs on the connection's own task, never on the accept loop, so one
+            // slow or hostile peer cannot stall everyone else's accept.
+            tokio::spawn(async move {
+                match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    Ok(Ok(tls_stream)) => {
+                        Self::accept_connection_with_scan(
+                            tls_stream,
+                            peer_addr,
+                            backend,
+                            registry,
+                            credentials,
+                            strict,
+                            live_sessions,
+                            failed_auth_limiter,
+                            revoked_principals,
+                            scan_coordinator,
+                            scan_mode,
+                            status_source,
+                            operator_token,
+                        )
+                        .await
+                    }
+                    // Most often a client that rejected this identity: the pinning working.
+                    Ok(Err(e)) => tracing::debug!("TLS handshake with {} failed: {}", peer_addr, e),
+                    Err(_) => tracing::debug!("TLS handshake with {} timed out", peer_addr),
+                }
+            });
         }
     }
 
@@ -4064,6 +4110,7 @@ mod tests {
                 transport_grace: Duration::from_secs(10),
                 operator_token: None,
                 write_policy: WritePolicy::permissive(),
+                tls: None,
             },
             Arc::new(FakeBackend::default()),
             PeripheralRegistry::new(LeaseConfig::default()),
@@ -5359,5 +5406,287 @@ mod tests {
         assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
         assert_eq!(fake.disconnects.load(Ordering::Relaxed), 1);
         assert!(registry.held_by("owner").is_empty());
+    }
+
+    /// A rustls client that trusts exactly the server key hashing to `pin`: the reference for how
+    /// any Rust client should pin an agent. Signatures are still verified; only the trust anchor is
+    /// replaced by the pin.
+    #[derive(Debug)]
+    struct PinVerifier {
+        pin: String,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for PinVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            let presented = crate::transport::identity::fingerprint_of_spki(
+                crate::transport::identity::certificate_spki(end_entity).unwrap_or_default(),
+            );
+            if presented == self.pin {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            } else {
+                Err(rustls::Error::General(format!(
+                    "agent identity mismatch: pinned {}, presented {presented}",
+                    self.pin
+                )))
+            }
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &rustls::pki_types::CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &rustls::pki_types::CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.provider
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    fn pinned_connector(
+        pin: &str,
+        versions: &[&'static rustls::SupportedProtocolVersion],
+    ) -> tokio_rustls::TlsConnector {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(versions)
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinVerifier {
+                pin: pin.to_string(),
+                provider,
+            }))
+            .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+    }
+
+    fn tls_identity(name: &str) -> crate::transport::identity::AgentIdentity {
+        let dir = std::env::temp_dir().join(format!(
+            "remoteble-tls-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let identity = crate::transport::identity::load_or_create(
+            &dir.join(crate::transport::identity::FILE_NAME),
+            false,
+        )
+        .unwrap();
+        // The identity is in memory now; the file has done its job.
+        std::fs::remove_dir_all(&dir).unwrap();
+        identity
+    }
+
+    /// Runs one TLS connection into the exact upgrade path `run()` uses. Returns whether the
+    /// handshake completed on the agent's side, i.e. whether any HTTP could have been read.
+    async fn serve_one_tls_connection(
+        acceptor: tokio_rustls::TlsAcceptor,
+        server_io: tokio::io::DuplexStream,
+    ) -> bool {
+        let Ok(tls) = acceptor.accept(server_io).await else {
+            return false;
+        };
+        let backend: Arc<dyn BleBackend> = Arc::new(FakeBackend::default());
+        AgentServer::accept_connection(
+            tls,
+            "127.0.0.1:1".parse().unwrap(),
+            backend,
+            PeripheralRegistry::new(LeaseConfig::default()),
+            Arc::new(HashMap::from([(
+                "alpha".to_string(),
+                "secret-a".to_string(),
+            )])),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(LiveSessionRegistry::default()),
+            Arc::new(AuthFailureLimiter::default()),
+            Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            None,
+        )
+        .await;
+        true
+    }
+
+    fn authorized_request() -> http::Request<()> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = "wss://agent.remoteble.invalid/agent"
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Authorization", "Bearer secret-a".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("X-RemoteBle-Client", "tls-client".parse().unwrap());
+        request
+    }
+
+    /// TLS-PIN-01 and TLS-PIN-06 (docs/proposals/agent-transport-encryption.md): a client pinning
+    /// the agent's fingerprint upgrades over TLS, on 1.3 and on 1.2 alone, which is all Ktor's CIO
+    /// client (the SDK's JVM engine) speaks.
+    #[tokio::test]
+    async fn tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12() {
+        let identity = tls_identity("pin01");
+        let acceptor = tokio_rustls::TlsAcceptor::from(
+            crate::transport::identity::server_config(&identity).unwrap(),
+        );
+        for versions in [
+            &[&rustls::version::TLS13][..],
+            &[&rustls::version::TLS12][..],
+        ] {
+            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let server = tokio::spawn(serve_one_tls_connection(acceptor.clone(), server_io));
+            let tls = pinned_connector(&identity.fingerprint, versions)
+                .connect(
+                    rustls::pki_types::ServerName::try_from(
+                        crate::transport::identity::TLS_SERVER_NAME,
+                    )
+                    .unwrap(),
+                    client_io,
+                )
+                .await
+                .expect("the pinned identity must be accepted");
+            assert_eq!(
+                tls.get_ref().1.protocol_version(),
+                Some(versions[0].version)
+            );
+            let (client, response) = tokio_tungstenite::client_async(authorized_request(), tls)
+                .await
+                .expect("the upgrade must succeed over TLS");
+            assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+            drop(client);
+            assert!(server.await.unwrap());
+        }
+    }
+
+    /// TLS-PIN-02: a client pinning a different identity fails inside the TLS handshake, so the
+    /// agent never completes it and never reads an upgrade request, let alone the token.
+    #[tokio::test]
+    async fn tls_pin_02_a_different_identity_fails_before_any_request_is_read() {
+        let identity = tls_identity("pin02");
+        let other = tls_identity("pin02-other");
+        let acceptor = tokio_rustls::TlsAcceptor::from(
+            crate::transport::identity::server_config(&identity).unwrap(),
+        );
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(serve_one_tls_connection(acceptor, server_io));
+
+        let error = pinned_connector(&other.fingerprint, &[&rustls::version::TLS13])
+            .connect(
+                rustls::pki_types::ServerName::try_from(
+                    crate::transport::identity::TLS_SERVER_NAME,
+                )
+                .unwrap(),
+                client_io,
+            )
+            .await
+            .expect_err("a different identity must be refused");
+
+        assert!(
+            error.to_string().contains("agent identity mismatch"),
+            "{error}"
+        );
+        assert!(
+            !server.await.unwrap(),
+            "the agent must not complete a handshake the client refused"
+        );
+    }
+
+    /// The accept loop's TLS branch over real TCP: `run_on` must hand each connection through the
+    /// TLS handshake before the upgrade, and a refused identity must cost the agent nothing but
+    /// that one connection.
+    #[tokio::test]
+    async fn tls_accept_loop_serves_pinned_clients_over_real_tcp() {
+        let identity = tls_identity("loop");
+        let other = tls_identity("loop-other");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Arc::new(AgentServer::new(
+            ServerConfig {
+                addr,
+                credentials: Arc::new(HashMap::from([(
+                    "alpha".to_string(),
+                    "secret-a".to_string(),
+                )])),
+                strict_identifiers: Arc::new(AtomicBool::new(false)),
+                scan_concurrency: ScanConcurrencyMode::Multiplexed,
+                transport_grace: Duration::from_secs(10),
+                operator_token: None,
+                write_policy: WritePolicy::permissive(),
+                tls: Some(crate::transport::identity::server_config(&identity).unwrap()),
+            },
+            Arc::new(FakeBackend::default()),
+            PeripheralRegistry::new(LeaseConfig::default()),
+        ));
+        let running = {
+            let server = server.clone();
+            tokio::spawn(async move { server.run_on(listener).await.map_err(|e| e.to_string()) })
+        };
+        let name = || {
+            rustls::pki_types::ServerName::try_from(crate::transport::identity::TLS_SERVER_NAME)
+                .unwrap()
+        };
+
+        let refused = pinned_connector(&other.fingerprint, &[&rustls::version::TLS13])
+            .connect(name(), tokio::net::TcpStream::connect(addr).await.unwrap())
+            .await;
+        assert!(refused.is_err(), "a different identity must be refused");
+
+        // Plain WebSocket against the TLS port gets no upgrade.
+        let plain = tokio_tungstenite::client_async(
+            "ws://127.0.0.1/agent",
+            tokio::net::TcpStream::connect(addr).await.unwrap(),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), plain)
+                .await
+                .map_or(true, |result| result.is_err()),
+            "cleartext must not upgrade on the TLS port"
+        );
+
+        let tls = pinned_connector(&identity.fingerprint, &[&rustls::version::TLS12])
+            .connect(name(), tokio::net::TcpStream::connect(addr).await.unwrap())
+            .await
+            .expect("the agent must still serve a pinned client after refusals");
+        let (client, response) = tokio_tungstenite::client_async(authorized_request(), tls)
+            .await
+            .expect("the upgrade must succeed over TLS");
+        assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+
+        drop(client);
+        assert!(!running.is_finished(), "the accept loop must keep running");
+        running.abort();
     }
 }

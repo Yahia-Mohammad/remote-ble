@@ -286,6 +286,31 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 
 ---
 
+## 11. Built-in TLS (pinned identity, #39)
+
+Opt-in on both desktop agents; see [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+The phone agents (Kotlin Android/iOS) follow in later phases of that record.
+
+| Feature | Kotlin (JVM) | Rust |
+|---|---|---|
+| Enable | `--tls` / `REMOTE_BLE_TLS=true` | `--tls` / `REMOTE_BLE_TLS=true` |
+| Identity file | `REMOTE_BLE_IDENTITY_FILE`, same default path | `--identity-file` / `REMOTE_BLE_IDENTITY_FILE`, same default path |
+| File format | PEM: PKCS#8 key **with** public key + certificate | Same; each reads the other's file |
+| Reset | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Same |
+| Key / certificate | ECDSA P-256, self-signed, SAN `agent.remoteble.invalid`, no expiry | Same (rcgen) |
+| Fingerprint logged at start | `Agent identity: sha256:<hex>` | Same |
+| TLS versions | 1.3 and 1.2 (JSSE) | 1.3 and 1.2 (rustls, `ring`) |
+| Termination | In-process front relaying to CIO on loopback, real peer via registry | `tokio-rustls` before the upgrade, peer address native |
+| Handshake bound | 10 s | 10 s |
+| Dashboard over TLS | ✅ (`https://`) | n/a (no dashboard) |
+
+**Parity:** Full match on the wire and on disk. Interop checked both ways on 2026-10-01: a file written
+by either agent loads in the other with the same fingerprint, and OpenSSL computes the same SPKI digest.
+That check found the JDK's PKCS#8 encoding omits the EC public key, which `ring` requires; the JVM agent
+now writes it.
+
+---
+
 ## Summary
 
 ### Verified parity in the specifically listed algorithm/schema areas

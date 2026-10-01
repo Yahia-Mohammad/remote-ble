@@ -88,6 +88,14 @@ kotlin {
             implementation(compose.runtime)
         }
 
+        // The TLS front and identity, on the JSSE that the JVM and Android share (Conscrypt on
+        // Android). Only the key's storage differs, so it is the only TLS code kept per platform.
+        val jsseMain by creating {
+            dependsOn(commonMain.get())
+        }
+        jvmMain.get().dependsOn(jsseMain)
+        androidMain.get().dependsOn(jsseMain)
+
         // Compose UI + mobile entry-point glue (AgentApp, AgentRunner, AgentService/
         // IosAgentEntry). A custom intermediate source set rather than commonMain so the jvm()
         // CLI target's dependency graph never pulls in Compose Multiplatform.

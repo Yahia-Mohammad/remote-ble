@@ -130,9 +130,9 @@ class WebSocketAgentTransport(
             try {
                 openSession()
             } catch (e: Throwable) {
-                e.asCleartextRefusal(url)?.let { refusal ->
-                    giveUpOnPolicyRefusal(refusal)
-                    throw refusal
+                e.asTerminalConnectFailure(url)?.let { terminal ->
+                    giveUpOnTerminalFailure(terminal)
+                    throw terminal
                 }
                 if (reconnect.enabled && !closed) {
                     Logger.warn(LogTags.TRANSPORT) {
@@ -270,8 +270,8 @@ class WebSocketAgentTransport(
                 Logger.info(LogTags.TRANSPORT) { "reconnected after $attempt attempt(s) [cid=$clientId]" }
                 return
             } catch (e: Throwable) {
-                e.asCleartextRefusal(url)?.let { refusal ->
-                    giveUpOnPolicyRefusal(refusal)
+                e.asTerminalConnectFailure(url)?.let { terminal ->
+                    giveUpOnTerminalFailure(terminal)
                     return
                 }
                 if (maxAttempts != null && attempt >= maxAttempts) {
@@ -293,12 +293,12 @@ class WebSocketAgentTransport(
     }
 
     /**
-     * A platform policy refusal fails every attempt identically, so retrying it only turns a
-     * configuration error into a silent loop that looks like an unreachable agent. Give up at once,
-     * whatever [reconnect] says, and say why at ERROR.
+     * A platform policy refusal or a pinned-identity mismatch fails every attempt identically, so
+     * retrying it only turns a configuration or security error into a silent loop that looks like an
+     * unreachable agent. Give up at once, whatever [reconnect] says, and say why at ERROR.
      */
-    private fun giveUpOnPolicyRefusal(refusal: CleartextTrafficNotPermittedException) {
-        Logger.error(LogTags.TRANSPORT) { "${refusal.message} [cid=$clientId]" }
+    private fun giveUpOnTerminalFailure(failure: Exception) {
+        Logger.error(LogTags.TRANSPORT) { "${failure.message} [cid=$clientId]" }
         if (closed) return
         _state.value = TransportState.GAVE_UP
         reconnect.onGaveUp?.invoke()

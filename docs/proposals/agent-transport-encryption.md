@@ -1,8 +1,10 @@
 # Encrypted LAN transport with a pinned agent identity
 
 Decision record for [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39). **Accepted
-2026-10-01: option A, TLS with a pinned self-signed certificate.** Nothing is implemented yet; the
-phases in [§8](#8-phases) are the plan, and each one updates this record as it lands.
+2026-10-01: option A, TLS with a pinned self-signed certificate.** The phases in [§8](#8-phases) are
+the plan, and each one updates this record as it lands. **Phase 1, Kotlin half, implemented**: the
+identity, the JVM agent's TLS front with the peer registry, and the SDK's pinned JVM client, behind
+`--tls` ([§10](#10-progress)).
 
 ## 1. The problem
 
@@ -54,6 +56,7 @@ Checked against the libraries this build resolves (Ktor 3.5.1), not assumed:
 | Ktor's CIO **server** has no TLS on any platform, the JVM included: no TLS classes in the jar, and `startConnector` distinguishes only a Unix socket from plain TCP. | The Kotlin agents cannot get TLS from their engine. |
 | `ktor-network-tls` implements only the **client** handshake (`TLSClientHandshake`; no server side). | It cannot wrap the agent's listening socket either. |
 | The CIO **client** speaks TLS ≤ 1.2, with ECDHE-ECDSA/RSA AES-GCM suites, and takes a custom `X509TrustManager`. | Every agent MUST offer TLS 1.2 with an ECDHE-ECDSA-AES-GCM suite, alongside 1.3, or the JVM SDK cannot connect. |
+| The CIO **client** verifies the TLS server name against the certificate even when a custom trust manager accepts it (`TLSClientHandshake` calls `verifyHostnameInCertificate` whenever `serverName` is set, and the engine defaults it to the URL host). | Agents are reached by changing IP addresses their certificates cannot name, so every agent certificate carries the fixed name `agent.remoteble.invalid` and pinning clients present it ([§5.1](#51-identity)). |
 | `FailedAuthLimiter` keys on `origin.remoteHost`, and the dashboard's own-device gate (`Dashboard.kt`) is sound only because that is the real TCP peer. | A TLS front that relays to a loopback listener MUST carry the real peer through ([§5.2](#52-kotlin-agents-jvm-android-ios)), or the dashboard opens to the whole network and all clients share one rate-limit bucket. |
 
 ## 5. Design
@@ -62,14 +65,18 @@ Checked against the libraries this build resolves (Ktor 3.5.1), not assumed:
 
 - **Key:** ECDSA P-256. Every party supports it: the JDK, Android Keystore, iOS `SecKey`, rustls, and
   the CIO client's ECDHE-ECDSA suites. Ed25519 would not reach the CIO client.
-- **Certificate:** self-signed, created with the key on first start, validity far enough ahead that
-  it never matters (clients pin the key and ignore validity and host name).
+- **Certificate:** self-signed, created with the key on first start, with no well-defined expiry
+  (`99991231235959Z`, RFC 5280) since clients pin the key and ignore validity. It carries a SAN of
+  `agent.remoteble.invalid` (reserved TLD, so never a real host) for TLS stacks that verify the
+  server name regardless of the trust decision, plus critical `CA:FALSE`, `digitalSignature` and
+  `serverAuth`. Built by a common DER writer (`SelfSignedCertificate`), since neither the JDK nor
+  iOS can create a certificate.
 - **Storage**, beside each agent's existing secrets:
 
   | Agent | Where |
   |---|---|
-  | Kotlin JVM | A PKCS#12 file under the per-user config directory (`$XDG_CONFIG_HOME/remoteble/`, `~/Library/Application Support/RemoteBLE/`, `%APPDATA%\RemoteBLE\`), overridable with `REMOTE_BLE_IDENTITY_FILE`. New: the desktop agents persist nothing today. |
-  | Rust | The same file and variable, so the two desktop agents agree. |
+  | Kotlin JVM | `agent-identity.pem` (PKCS#8 key + certificate, owner-only permissions) under the per-user config directory (`$XDG_CONFIG_HOME/remoteble/`, `~/Library/Application Support/RemoteBLE/`, `%APPDATA%\RemoteBLE\`), overridable with `REMOTE_BLE_IDENTITY_FILE`. PEM rather than PKCS#12, so no keystore password is needed and Rust reads it natively. New: the desktop agents persisted nothing before. |
+  | Rust | The same file, format and variable, so the two desktop agents on one host present one identity. |
   | Android | Android Keystore. Its key generator issues the self-signed certificate itself, and the private key never leaves the keystore. |
   | iOS | Keychain. iOS has no API to create a certificate, so the agent builds the DER and signs it with the key. |
 
@@ -160,7 +167,7 @@ agent:
 | `TLS-PIN-02` | A client pinning a different fingerprint fails with the identity error, and the agent never receives the upgrade request (so never sees the token). |
 | `TLS-PIN-03` | The fingerprint is stable across a restart and changes after a reset. |
 | `TLS-PIN-04` | Reconnect and lease resume work over `wss://` as over `ws://`. |
-| `TLS-PIN-05` | A non-loopback cleartext bind is refused without the explicit opt-in; loopback `ws://` still works. |
+| `TLS-PIN-05` | A non-loopback cleartext bind is refused without the explicit opt-in; loopback `ws://` still works. Lands with the gate itself, in phase 5. |
 | `TLS-PIN-06` | The CIO client (TLS 1.2) connects, proving the 1.2 suite requirement. |
 | `TLS-PIN-07` | Kotlin agents: behind the front, the rate limiter and the dashboard's own-device gate see the real peer, not loopback. |
 
@@ -179,7 +186,7 @@ proxy recipe, which stays valid but is no longer the only encrypted option.
 Each phase is independently mergeable and testable.
 
 1. **Identity, Rust agent, Kotlin JVM agent and JVM client.** All CI-testable, including
-   `TLS-PIN-01`–`07` against both desktop agents.
+   `TLS-PIN-01`–`04`, `06` and `07` against both desktop agents (`05` needs the phase 5 gate).
 2. **Android agent and the OkHttp client.** Validated on Rig B's Pixel (Android 17).
 3. **iOS agent and the Darwin client.** The largest piece: certificate construction, the Keychain
    identity and the `NWListener` front.
@@ -195,5 +202,24 @@ Each phase is independently mergeable and testable.
 - **The iOS certificate.** It needs a minimal DER writer, and an identity assembled from a Keychain
   key plus certificate rather than a PKCS#12 import. Prototype it first, because phase 3 sizing
   depends on it.
-- **Desktop identity location.** Whether the JVM and Rust agents should share one file by default,
-  or keep separate files so the two can run side by side with distinct identities.
+- ~~**Desktop identity location.**~~ Settled in phase 1: one PEM file, one default path, shared by
+  the JVM and Rust agents. Two agents on one host are one machine, so one identity is the honest
+  answer; `REMOTE_BLE_IDENTITY_FILE` separates them when that is really wanted.
+
+## 10. Progress
+
+**Phase 1, Kotlin half (2026-10-01).** `AgentFingerprint` and `AGENT_TLS_SERVER_NAME` in
+`:protocol`; `SelfSignedCertificate` (common), `AgentIdentityStore` and `JsseTlsFront` (JVM) in
+`:agent`, with the peer registry wired through `ApplicationCall.peer`; `pinnedWebSocketHttpClient`
+(JVM) and `AgentIdentityMismatchException` in `:client-sdk`, the mismatch treated as terminal like a
+cleartext refusal. The JVM agent serves `wss://` with `--tls`.
+
+Evidence: `TlsPinningEndToEndTest` covers `TLS-PIN-01`, `02`, `03`, `06` and `07` against the real
+front with the CIO client. `07` was mutation-checked: with the registry lookup removed, a LAN request
+reached the dashboard (200 instead of 404) and the monitor recorded the relay's address. The
+certificate parses and verifies under the JDK and OpenSSL, whose SPKI digest matches the agent's
+fingerprint; `openssl s_client` negotiates ECDHE-ECDSA AES-GCM on both TLS 1.2 and 1.3; `curl
+--pinnedpubkey` gets 401 without the token and 101 with it, and aborts on a wrong pin.
+
+Still open in phase 1: the Rust agent, `TLS-PIN-04` (reconnect and lease resume over `wss://`), and
+the scenarios in the conformance spec itself.

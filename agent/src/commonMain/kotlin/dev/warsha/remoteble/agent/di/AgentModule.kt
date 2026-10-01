@@ -22,6 +22,7 @@ import dev.warsha.remoteble.agent.platformName
 import dev.warsha.remoteble.protocol.DeviceHandle
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import dev.warsha.remoteble.agent.TlsFront
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import org.koin.core.module.Module
@@ -73,6 +74,11 @@ data class AgentConfig(
     val simulationProfile: SimulationProfile? = null,
     /** Per-principal write allowlist (U7). Permissive by default: no existing consumer breaks. */
     val writePolicy: WritePolicy = WritePolicy.permissive(),
+    /**
+     * Serve `wss://` through this front, holding the agent's pinned identity. `null` (the default)
+     * serves cleartext `ws://`. See `docs/proposals/agent-transport-encryption.md`.
+     */
+    val tlsFront: TlsFront.Factory? = null,
 ) {
     companion object {
         const val DEFAULT_BIND_HOST: String = "127.0.0.1"
@@ -165,6 +171,7 @@ fun agentModule(config: AgentConfig): Module = module {
             monitor = get<AgentMonitor>(),
             registry = get(),
             strictMode = get(),
+            tls = config.tlsFront,
         )
     }
 }

@@ -10,6 +10,7 @@ import dev.warsha.remoteble.protocol.ProtocolVersionSelection
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.application.install
@@ -22,6 +23,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
+import io.ktor.util.AttributeKey
 import io.ktor.websocket.Frame
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.close
@@ -59,6 +61,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * on the upgrade request; a missing/wrong credential is rejected with `401` before the
  * WebSocket handshake completes (the client never reaches CONNECTED). This is the
  * server half of the SDK's transport-level auth hook; the SDK owns no identity system.
+ *
+ * With [tls], the server speaks `wss://`: CIO binds an ephemeral loopback port and the [TlsFront]
+ * owns [port], relaying each decrypted connection to it. Every peer address the server reasons
+ * about (rate limiting, the dashboard's own-device gate, the monitor) is then the real one,
+ * resolved through the front rather than read off the relay.
  */
 class AgentWebSocketServer(
     private val port: Int,
@@ -88,8 +95,11 @@ class AgentWebSocketServer(
     // — instead of waiting on the OS TCP keepalive (minutes).
     private val pingPeriod: Duration = DEFAULT_PING_PERIOD,
     private val pongTimeout: Duration = DEFAULT_PONG_TIMEOUT,
+    /** Serve `wss://` through this front; `null` serves cleartext `ws://` directly. */
+    private val tls: TlsFront.Factory? = null,
 ) {
     private var server: EmbeddedServer<*, *>? = null
+    private val front = atomic<TlsFront?>(null)
 
     // The scope owning the running engine's job, so [stop] retires it with the server rather than
     // leaving a SupervisorJob (and its exception handler) alive for the process's lifetime.
@@ -156,7 +166,15 @@ class AgentWebSocketServer(
         val engineScope = CoroutineScope(
             SupervisorJob() + CoroutineExceptionHandler { _, failure -> engineFailure.complete(failure) },
         )
-        val instance = engineScope.embeddedServer(CIO, host = host, port = port) {
+        // Behind a TLS front, CIO only ever hears the relay, so it binds loopback and any free port.
+        val listenHost = if (tls != null) LOOPBACK_HOST else host
+        val listenPort = if (tls != null) 0 else port
+        val instance = engineScope.embeddedServer(CIO, host = listenHost, port = listenPort) {
+            // Resolved first, in Setup, so the credential gate below and every route see the real
+            // peer. Without a front, or for a connection no relay owns, it is simply the TCP peer.
+            intercept(ApplicationCallPipeline.Setup) {
+                front.value?.peerOf(call.request.origin.remotePort)?.let { call.attributes.put(PeerAttribute, it) }
+            }
             install(WebSockets) {
                 pingPeriodMillis = pingPeriod.inWholeMilliseconds
                 timeoutMillis = pongTimeout.inWholeMilliseconds
@@ -169,7 +187,7 @@ class AgentWebSocketServer(
                     if (call.request.path() == path &&
                         credentials.authenticate(call.request.headers[HttpHeaders.Authorization]) == null
                     ) {
-                        val decision = failedAuthLimiter.recordFailure(call.request.origin.remoteHost)
+                        val decision = failedAuthLimiter.recordFailure(call.peer.host)
                         if (decision.allowed) {
                             Logger.warn(LogTags.SERVER) { "client rejected: unauthorized (401)" }
                             call.respond(HttpStatusCode.Unauthorized)
@@ -200,7 +218,7 @@ class AgentWebSocketServer(
                 }
                 webSocket(path) {
                     val clientId = nextClientId.incrementAndGet()
-                    val address = call.request.origin.let { "${it.remoteHost}:${it.remotePort}" }
+                    val address = call.peer.toString()
                     // Stable client identity (survives reconnects) for ownership; falls back to
                     // the per-connection id so a client that sends none simply never resumes.
                     val stableClientId = call.request.headers[CLIENT_ID_HEADER]?.takeIf { it.isNotBlank() }
@@ -222,7 +240,7 @@ class AgentWebSocketServer(
                         ?.let { offered ->
                             val accepted = operatorCredentials?.authenticate(offered) != null
                             if (!accepted) {
-                                val decision = operatorAuthLimiter.recordFailure(call.request.origin.remoteHost)
+                                val decision = operatorAuthLimiter.recordFailure(call.peer.host)
                                 if (decision.shouldLog) {
                                     Logger.warn(LogTags.SERVER) {
                                         "operator scope refused on upgrade [c=$clientId]: bad credential"
@@ -313,6 +331,18 @@ class AgentWebSocketServer(
         // stayed unreportable for a whole rig, so all three route through one conversion.
         bindGuarded(instance, engineScope, engineFailure) { instance.start(wait = false) }
         awaitBind(instance, engineScope, engineFailure)
+        if (tls != null) {
+            val started = try {
+                tls.start(host, port, boundPort.value)
+            } catch (failure: Throwable) {
+                // The public port is the one that matters; without it the plain listener is useless.
+                abandon(instance, engineScope)
+                throw failure as? AgentBindException ?: AgentBindException(host, port, failure)
+            }
+            front.value = started
+            boundPort.value = started.port
+            Logger.info(LogTags.SERVER) { "listening on wss://$host:${started.port}$path" }
+        }
     }
 
     /**
@@ -384,7 +414,11 @@ class AgentWebSocketServer(
         // Authoritative only now: with port 0 the requested port describes nothing, and even with a
         // fixed port this is what the engine reports rather than what was asked for.
         boundPort.value = connectors.first().port
-        Logger.info(LogTags.SERVER) { "listening on $host:${boundPort.value}$path" }
+        if (tls == null) {
+            Logger.info(LogTags.SERVER) { "listening on $host:${boundPort.value}$path" }
+        } else {
+            Logger.debug(LogTags.SERVER) { "plain listener for the TLS front on $LOOPBACK_HOST:${boundPort.value}" }
+        }
     }
 
     private fun abandon(instance: EmbeddedServer<*, *>, engineScope: CoroutineScope) {
@@ -395,6 +429,8 @@ class AgentWebSocketServer(
     }
 
     fun stop(gracePeriodMillis: Long = 100, timeoutMillis: Long = 500) {
+        // The front first, so no new connection is relayed into a listener that is going away.
+        front.getAndSet(null)?.stop()
         server?.stop(gracePeriodMillis, timeoutMillis)
         engineJob?.cancel()
         server = null
@@ -402,6 +438,7 @@ class AgentWebSocketServer(
     }
 
     companion object {
+        private const val LOOPBACK_HOST = "127.0.0.1"
         const val MAX_FRAME_BYTES: Int = 1_048_576
         const val FRAME_TOO_LARGE_CLOSE_REASON: String = "REMOTE_BLE_FRAME_TOO_LARGE"
         const val DUPLICATE_SESSION_CLOSE_REASON: String = "REMOTE_BLE_DUPLICATE_SESSION"
@@ -491,3 +528,13 @@ class BlackholeBackend : AgentBackend {
     override fun serve(incoming: Flow<ByteArray>, outgoing: suspend (ByteArray) -> Unit, scope: CoroutineScope, connectionId: Long, clientKey: String, operatorScope: Boolean): Job =
         scope.launch { incoming.collect { /* swallow, never reply */ } }
 }
+
+/** The real peer of a call relayed by a [TlsFront]; absent for a call that reached CIO directly. */
+internal val PeerAttribute: AttributeKey<PeerAddress> = AttributeKey("RemoteBlePeer")
+
+/**
+ * Who this call came from: the peer a [TlsFront] relayed it for, otherwise the TCP peer itself.
+ * Use this, never `request.origin`, for any decision about the peer.
+ */
+internal val ApplicationCall.peer: PeerAddress
+    get() = attributes.getOrNull(PeerAttribute) ?: request.origin.let { PeerAddress(it.remoteHost, it.remotePort) }

@@ -24,6 +24,8 @@ kotlin {
         aarMetadata {
             minCompileSdk = libs.versions.android.minCompile.get().toInt()
         }
+        // The OkHttp pinned client is Android-only, so its end-to-end test runs as a host test.
+        withHostTest {}
     }
     // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
     // simulator): matches :protocol and the rest of the repo, and trims ~24 files per release off the
@@ -95,6 +97,11 @@ kotlin {
             implementation(libs.ktor.server.websockets)
             // Verifies the Koin graph resolves (ClientKoinTest); no network/radio.
             implementation(libs.koin.test)
+        }
+        // The OkHttp pinned client against a real agent behind its JSSE front, on the host JVM.
+        getByName("androidHostTest").dependencies {
+            implementation(project(":agent"))
+            implementation(libs.okhttp.tls)
         }
     }
 }

@@ -4,6 +4,8 @@ import dev.warsha.remoteble.agent.AgentIdentityStore
 import dev.warsha.remoteble.agent.AgentMonitor
 import dev.warsha.remoteble.agent.AgentTlsIdentity
 import dev.warsha.remoteble.agent.AgentWebSocketServer
+import dev.warsha.remoteble.agent.BleAgentBackend
+import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.JsseTlsFront
 import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
@@ -11,6 +13,9 @@ import dev.warsha.remoteble.protocol.AgentFingerprint
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
+import dev.warsha.remoteble.protocol.ErrorKind
+import dev.warsha.remoteble.protocol.Op
+import dev.warsha.remoteble.protocol.OpResult
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
@@ -28,14 +33,19 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assume
@@ -52,6 +62,7 @@ class TlsPinningEndToEndTest {
     private val clients = mutableListOf<io.ktor.client.HttpClient>()
     private val servers = mutableListOf<AgentWebSocketServer>()
     private val logged = CopyOnWriteArrayList<String>()
+    private val char = CharRef("0000180d-0000-1000-8000-00805f9b34fb", "00002a37-0000-1000-8000-00805f9b34fb")
 
     @OptIn(ExperimentalPathApi::class)
     @AfterTest
@@ -92,7 +103,7 @@ class TlsPinningEndToEndTest {
 
         val peripheral = RemoteGattClient(DeviceHandle("FA:KE:00:00:00:0A"), session)
         peripheral.connect()
-        val value = peripheral.read(CharRef("0000180d-0000-1000-8000-00805f9b34fb", "00002a37-0000-1000-8000-00805f9b34fb"))
+        val value = peripheral.read(char)
 
         assertEquals(listOf<Byte>(0x42, 0x07), value.toList())
     }
@@ -137,6 +148,80 @@ class TlsPinningEndToEndTest {
         assertFailsWith<AgentIdentityMismatchException> {
             pinnedTransport(reset.resolvedPort, before.fingerprint, ReconnectPolicy.None).connect()
         }
+        Unit
+    }
+
+    /**
+     * TLS-PIN-04: the agent restarts on the same port with the same identity. The pinned client
+     * reconnects over `wss://` on its own, and the session's replay restores a subscription the
+     * app never re-collected, exactly as over `ws://`.
+     */
+    @Test
+    fun aPinnedClientReconnectsAndResumesItsSubscriptionAfterARestart() = runBlocking {
+        var server = tlsServer()
+        val port = server.resolvedPort
+        val session = DefaultAgentSession(
+            pinnedTransport(port, identity.fingerprint, ReconnectPolicy(backoff = Backoff(50.milliseconds, 200.milliseconds))),
+            CborProtocolCodec(),
+            scope,
+        )
+        withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+        val peripheral = RemoteGattClient(DeviceHandle("FA:KE:00:00:00:0A"), session)
+        peripheral.connect()
+        val received = Channel<ByteArray>(Channel.UNLIMITED)
+        val observer = peripheral.observe(char).onEach { received.trySend(it) }.launchIn(scope)
+        try {
+            withTimeout(10.seconds) { received.receive() }
+
+            server.stop()
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.DISCONNECTED } }
+            server = AgentWebSocketServer(port, tls = JsseTlsFront(identity)).also { servers += it }.startAndAwaitReady()
+            withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+
+            while (received.tryReceive().isSuccess) { /* drop the pre-restart backlog */ }
+            repeat(3) { withTimeout(10.seconds) { received.receive() } }
+        } finally {
+            observer.cancel()
+        }
+    }
+
+    /**
+     * TLS-PIN-04: a transport drop inside the grace window. The same principal and stable client id
+     * reconnect over `wss://` and resume the lease the agent held for them; another principal is
+     * still refused it meanwhile.
+     */
+    @Test
+    fun aLeaseHeldThroughATransportDropResumesOverWss() = runBlocking {
+        val server = AgentWebSocketServer(
+            port = 0,
+            credentials = ClientCredentials.of(mapOf("alpha" to "secret-a", "beta" to "secret-b")),
+            backend = BleAgentBackend(StubBleBackend()),
+            tls = JsseTlsFront(identity),
+        ).also { servers += it }.startAndAwaitReady()
+        val device = DeviceHandle(StubBleBackend.DEVICE)
+        suspend fun session(secret: String, clientId: String) = DefaultAgentSession(
+            WebSocketAgentTransport(
+                "wss://127.0.0.1:${server.resolvedPort}/agent",
+                scope,
+                pinnedWebSocketHttpClient(identity.fingerprint).also { clients += it },
+                authToken = { secret },
+                reconnect = ReconnectPolicy.None,
+                clientId = clientId,
+            ),
+            CborProtocolCodec(),
+            scope,
+        ).also { s -> withTimeout(10.seconds) { s.transportState.first { it == TransportState.CONNECTED } } }
+
+        val first = session("secret-a", "resume-me")
+        assertIs<OpResult.Ok>(first.request(Op.Connect(device)))
+        first.close()
+
+        val other = session("secret-b", "someone-else")
+        assertEquals(ErrorKind.PERIPHERAL_BUSY, assertIs<OpResult.Err>(other.request(Op.Connect(device))).error.kind)
+
+        val resumed = session("secret-a", "resume-me")
+        assertIs<OpResult.Ok>(resumed.request(Op.Connect(device)))
+        assertIs<OpResult.Ok>(resumed.request(Op.Read(device, char)))
         Unit
     }
 

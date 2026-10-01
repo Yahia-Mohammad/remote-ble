@@ -35,6 +35,19 @@ kotlin {
     // the same quota reason as iosX64.
     macosArm64()
 
+    // jsseMain: the pinning trust manager, shared by the JVM (CIO) and Android (OkHttp) clients,
+    // which both trust through JSSE. The Android target comes from the AGP KMP library plugin,
+    // which `withAndroidTarget()` does not match, so it is selected by platform type instead.
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+    applyDefaultHierarchyTemplate {
+        common {
+            group("jsse") {
+                withJvm()
+                withCompilations { it.target.platformType == org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.androidJvm }
+            }
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             api(project(":protocol"))

@@ -194,7 +194,7 @@ handling, and the checks that prove the proxy forwards the bearer header and fai
 untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
 hook, not a framework.
 
-### Built-in TLS with a pinned identity (desktop agents, opt-in)
+### Built-in TLS with a pinned identity (desktop and Android agents, opt-in)
 
 `--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent, and `agent-rs` likewise, serve `wss://`
 itself, with no proxy or CA. Both use the same identity file, so on one host they present the same
@@ -216,8 +216,17 @@ Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) term
 each connection to CIO on an ephemeral loopback port. The front records which relay port belongs to
 which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
-client look local. The design and the remaining phases (Rust agent, phones, pairing QR codes,
+client look local. The design and the remaining phases (iOS agent, pairing QR codes,
 encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+
+**Android agent.** The app's **Encrypt connections (wss://)** switch does the same, off by default
+for now and chosen per run. The key is generated in Android Keystore and never leaves it. The
+keystore's own self-signed certificate cannot carry `agent.remoteble.invalid`, so the agent builds
+its certificate as the desktop agents do, signs it with the keystore key, and stores it over the
+generated one. The fingerprint shows under the switch, selectable for pasting into a client, and
+**New identity** replaces the key after a confirmation. The front is the same `JsseTlsFront`, on
+Conscrypt: Android 10 (API 29) and later negotiate TLS 1.3 or 1.2, and earlier versions only 1.2,
+which every client speaks. The iOS agent offers no switch until its Keychain identity lands.
 
 ---
 
@@ -764,7 +773,8 @@ Everything above — `EngineBleBackend`, `AgentWebSocketServer`, `Dashboard`, `A
     the `TokenStore` `expect`/`actual` (Android DataStore, iOS `NSUserDefaults`). If it's left
     blank, a random token is generated on Start and shown next to the address — **the mobile agent
     never runs token-free**, because unlike the CLI (typically firewalled to localhost, or given a
-    token via `REMOTE_BLE_TOKEN`) it listens on `0.0.0.0` over cleartext on a shared Wi-Fi.
+    token via `REMOTE_BLE_TOKEN`) it listens on `0.0.0.0` on a shared Wi-Fi, over cleartext unless
+    the Android agent's encryption switch is on (see the built-in TLS section above).
 - **Android**: [`AgentService.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AgentService.kt)
   is a foreground service (`connectedDevice` type) whose only job is the persistent notification
   Android requires to keep the process alive backgrounded — it owns no BLE/server logic. Rather

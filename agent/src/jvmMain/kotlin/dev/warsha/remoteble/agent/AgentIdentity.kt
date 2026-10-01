@@ -1,7 +1,6 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
-import dev.warsha.remoteble.protocol.AgentFingerprint
 import java.io.ByteArrayInputStream
 import java.math.BigInteger
 import java.nio.file.FileAlreadyExistsException
@@ -12,8 +11,6 @@ import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
-import java.security.MessageDigest
-import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.cert.CertificateFactory
@@ -23,15 +20,6 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Base64
-
-/**
- * The agent's long-lived TLS identity: an ECDSA P-256 key and its self-signed certificate.
- * [fingerprint] is what clients pin.
- */
-class AgentTlsIdentity(val privateKey: PrivateKey, val certificate: X509Certificate) {
-    val fingerprint: AgentFingerprint =
-        AgentFingerprint.ofSpkiSha256(MessageDigest.getInstance("SHA-256").digest(certificate.publicKey.encoded))
-}
 
 /**
  * Persists the desktop agents' identity as one PEM file: a PKCS#8 private key followed by the

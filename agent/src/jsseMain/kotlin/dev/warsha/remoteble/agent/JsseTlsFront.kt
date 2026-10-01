@@ -7,12 +7,13 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.security.KeyStore
+import java.security.Principal
 import java.util.concurrent.ConcurrentHashMap
-import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509ExtendedKeyManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,15 +43,31 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
         Running(server, upstreamPort).also { it.acceptLoop() }
     }
 
-    private fun context(): SSLContext {
-        val store = KeyStore.getInstance("PKCS12").apply {
-            load(null, null)
-            setKeyEntry("agent", identity.privateKey, KEY_PASSWORD, arrayOf(identity.certificate))
+    private fun context(): SSLContext =
+        SSLContext.getInstance("TLS").apply { init(arrayOf(IdentityKeyManager(identity)), null, null) }
+
+    /**
+     * Offers the one identity for every EC server handshake. A key manager rather than a keystore,
+     * because a keystore would have to hold the key: an Android Keystore key has no encoding to put
+     * in one, and is only usable through the provider that owns it, which this hands it to as is.
+     */
+    private class IdentityKeyManager(private val identity: AgentTlsIdentity) : X509ExtendedKeyManager() {
+        private fun aliasFor(keyType: String?): String? = ALIAS.takeIf { keyType.equals(KEY_TYPE, ignoreCase = true) }
+
+        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) = aliasFor(keyType)
+        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) = aliasFor(keyType)
+        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = aliasFor(keyType)?.let { arrayOf(it) }
+        override fun getCertificateChain(alias: String?) = if (alias == ALIAS) arrayOf(identity.certificate) else null
+        override fun getPrivateKey(alias: String?) = if (alias == ALIAS) identity.privateKey else null
+
+        // A server only; no client certificate is ever offered.
+        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String? = null
+        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? = null
+
+        private companion object {
+            const val ALIAS = "agent"
+            const val KEY_TYPE = "EC"
         }
-        val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            .apply { init(store, KEY_PASSWORD) }
-            .keyManagers
-        return SSLContext.getInstance("TLS").apply { init(keyManagers, null, null) }
     }
 
     private class Running(private val server: SSLServerSocket, private val upstreamPort: Int) : TlsFront {
@@ -84,7 +101,7 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
                 client.soTimeout = HANDSHAKE_TIMEOUT_MILLIS
                 client.startHandshake()
                 client.soTimeout = 0
-                upstream = Socket().apply { connect(InetSocketAddress(InetAddress.getLoopbackAddress(), upstreamPort)) }
+                upstream = Socket().apply { connect(InetSocketAddress(UPSTREAM_HOST, upstreamPort)) }
                 live += upstream
                 // Registered before a single byte is relayed, so the plain listener can never handle
                 // a request from this connection without the registry already knowing its peer.
@@ -143,9 +160,9 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
         const val HANDSHAKE_TIMEOUT_MILLIS = 10_000
         const val BUFFER_BYTES = 16 * 1024
 
-        // Only protects the in-memory keystore built from the identity file; never stored. Not
-        // empty, because PKCS#12 implementations may refuse an empty password.
-        val KEY_PASSWORD = "remoteble".toCharArray()
+        // The address the contract names, spelled out. `InetAddress.getLoopbackAddress()` is
+        // 127.0.0.1 on the JDK but ::1 on Android, where CIO's IPv4-only listener refuses it.
+        val UPSTREAM_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     }
 }
 

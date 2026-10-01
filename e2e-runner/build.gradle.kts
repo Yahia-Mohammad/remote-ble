@@ -116,6 +116,19 @@ tasks.register<JavaExec>("tlsProxyRun") {
     }
 }
 
+// Pinned-TLS acceptance (TLS-PIN-01 + 02, PinMain.kt): the SDK's pinned client connects to an agent
+// serving wss:// and scans through it, and a client pinning another fingerprint is refused at once.
+// For the phone agents with encryption switched on; the fingerprint is the one on the agent's screen.
+//   REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:pinRun --args "wss://192.168.1.23:8080/agent sha256:<hex>"
+tasks.register<JavaExec>("pinRun") {
+    group = "application"
+    description = "Check a live agent's pinned wss:// (TLS-PIN-01/02)."
+    val jvmJar = tasks.named("jvmJar")
+    dependsOn(jvmJar)
+    classpath = files(jvmJar.map { it.outputs.files }, configurations.named("jvmRuntimeClasspath"))
+    mainClass.set("dev.warsha.remoteble.e2e.PinMainKt")
+}
+
 // Write-without-response throughput baseline (0.8.3 / C, ThroughputMain.kt): drives a serial burst
 // of MTU-sized WithoutResponse writes against the TestProfile peripheral and reports bytes/s plus
 // the per-write latency distribution — the number the coalescing design in

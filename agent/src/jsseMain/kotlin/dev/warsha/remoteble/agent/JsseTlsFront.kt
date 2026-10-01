@@ -101,7 +101,7 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
                 client.soTimeout = HANDSHAKE_TIMEOUT_MILLIS
                 client.startHandshake()
                 client.soTimeout = 0
-                upstream = Socket().apply { connect(InetSocketAddress(InetAddress.getLoopbackAddress(), upstreamPort)) }
+                upstream = Socket().apply { connect(InetSocketAddress(UPSTREAM_HOST, upstreamPort)) }
                 live += upstream
                 // Registered before a single byte is relayed, so the plain listener can never handle
                 // a request from this connection without the registry already knowing its peer.
@@ -159,6 +159,10 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
         const val BACKLOG = 50
         const val HANDSHAKE_TIMEOUT_MILLIS = 10_000
         const val BUFFER_BYTES = 16 * 1024
+
+        // The address the contract names, spelled out. `InetAddress.getLoopbackAddress()` is
+        // 127.0.0.1 on the JDK but ::1 on Android, where CIO's IPv4-only listener refuses it.
+        val UPSTREAM_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     }
 }
 

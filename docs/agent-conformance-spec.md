@@ -56,6 +56,38 @@ WebSocket binding that all reference-compatible implementations MUST provide.
 5. The endpoint locator (URL / host:port / DNS name) is out of scope; it is supplied to the
    client out of band.
 
+### 3.1 Encrypted binding (`wss://` with a pinned identity)
+
+An agent MAY serve the binding over TLS with its own identity instead of cleartext. The design and
+its rationale are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+An agent that does:
+
+1. MUST present a self-signed X.509 certificate for a long-lived key. Its **identity** is the SHA-256
+   of the certificate's SubjectPublicKeyInfo, written `sha256:<64 lowercase hex>`, and it MUST stay
+   the same across restarts until the operator explicitly resets it.
+2. MUST include the DNS name `agent.remoteble.invalid` in the certificate's subjectAltName. Clients
+   reach agents by IP address, and some TLS stacks verify the server name even when the pin decides
+   trust; such a client presents this name.
+3. MUST offer TLS 1.2 as well as 1.3, with an ECDHE-ECDSA AES-GCM suite. The reference JVM client
+   speaks TLS 1.2 only.
+4. MUST complete the TLS handshake before reading the upgrade request, so a client that rejects the
+   identity never sends its bearer token.
+5. MUST apply every peer-address decision (authentication rate limiting, the dashboard's own-device
+   gate) to the real TCP peer, even where TLS is terminated in front of the WebSocket server.
+
+A client that paired with an agent's identity MUST trust exactly that key, MUST fail with a distinct
+identity error on any other, and MUST NOT retry that failure as if the agent were unreachable.
+
+| ID | Scenario | Required outcome | Kotlin adapter (`TlsPinningEndToEndTest`) | Rust adapter (`transport::server::tests`) |
+|---|---|---|---|---|
+| TLS-PIN-01 | A client pinning the agent's identity | Connects, handshakes and runs ops over `wss://`. | `aPinnedClientConnectsAndRunsOpsOverWss` | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
+| TLS-PIN-02 | A client pinning another identity | Identity error; the agent never reads the upgrade request. | `aDifferentIdentityFailsBeforeTheAgentSeesAnyRequest` | `tls_pin_02_a_different_identity_fails_before_any_request_is_read`, `tls_accept_loop_serves_pinned_clients_over_real_tcp` |
+| TLS-PIN-03 | Restart, then reset | Identity stable across the restart; a reset breaks the pin. | `theIdentitySurvivesARestartAndAResetBreaksThePin` | `identity::tests::the_identity_is_stable_across_loads_and_changes_on_reset` |
+| TLS-PIN-04 | Agent restart; transport drop inside grace | Reconnect over `wss://` restores subscriptions, and the same principal and client id resume the lease. | `aPinnedClientReconnectsAndResumesItsSubscriptionAfterARestart`, `aLeaseHeldThroughATransportDropResumesOverWss` | `tls_pin_04_a_lease_held_through_a_drop_resumes_over_tls` |
+| TLS-PIN-05 | Non-loopback cleartext bind | Refused without the explicit opt-in; loopback `ws://` keeps working. | Pending: the gate itself lands in phase 5 of the proposal. | Pending, as Kotlin. |
+| TLS-PIN-06 | A TLS 1.2-only client | Connects. | Every Kotlin test above: the CIO client speaks only 1.2. | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
+| TLS-PIN-07 | Peer address behind TLS termination | Rate limiting and the dashboard gate see the real peer. | `theAgentRecordsTheRealPeerNotTheRelay`, `theDashboardStillRefusesANonLoopbackPeerBehindTheFront` | Not applicable: rustls terminates in-process, so the peer address is native. |
+
 ## 4. Handshake
 
 On the WebSocket upgrade request:

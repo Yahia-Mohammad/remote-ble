@@ -2,9 +2,10 @@
 
 Decision record for [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39). **Accepted
 2026-10-01: option A, TLS with a pinned self-signed certificate.** The phases in [§8](#8-phases) are
-the plan, and each one updates this record as it lands. **Phase 1 implemented on both desktop agents**:
-the identity, the JVM agent's TLS front with the peer registry, the Rust agent's rustls listener, and
-the SDK's pinned JVM client, all behind `--tls` ([§10](#10-progress)).
+the plan, and each one updates this record as it lands. **Phase 1 complete (2026-10-01)**: the identity,
+the JVM agent's TLS front with the peer registry, the Rust agent's rustls listener, and the SDK's
+pinned JVM client, all behind `--tls`, with the binding and its scenarios in the conformance spec
+([§10](#10-progress)).
 
 ## 1. The problem
 
@@ -158,8 +159,8 @@ stays off by default; when it is on, the operator token now travels encrypted.
 
 ## 6. Conformance additions
 
-New scenarios for [`agent-conformance-spec.md`](../agent-conformance-spec.md), run against every
-agent:
+Added to [`agent-conformance-spec.md`](../agent-conformance-spec.md) §3.1, which names each agent's
+adapter; run against every agent:
 
 | Id | Scenario |
 |---|---|
@@ -238,5 +239,12 @@ other. It did not: the JDK encodes an EC PKCS#8 key without RFC 5915's optional 
 refuses such a key, so a JVM-created identity would have stopped the Rust agent's TLS. The JVM agent now
 writes the public key. Rechecked both ways, with OpenSSL agreeing on both fingerprints.
 
-Still open in phase 1: `TLS-PIN-04` (reconnect and lease resume over `wss://`), and the scenarios in
-the conformance spec itself.
+**Phase 1 closed (2026-10-01).** `TLS-PIN-04` has adapters on both agents: on Kotlin, a same-port
+restart where the pinned client reconnects and its subscription resumes, plus a lease held through a
+transport drop that the same principal and client id resume while another principal is refused; on
+Rust, the same lease case over pinned TLS. The binding's normative rules and the `TLS-PIN-*` table,
+with each agent's adapter, are in the conformance spec §3.1. `TLS-PIN-05` stays pending with the
+phase 5 gate.
+
+Next is phase 2: the Android agent and the OkHttp client, starting with the Android Keystore question
+in [§9](#9-open-questions).

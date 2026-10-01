@@ -95,6 +95,9 @@ only a device can show is checked on hardware: `./gradlew :e2e-runner:pinRun` dr
 `02` and `06` against a running agent, the app's restart and **New identity** give `03`, and its
 activity log shows the peer address for `07`.
 
+**The Android client** pins through OkHttp: `OkHttpPinningTest`, an Android host test, runs
+`TLS-PIN-01` and `02` against the Kotlin agent's front.
+
 ## 4. Handshake
 
 On the WebSocket upgrade request:

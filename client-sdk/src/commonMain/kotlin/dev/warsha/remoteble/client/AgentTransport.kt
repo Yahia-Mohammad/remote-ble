@@ -1,5 +1,7 @@
 package dev.warsha.remoteble.client
 
+import dev.warsha.remoteble.protocol.AgentFingerprint
+
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -93,6 +95,42 @@ internal fun Throwable.asCleartextRefusal(url: String): CleartextTrafficNotPermi
         if (message != null && CLEARTEXT_REFUSAL in message && SECURITY_POLICY in message) {
             return CleartextTrafficNotPermittedException(url, this)
         }
+        current = t.cause?.takeIf { it !== t }
+    }
+    return null
+}
+
+/**
+ * The agent at the other end presented a different identity from the one this client pinned: its
+ * TLS key's fingerprint is not [expected]. Either the agent reset its identity, or something else
+ * is answering at its address.
+ *
+ * Raised inside the TLS handshake, before any HTTP request, so the bearer token is never sent to
+ * whoever presented [presented]. Like a cleartext refusal it is not retried: the transport goes
+ * [TransportState.GAVE_UP] at once and [AgentTransport.connect] throws it. Re-pair with the agent to
+ * pin its new fingerprint, after confirming the reset was intended.
+ */
+class AgentIdentityMismatchException(
+    val expected: AgentFingerprint,
+    val presented: AgentFingerprint?,
+) : Exception(
+    "Agent identity mismatch: pinned $expected, but the agent presented ${presented ?: "no usable key"}. " +
+        "The agent's identity was reset, or another host is answering at its address; re-pair only " +
+        "if the reset was intended.",
+)
+
+/**
+ * A connect failure that every retry would repeat, so the transport stops instead of looping: a
+ * platform cleartext refusal or a pinned-identity mismatch. `null` for anything else.
+ */
+internal fun Throwable.asTerminalConnectFailure(url: String): Exception? =
+    asCleartextRefusal(url) ?: causeOfType<AgentIdentityMismatchException>()
+
+private inline fun <reified T : Throwable> Throwable.causeOfType(): T? {
+    var current: Throwable? = this
+    repeat(MAX_CAUSE_DEPTH) {
+        val t = current ?: return null
+        if (t is T) return t
         current = t.cause?.takeIf { it !== t }
     }
     return null

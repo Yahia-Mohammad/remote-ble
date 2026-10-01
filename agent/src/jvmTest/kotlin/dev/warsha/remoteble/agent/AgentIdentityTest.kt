@@ -59,6 +59,30 @@ class AgentIdentityTest {
     }
 
     @Test
+    fun theStoredKeyCarriesItsPublicKeyForTheRustAgent() {
+        val path = dir.resolve("agent-identity.pem")
+        val created = AgentIdentityStore.loadOrCreate(path)
+        val pem = Files.readString(path)
+        val der = java.util.Base64.getMimeDecoder().decode(
+            pem.substringAfter("-----BEGIN PRIVATE KEY-----").substringBefore("-----END PRIVATE KEY-----"),
+        )
+        val point = (created.certificate.publicKey as java.security.interfaces.ECPublicKey).w
+
+        // RFC 5915 [1] publicKey: BIT STRING (66 bytes: unused-bits 0, then 0x04 || X || Y).
+        val marker = byteArrayOf(0xA1.toByte(), 0x44, 0x03, 0x42, 0x00, 0x04)
+        val at = der.indices.firstOrNull { i -> marker.indices.all { der.getOrNull(i + it) == marker[it] } }
+        assertTrue(at != null, "the PKCS#8 must include the public key, which ring requires")
+        val x = der.copyOfRange(at + marker.size, at + marker.size + 32)
+        assertEquals(point.affineX, java.math.BigInteger(1, x))
+        // And the JDK still reads it back as the same key.
+        assertEquals(created.fingerprint, AgentIdentityStore.loadOrCreate(path).fingerprint)
+        assertEquals(
+            (created.privateKey as java.security.interfaces.ECPrivateKey).s,
+            (AgentIdentityStore.loadOrCreate(path).privateKey as java.security.interfaces.ECPrivateKey).s,
+        )
+    }
+
+    @Test
     fun theFileIsReadableByItsOwnerOnly() {
         val path = dir.resolve("agent-identity.pem")
         AgentIdentityStore.loadOrCreate(path)

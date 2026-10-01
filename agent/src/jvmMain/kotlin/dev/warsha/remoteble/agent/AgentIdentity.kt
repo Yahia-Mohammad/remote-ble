@@ -3,6 +3,7 @@ package dev.warsha.remoteble.agent
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentFingerprint
 import java.io.ByteArrayInputStream
+import java.math.BigInteger
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.FileSystemException
 import java.nio.file.Files
@@ -17,6 +18,8 @@ import java.security.SecureRandom
 import java.security.Signature
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Base64
@@ -108,7 +111,7 @@ object AgentIdentityStore {
         }
         Files.writeString(
             temp,
-            pem("PRIVATE KEY", identity.privateKey.encoded) + pem("CERTIFICATE", identity.certificate.encoded),
+            pem("PRIVATE KEY", pkcs8WithPublicKey(identity)) + pem("CERTIFICATE", identity.certificate.encoded),
         )
         // Publish without ever replacing an existing file, so a concurrent creator's identity is
         // kept. An atomic move would not do: on POSIX it silently replaces the target. A hard link
@@ -129,6 +132,37 @@ object AgentIdentityStore {
             Files.deleteIfExists(temp)
         }
     }
+
+    /**
+     * The key as PKCS#8 with RFC 5915's optional public key included. The JDK's own encoding omits
+     * it, and `ring`, through which the Rust agent reads this same file, refuses a key without it,
+     * so a JVM-created identity would otherwise be unusable to the other desktop agent.
+     */
+    internal fun pkcs8WithPublicKey(identity: AgentTlsIdentity): ByteArray {
+        val privateKey = identity.privateKey as ECPrivateKey
+        val publicKey = identity.certificate.publicKey as ECPublicKey
+        val point = byteArrayOf(0x04) + fixed(publicKey.w.affineX) + fixed(publicKey.w.affineY)
+        val ecPrivateKey = Der.seq(
+            Der.integer(byteArrayOf(1)),
+            Der.octetString(fixed(privateKey.s)),
+            Der.explicit(1, Der.bitString(point)),
+        )
+        return Der.seq(
+            Der.integer(byteArrayOf(0)),
+            Der.seq(Der.oid(EC_PUBLIC_KEY), Der.oid(SECP256R1)),
+            Der.octetString(ecPrivateKey),
+        )
+    }
+
+    /** A P-256 field element as exactly 32 big-endian bytes, as RFC 5915 and SEC 1 require. */
+    private fun fixed(value: BigInteger): ByteArray {
+        val bytes = value.toByteArray().dropWhile { it == 0.toByte() }.toByteArray()
+        return ByteArray(P256_BYTES - bytes.size) + bytes
+    }
+
+    private const val EC_PUBLIC_KEY = "1.2.840.10045.2.1"
+    private const val SECP256R1 = "1.2.840.10045.3.1.7"
+    private const val P256_BYTES = 32
 
     private fun parseCertificate(der: ByteArray): X509Certificate =
         CertificateFactory.getInstance("X.509").generateCertificate(ByteArrayInputStream(der)) as X509Certificate

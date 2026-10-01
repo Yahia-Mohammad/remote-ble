@@ -22,6 +22,14 @@ thiserror = "2.0"
 parking_lot = "0.12"
 http = "1.1"
 async-trait = "0.1"
+# Built-in TLS with a pinned identity (#39, docs/proposals/agent-transport-encryption.md). Every
+# crate is held to `ring`: rustls's default backend, aws-lc-rs, links aws-lc-sys, whose OpenSSL
+# licence deny.toml does not allow.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+ring = "0.17"
+time = { version = "0.3", features = ["macros"] }
 
 [dev-dependencies]
 # `test-util` enables paused/virtual time (start_paused, time::advance) for the

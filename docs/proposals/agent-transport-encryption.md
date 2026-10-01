@@ -273,3 +273,19 @@ Evidence, with `pinRun`, OpenSSL and the app's own screens:
 IPv4-only listener refuses it. Every connection completed TLS and then closed without a response. The
 JDK returns `::1` too under `java.net.preferIPv6Addresses=true`, so the JVM agent was exposed as well.
 The front now dials `127.0.0.1`, the address `TlsFront`'s contract names.
+
+**Phase 2, Android client (2026-10-01).** `PinningTrustManager` moved to a `jsseMain` source set
+shared by the JVM and Android clients, selected by platform type because `withAndroidTarget()` does
+not match the AGP KMP library target. Android's `pinnedWebSocketHttpClient(fingerprint)` is OkHttp with
+that trust manager, and a host-name verifier that checks the session's certificate against the pin:
+agents are reached by IP, which OkHttp's own check would refuse, and a resumed session skips the trust
+manager, so passing everything would not do.
+
+Evidence: `OkHttpPinningTest` (Android host test) runs `TLS-PIN-01` and `02` against the real front,
+with identities from `okhttp-tls`, so no key is committed. With OkHttp's default host-name verifier
+restored, `01` fails. On the API 36 emulator, a client app built to use the pinned client connected
+through Conscrypt to the Android agent and scanned. With a wrong pin it never reached the agent, which
+logged no client, and it made no second attempt.
+
+**Phase 2 is complete.** Next is phase 3, the iOS agent and the Darwin client, starting with the
+certificate and Keychain prototype in [§9](#9-open-questions).

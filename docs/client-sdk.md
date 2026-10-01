@@ -225,6 +225,30 @@ ERROR. For a plain `ws://` agent, Android also offers
 a CIO client on plain sockets the policy does not govern. Its TLS stack stops at TLS 1.2, so keep
 the default for `wss://` behind a TLS 1.3-only proxy.
 
+**Pinned agents.** An agent serving `wss://` with its own identity (built-in TLS, see
+[agent.md](agent.md)) has a self-signed certificate that no certificate authority vouches for.
+`pinnedWebSocketHttpClient(fingerprint)` trusts exactly the key whose SPKI hashes to the agent's
+`sha256:<hex>` fingerprint, and fails anything else with `AgentIdentityMismatchException` inside the
+TLS handshake, before the bearer token is sent; the transport goes `GAVE_UP` without retrying.
+
+| Target | Engine | Host name |
+|---|---|---|
+| JVM | CIO, with a pinning trust manager | Presents `agent.remoteble.invalid`, which every agent certificate carries |
+| Android | OkHttp, with the same trust manager | OkHttp's host-name check defers to the pin, since agents are reached by IP |
+
+```kotlin
+val fingerprint = AgentFingerprint.parse("sha256:…") // shown by the agent
+val transport = WebSocketAgentTransport(
+    "wss://192.168.1.23:8080/agent",
+    scope,
+    pinnedWebSocketHttpClient(fingerprint),
+    authToken = { token },
+)
+```
+
+Apple targets follow in a later phase of
+[proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+
 ---
 
 ## Layer 2 — Session (`AgentSession`)

@@ -24,6 +24,8 @@ kotlin {
         aarMetadata {
             minCompileSdk = libs.versions.android.minCompile.get().toInt()
         }
+        // The OkHttp pinned client is Android-only, so its end-to-end test runs as a host test.
+        withHostTest {}
     }
     // iosArm64 (device) + iosSimulatorArm64 (Apple Silicon simulator). No iosX64 (Intel-Mac
     // simulator): matches :protocol and the rest of the repo, and trims ~24 files per release off the
@@ -34,6 +36,19 @@ kotlin {
     // NSURLSession and Kable's Apple identifier are the same on both platforms. No macosX64, for
     // the same quota reason as iosX64.
     macosArm64()
+
+    // jsseMain: the pinning trust manager, shared by the JVM (CIO) and Android (OkHttp) clients,
+    // which both trust through JSSE. The Android target comes from the AGP KMP library plugin,
+    // which `withAndroidTarget()` does not match, so it is selected by platform type instead.
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+    applyDefaultHierarchyTemplate {
+        common {
+            group("jsse") {
+                withJvm()
+                withCompilations { it.target.platformType == org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.androidJvm }
+            }
+        }
+    }
 
     sourceSets {
         commonMain.dependencies {
@@ -82,6 +97,11 @@ kotlin {
             implementation(libs.ktor.server.websockets)
             // Verifies the Koin graph resolves (ClientKoinTest); no network/radio.
             implementation(libs.koin.test)
+        }
+        // The OkHttp pinned client against a real agent behind its JSSE front, on the host JVM.
+        getByName("androidHostTest").dependencies {
+            implementation(project(":agent"))
+            implementation(libs.okhttp.tls)
         }
     }
 }

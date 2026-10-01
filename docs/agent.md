@@ -194,9 +194,11 @@ handling, and the checks that prove the proxy forwards the bearer header and fai
 untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
 hook, not a framework.
 
-### Built-in TLS with a pinned identity (JVM agent, opt-in)
+### Built-in TLS with a pinned identity (desktop agents, opt-in)
 
-`--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent serve `wss://` itself, with no proxy or CA.
+`--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent, and `agent-rs` likewise, serve `wss://`
+itself, with no proxy or CA. Both use the same identity file, so on one host they present the same
+identity; the Rust flags are `--identity-file` and `--reset-identity`, with the same variables.
 On first start it creates a long-lived ECDSA P-256 key and self-signed certificate, and logs the
 **identity** a client pins: `Agent identity: sha256:<hex>`, the SHA-256 of the key's SPKI. The
 pairing client uses `pinnedWebSocketHttpClient(fingerprint)` (JVM SDK) or any TLS client that can

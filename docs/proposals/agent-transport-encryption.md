@@ -2,9 +2,9 @@
 
 Decision record for [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39). **Accepted
 2026-10-01: option A, TLS with a pinned self-signed certificate.** The phases in [§8](#8-phases) are
-the plan, and each one updates this record as it lands. **Phase 1, Kotlin half, implemented**: the
-identity, the JVM agent's TLS front with the peer registry, and the SDK's pinned JVM client, behind
-`--tls` ([§10](#10-progress)).
+the plan, and each one updates this record as it lands. **Phase 1 implemented on both desktop agents**:
+the identity, the JVM agent's TLS front with the peer registry, the Rust agent's rustls listener, and
+the SDK's pinned JVM client, all behind `--tls` ([§10](#10-progress)).
 
 ## 1. The problem
 
@@ -221,5 +221,22 @@ certificate parses and verifies under the JDK and OpenSSL, whose SPKI digest mat
 fingerprint; `openssl s_client` negotiates ECDHE-ECDSA AES-GCM on both TLS 1.2 and 1.3; `curl
 --pinnedpubkey` gets 401 without the token and 101 with it, and aborts on a wrong pin.
 
-Still open in phase 1: the Rust agent, `TLS-PIN-04` (reconnect and lease resume over `wss://`), and
-the scenarios in the conformance spec itself.
+**Phase 1, Rust half (2026-10-01).** `transport/identity.rs` creates and loads the same PEM file at
+the same default path, with `rcgen`; the fingerprint is taken from the certificate's SPKI, and a file
+whose key does not belong to its certificate is refused. `run_on` performs the TLS handshake on each
+connection's own task, bounded at 10 s, before the unchanged upgrade path. Every TLS crate is held to
+`ring`, because rustls's default `aws-lc-rs` links `aws-lc-sys`, whose OpenSSL licence `deny.toml`
+refuses.
+
+Evidence: `tls_pin_01_06_*` (a pinning rustls client upgrades over 1.3, and over 1.2 alone), `tls_pin_02_*`
+(a wrong pin fails before the agent completes the handshake), and `tls_accept_loop_*` (the real accept
+loop over TCP keeps serving pinned clients after refusals, and gives cleartext no upgrade on the TLS
+port). `cargo deny check advisories licenses sources` passes.
+
+**The cross-agent check found a real defect.** A file written by either desktop agent must load in the
+other. It did not: the JDK encodes an EC PKCS#8 key without RFC 5915's optional public key, and `ring`
+refuses such a key, so a JVM-created identity would have stopped the Rust agent's TLS. The JVM agent now
+writes the public key. Rechecked both ways, with OpenSSL agreeing on both fingerprints.
+
+Still open in phase 1: `TLS-PIN-04` (reconnect and lease resume over `wss://`), and the scenarios in
+the conformance spec itself.

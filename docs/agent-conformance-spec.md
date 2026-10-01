@@ -68,8 +68,9 @@ An agent that does:
 2. MUST include the DNS name `agent.remoteble.invalid` in the certificate's subjectAltName. Clients
    reach agents by IP address, and some TLS stacks verify the server name even when the pin decides
    trust; such a client presents this name.
-3. MUST offer TLS 1.2 as well as 1.3, with an ECDHE-ECDSA AES-GCM suite. The reference JVM client
-   speaks TLS 1.2 only.
+3. MUST offer TLS 1.2 with an ECDHE-ECDSA AES-GCM suite, because the reference JVM client speaks
+   nothing newer, and SHOULD offer TLS 1.3 too. An agent whose platform has no TLS 1.3 server
+   (Android before 10) conforms on 1.2 alone.
 4. MUST complete the TLS handshake before reading the upgrade request, so a client that rejects the
    identity never sends its bearer token.
 5. MUST apply every peer-address decision (authentication rate limiting, the dashboard's own-device
@@ -87,6 +88,12 @@ identity error on any other, and MUST NOT retry that failure as if the agent wer
 | TLS-PIN-05 | Non-loopback cleartext bind | Refused without the explicit opt-in; loopback `ws://` keeps working. | Pending: the gate itself lands in phase 5 of the proposal. | Pending, as Kotlin. |
 | TLS-PIN-06 | A TLS 1.2-only client | Connects. | Every Kotlin test above: the CIO client speaks only 1.2. | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
 | TLS-PIN-07 | Peer address behind TLS termination | Rate limiting and the dashboard gate see the real peer. | `theAgentRecordsTheRealPeerNotTheRelay`, `theDashboardStillRefusesANonLoopbackPeerBehindTheFront` | Not applicable: rustls terminates in-process, so the peer address is native. |
+
+**The Android agent** runs the Kotlin adapter's server and front unchanged: `JsseTlsFront` is
+shared by the JVM and Android, and only the identity's storage differs (Android Keystore). What
+only a device can show is checked on hardware: `./gradlew :e2e-runner:pinRun` drives `TLS-PIN-01`,
+`02` and `06` against a running agent, the app's restart and **New identity** give `03`, and its
+activity log shows the peer address for `07`.
 
 ## 4. Handshake
 

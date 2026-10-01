@@ -56,7 +56,7 @@ Checked against the libraries this build resolves (Ktor 3.5.1), not assumed:
 |---|---|
 | Ktor's CIO **server** has no TLS on any platform, the JVM included: no TLS classes in the jar, and `startConnector` distinguishes only a Unix socket from plain TCP. | The Kotlin agents cannot get TLS from their engine. |
 | `ktor-network-tls` implements only the **client** handshake (`TLSClientHandshake`; no server side). | It cannot wrap the agent's listening socket either. |
-| The CIO **client** speaks TLS ≤ 1.2, with ECDHE-ECDSA/RSA AES-GCM suites, and takes a custom `X509TrustManager`. | Every agent MUST offer TLS 1.2 with an ECDHE-ECDSA-AES-GCM suite, alongside 1.3, or the JVM SDK cannot connect. |
+| The CIO **client** speaks TLS ≤ 1.2, with ECDHE-ECDSA/RSA AES-GCM suites, and takes a custom `X509TrustManager`. | Every agent MUST offer TLS 1.2 with an ECDHE-ECDSA-AES-GCM suite, or the JVM SDK cannot connect, and 1.3 alongside where the platform has it (Android before 10 has no 1.3 server). |
 | The CIO **client** verifies the TLS server name against the certificate even when a custom trust manager accepts it (`TLSClientHandshake` calls `verifyHostnameInCertificate` whenever `serverName` is set, and the engine defaults it to the URL host). | Agents are reached by changing IP addresses their certificates cannot name, so every agent certificate carries the fixed name `agent.remoteble.invalid` and pinning clients present it ([§5.1](#51-identity)). |
 | `FailedAuthLimiter` keys on `origin.remoteHost`, and the dashboard's own-device gate (`Dashboard.kt`) is sound only because that is the real TCP peer. | A TLS front that relays to a loopback listener MUST carry the real peer through ([§5.2](#52-kotlin-agents-jvm-android-ios)), or the dashboard opens to the whole network and all clients share one rate-limit bucket. |
 
@@ -78,7 +78,7 @@ Checked against the libraries this build resolves (Ktor 3.5.1), not assumed:
   |---|---|
   | Kotlin JVM | `agent-identity.pem` (PKCS#8 key + certificate, owner-only permissions) under the per-user config directory (`$XDG_CONFIG_HOME/remoteble/`, `~/Library/Application Support/RemoteBLE/`, `%APPDATA%\RemoteBLE\`), overridable with `REMOTE_BLE_IDENTITY_FILE`. PEM rather than PKCS#12, so no keystore password is needed and Rust reads it natively. New: the desktop agents persisted nothing before. |
   | Rust | The same file, format and variable, so the two desktop agents on one host present one identity. |
-  | Android | Android Keystore. Its key generator issues the self-signed certificate itself, and the private key never leaves the keystore. |
+  | Android | Android Keystore; the private key never leaves it. The keystore's generator issues a self-signed certificate, but one without the SAN, so the agent builds its own with `SelfSignedCertificate`, signs it with the keystore key, and stores it over the generated one. |
   | iOS | Keychain. iOS has no API to create a certificate, so the agent builds the DER and signs it with the key. |
 
 - **Reset:** an explicit control on every agent (`--reset-identity` / `REMOTE_BLE_RESET_IDENTITY` on
@@ -197,9 +197,11 @@ Each phase is independently mergeable and testable.
 
 ## 9. Open questions
 
-- **Android Keystore keys for a server-side `SSLServerSocket`.** A `KeyManager` over an
-  `AndroidKeyStore` entry should work, since JSSE uses such keys for client certificates. Verify it on
-  API 24 and 37 before phase 2 depends on it.
+- ~~**Android Keystore keys for a server-side `SSLServerSocket`.**~~ Settled in phase 2: they work,
+  verified on API 24, 30, 36 and 37 ([§10](#10-progress)). The front hands Conscrypt the keystore key
+  through its own `X509ExtendedKeyManager`, since a keystore key has no encoding to put in an
+  in-memory keystore, and the key allows the `NONE` digest, because Conscrypt hashes the handshake
+  itself and asks the keystore to sign the digest raw.
 - **The iOS certificate.** It needs a minimal DER writer, and an identity assembled from a Keychain
   key plus certificate rather than a PKCS#12 import. Prototype it first, because phase 3 sizing
   depends on it.
@@ -248,3 +250,26 @@ phase 5 gate.
 
 Next is phase 2: the Android agent and the OkHttp client, starting with the Android Keystore question
 in [§9](#9-open-questions).
+
+**Phase 2, Android agent (2026-10-01).** `JsseTlsFront` and `AgentTlsIdentity` moved to a `jsseMain`
+source set shared by the JVM and Android, and the front now offers the identity through its own key
+manager rather than an in-memory PKCS#12 store. `AndroidAgentIdentityStore` generates the P-256 key in
+Android Keystore and stores the agent's own certificate over the generated one. The app's **Encrypt
+connections (wss://)** switch, off by default until phase 5, shows the fingerprint and offers a confirmed
+**New identity**. `:e2e-runner:pinRun` is the hardware check: the SDK's pinned client connects and scans
+through a live agent, then a wrong pin must be refused at once.
+
+Evidence, with `pinRun`, OpenSSL and the app's own screens:
+
+| Device | TLS | `pinRun` | Also |
+|---|---|---|---|
+| Emulator, API 24 (Android 7.0) | 1.2 ECDHE-ECDSA AES-GCM; 1.3 refused (no platform support) | Pass | Keystore kept the agent certificate over the generated one |
+| Emulator, API 30 | 1.3 and 1.2 | Pass, 21 advertisements | |
+| Emulator, API 36 | 1.3 and 1.2; SPKI digest matches the screen | Pass | Same fingerprint after an app restart; **New identity** changed it, the old pin was refused and the new one passed |
+| Pixel 8, Android 17 (API 37), over Wi-Fi | 1.3 and 1.2 | Pass, 62 advertisements | The agent logged the Mac's LAN address, not loopback (`TLS-PIN-07`) |
+
+**The device run found a relay defect.** The front connected upstream to
+`InetAddress.getLoopbackAddress()`, which is `127.0.0.1` on the JDK but `::1` on Android, where CIO's
+IPv4-only listener refuses it. Every connection completed TLS and then closed without a response. The
+JDK returns `::1` too under `java.net.preferIPv6Addresses=true`, so the JVM agent was exposed as well.
+The front now dials `127.0.0.1`, the address `TlsFront`'s contract names.

@@ -74,6 +74,7 @@ class IosAgentSession internal constructor() {
             startEnabled = !denied,
             permissionWarning = if (denied) "Bluetooth permission is required to start the agent." else null,
             onRequestPermissionSettings = if (denied) ::openAppSettings else null,
+            tls = IosKeychainTls,
         )
     }
 

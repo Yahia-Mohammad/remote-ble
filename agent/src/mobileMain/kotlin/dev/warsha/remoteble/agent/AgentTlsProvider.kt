@@ -2,10 +2,7 @@ package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AgentFingerprint
 
-/**
- * Where a phone agent's TLS identity comes from: Android Keystore on Android. iOS has none yet, so
- * its agent offers no encrypted mode until its Keychain identity exists.
- */
+/** Where a phone agent's TLS identity comes from: Android Keystore, or the iOS Keychain. */
 interface AgentTlsProvider {
     /**
      * Loads the identity, creating it on first use. [reset] replaces it first, which makes every

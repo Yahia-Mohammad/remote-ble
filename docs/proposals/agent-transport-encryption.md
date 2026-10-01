@@ -92,8 +92,9 @@ CIO binds an ephemeral port on `127.0.0.1`, and the front owns the public port:
 
 - **JVM and Android:** `SSLServerSocket` from the platform JSSE (Conscrypt on Android), relaying each
   accepted connection to CIO with two coroutines.
-- **iOS:** a Network.framework `NWListener` with TLS options carrying the Keychain identity, through
-  cinterop, relaying the same way.
+- **iOS:** a Network.framework `NWListener` with TLS options carrying the Keychain identity, relaying
+  over a second, plain `NWConnection`. Its byte pump is Objective-C, compiled through cinterop, for a
+  Kotlin/Native reason recorded in [§10](#10-progress).
 
 **The real peer is carried by a registry, not a header.** For each relayed connection the front
 records *its own outbound local port → the real peer address*. CIO's `origin.remotePort` for that
@@ -202,9 +203,9 @@ Each phase is independently mergeable and testable.
   through its own `X509ExtendedKeyManager`, since a keystore key has no encoding to put in an
   in-memory keystore, and the key allows the `NONE` digest, because Conscrypt hashes the handshake
   itself and asks the keystore to sign the digest raw.
-- **The iOS certificate.** It needs a minimal DER writer, and an identity assembled from a Keychain
-  key plus certificate rather than a PKCS#12 import. Prototype it first, because phase 3 sizing
-  depends on it.
+- ~~**The iOS certificate.**~~ Settled in phase 3: the agent signs `SelfSignedCertificate`'s DER with
+  a Keychain key (`SecKeyCreateSignature`), stores the certificate beside the key, and an identity
+  query returns the pair, which the Keychain matches by public key. No PKCS#12 is involved.
 - ~~**Desktop identity location.**~~ Settled in phase 1: one PEM file, one default path, shared by
   the JVM and Rust agents. Two agents on one host are one machine, so one identity is the honest
   answer; `REMOTE_BLE_IDENTITY_FILE` separates them when that is really wanted.
@@ -289,3 +290,32 @@ logged no client, and it made no second attempt.
 
 **Phase 2 is complete.** Next is phase 3, the iOS agent and the Darwin client, starting with the
 certificate and Keychain prototype in [§9](#9-open-questions).
+
+**Phase 3, iOS agent (2026-10-01).** `IosAgentIdentityStore` keeps the identity in the Keychain, and
+`NetworkTlsFront` serves it from an `NWListener`, relaying to CIO on `127.0.0.1` with the same peer
+registry as the JSSE front. The app shows the same switch, fingerprint and **New identity** as Android.
+
+Evidence, on the iPhone 17 Pro simulator (iOS 26.5), whose network is the Mac's: OpenSSL negotiates TLS
+1.3, and TLS 1.2 with ECDHE-ECDSA AES-GCM, and the SPKI digest matches the screen; `pinRun` passes (the
+CIO client over TLS 1.2, a scan, and a wrong pin refused at once); an upgrade without the token gets 401
+through the relay; the fingerprint survived every relaunch and reinstall, and **New identity** changed
+it, after which the old pin was refused and the new one passed. A client that opens TCP and never
+speaks TLS is cut off by a 10 s timer, though Network.framework releases the socket 15–20 s in; a
+silent peer delays no other client's handshake.
+
+Not yet run on a physical iPhone, so the real peer address on iOS (`TLS-PIN-07`) is unverified: the
+simulator shares the Mac's loopback. That is the remaining hardware check for this phase.
+
+**Kotlin/Native broke three things in Network.framework, each found on the simulator:**
+
+- `NW_PARAMETERS_DISABLE_PROTOCOL` and `NW_PARAMETERS_DEFAULT_CONFIGURATION` are sentinel blocks
+  recognised by identity, and Kotlin/Native passes a re-wrapped block. "No TLS" became "TLS with
+  defaults", and the plain upstream tried a TLS handshake with CIO (`-9836`), so no request ever
+  arrived. Plain TCP is now built from the protocol stack.
+- Network.framework's static content contexts are mistaken for blocks, and converting one terminates
+  the process ("Converting Obj-C blocks with non-reference-typed return value to kotlin.Any is not
+  supported"). Reading `NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT` did it, and so does every receive
+  callback at end of stream, before any Kotlin code runs. So the pump is Objective-C
+  (`agent/src/nativeInterop/cinterop/tlsrelay.def`), and Kotlin hears only that a direction ended.
+- A relay whose upstream sat in *waiting* was never closed, since the handshake timer only checked
+  that an upstream existed. Waiting now counts as failure, and the timer checks that relaying began.

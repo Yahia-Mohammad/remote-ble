@@ -83,7 +83,8 @@ class AgentWebSocketServer(
     private val operatorToken: String? = null,
     /**
      * Whether the dashboard answers non-loopback requests. Off by default: it is the high-privilege
-     * plane and travels unencrypted, so it is loopback-only unless an operator deliberately opts in.
+     * plane, unencrypted unless the agent serves TLS, so it is loopback-only unless an operator
+     * deliberately opts in.
      * See `Dashboard.allowedOrigin`.
      */
     private val allowRemoteDashboard: Boolean = false,

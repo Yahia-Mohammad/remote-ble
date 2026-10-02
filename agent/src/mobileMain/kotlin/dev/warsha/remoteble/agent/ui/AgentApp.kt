@@ -384,9 +384,9 @@ private fun AgentHeader(
             enabled = !running,
         )
         // Shown only once an operator token is present, because the choice is meaningless without one.
-        // Default off: the dashboard is the high-privilege plane and travels unencrypted, so it answers
-        // only this device unless the operator explicitly opens it up — the same posture `Main.kt` takes
-        // for a non-loopback bind. Reach it from the phone's own browser, or tunnel over USB.
+        // Default off: the dashboard is the high-privilege plane, unencrypted unless the agent is, so it
+        // answers only this device unless the operator explicitly opens it up — the same posture
+        // `Main.kt` takes for a non-loopback bind. Reach it from the phone's own browser, or tunnel over USB.
         if (!operatorToken.isNullOrBlank()) {
             SwitchRow("Allow dashboard from other devices", allowRemoteDashboard, onAllowRemoteDashboardChange, enabled = !running)
             Text(

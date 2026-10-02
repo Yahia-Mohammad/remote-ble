@@ -19,4 +19,11 @@ if docker run --rm "$image"; then
   exit 1
 fi
 
+# Cleartext on the published port needs its own opt-in (TLS-PIN-05), and is refused before BlueZ
+# too, even with a credential.
+if docker run --rm -e REMOTE_BLE_TOKEN=smoke-test-token -e REMOTE_BLE_TLS=false "$image"; then
+  echo "cleartext non-loopback image startup unexpectedly succeeded" >&2
+  exit 1
+fi
+
 echo "container smoke passed for $image"

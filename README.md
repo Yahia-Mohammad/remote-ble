@@ -302,8 +302,8 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 touches CoreBluetooth — macOS TCC only grants Bluetooth to a signed `.app` bundle that declares
 `NSBluetoothAlwaysUsageDescription` and is launched via LaunchServices. The script wraps a tiny JNI
 launcher (`agent/macos-launcher/`) in such a bundle, `open`s it, and streams the log (Ctrl-C stops
-it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows status with recent
-activity and a dashboard link.
+it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows whether the agent is up,
+and with `REMOTE_BLE_OPERATOR_TOKEN` set also its clients, devices and recent activity.
 
 Both desktop agents bind to loopback by default. To expose an agent on a LAN, choose an explicit
 `REMOTE_BLE_BIND`/`--bind` address, configure credentials, and serve it encrypted with `--tls`

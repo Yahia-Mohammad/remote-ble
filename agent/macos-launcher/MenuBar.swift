@@ -9,6 +9,30 @@
 // blocking here for the life of the app.
 import Cocoa
 
+// The agent's certificate is self-signed, so no system trust evaluation passes it. Accepted for the
+// loopback poll only, which leaves it exactly as exposed as the plain `http://` poll: either way the
+// operator token goes to whatever holds the port on this machine. The dashboard opened in the
+// browser still shows its own warning, which the operator checks against the certificate SHA-256
+// the agent logs.
+private final class LoopbackAgentTrust: NSObject, URLSessionDelegate {
+    private let host: String
+
+    init(host: String) {
+        self.host = host
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              space.host == host, let trust = space.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
 private final class AgentMenuController: NSObject {
     private let dashboardURL: URL
     private let statusItem: NSStatusItem
@@ -17,15 +41,19 @@ private final class AgentMenuController: NSObject {
     // Dedicated session with a short per-request timeout: poll() fires every 2s, so the default
     // 60s request timeout would let requests pile up against a hung/unreachable dashboard. A tight
     // timeout just surfaces as the "unreachable" (🟡) state until the next tick.
-    private let session: URLSession = {
+    private let session: URLSession
+    // Every dashboard route needs the operator credential, and without one the agent serves no
+    // dashboard at all. `open --env` forwards it from run-agent.sh's environment.
+    private let operatorToken = ProcessInfo.processInfo.environment["REMOTE_BLE_OPERATOR_TOKEN"]
+        .flatMap { $0.isEmpty ? nil : $0 }
+
+    init(port: String, tls: Bool) {
+        // With --tls the port serves only `https://`, behind the agent's self-signed certificate.
+        dashboardURL = URL(string: "\(tls ? "https" : "http")://127.0.0.1:\(port)/")!
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 1.5
         config.waitsForConnectivity = false
-        return URLSession(configuration: config)
-    }()
-
-    init(port: String) {
-        dashboardURL = URL(string: "http://127.0.0.1:\(port)/")!
+        session = URLSession(configuration: config, delegate: LoopbackAgentTrust(host: "127.0.0.1"), delegateQueue: nil)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
         logItems = (0..<5).map { _ in NSMenuItem(title: "", action: nil, keyEquivalent: "") }
@@ -72,17 +100,30 @@ private final class AgentMenuController: NSObject {
     }
 
     @objc func poll() {
-        let url = dashboardURL.appendingPathComponent("api/state")
-        session.dataTask(with: url) { [weak self] data, _, error in
-            DispatchQueue.main.async { self?.handlePollResult(data: data, error: error) }
+        var request = URLRequest(url: dashboardURL.appendingPathComponent("api/state"))
+        if let operatorToken {
+            request.setValue("Bearer \(operatorToken)", forHTTPHeaderField: "Authorization")
+        }
+        session.dataTask(with: request) { [weak self] data, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode
+            DispatchQueue.main.async { self?.handlePollResult(data: data, status: status, error: error) }
         }.resume()
     }
 
-    private func handlePollResult(data: Data?, error: Error?) {
-        guard error == nil, let data,
-              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    private func handlePollResult(data: Data?, status: Int?, error: Error?) {
+        guard error == nil, let status else {
             statusItem.button?.title = "🟡 RemoteBLE"
             statusLine.title = "Agent starting or unreachable…"
+            return
+        }
+        // Any answer means the agent is up; only a 200 carries the status to show.
+        guard status == 200, let data,
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            statusItem.button?.title = "🟢 RemoteBLE"
+            statusLine.title = status == 404
+                ? "Running — set REMOTE_BLE_OPERATOR_TOKEN to see its status"
+                : "Running — dashboard answered \(status)"
+            for item in logItems { item.isHidden = true }
             return
         }
         let clientCount = (state["clients"] as? [Any])?.count ?? 0
@@ -107,12 +148,12 @@ private final class AgentMenuController: NSObject {
 private var controller: AgentMenuController?
 
 @_cdecl("agent_menu_run")
-public func agent_menu_run(_ portPtr: UnsafePointer<CChar>) {
+public func agent_menu_run(_ portPtr: UnsafePointer<CChar>, _ tls: Int32) {
     let port = String(cString: portPtr)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory) // no Dock icon
 
-    let c = AgentMenuController(port: port)
+    let c = AgentMenuController(port: port, tls: tls != 0)
     controller = c
     c.poll()
     Timer.scheduledTimer(timeInterval: 2.0, target: c, selector: #selector(AgentMenuController.poll),

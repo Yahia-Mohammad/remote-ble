@@ -83,6 +83,10 @@ protocol version: **1**.
   `defaultWebSocketHttpClient()` failed with "Cannot access class 'io.ktor.client.HttpClient'"
   unless it added `ktor-client-core` itself. Both are now `compile` dependencies. Apple consumers were
   unaffected: Kotlin/Native resolves a library's full dependency closure at compile time.
+- **The macOS menu-bar item turns green when the agent is up.** It polled the dashboard without the
+  operator credential every dashboard route has needed since 0.9.0, so it stayed 🟡 whatever the
+  agent's state. It now sends `REMOTE_BLE_OPERATOR_TOKEN` when one is set, shows the agent as
+  running without it, and polls `https://` when the agent serves `--tls`.
 
 ## [0.13.0] - 2026-09-29
 

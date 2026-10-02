@@ -23,6 +23,8 @@
 //   argv[1]          = main class in slash form (e.g. com/example/.../MainKt)
 //   argv[2]          = port (also used to poll the local dashboard; defaults to 8080)
 //   argv[2..]        = program args passed to main(String[])
+//   --tls in argv[2..] or env REMOTE_BLE_TLS=true (as Main.kt reads them) makes the dashboard
+//   `https://`, which the menu bar must then poll over TLS
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -37,7 +39,18 @@ static char **gArgv;
 
 // Implemented in MenuBar.swift; runs the Cocoa app (status item, menu, dashboard
 // polling) on the calling thread until the process exits or Quit is chosen.
-extern void agent_menu_run(const char *port);
+extern void agent_menu_run(const char *port, int tls);
+
+// Mirrors Main.kt's own reading: the flag anywhere in the program args, or the variable set to
+// exactly "true" (`toBooleanStrictOrNull`). Any other value makes the agent refuse to start, so
+// what the menu bar shows then does not matter.
+static int agentServesTls(int argc, char **argv) {
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--tls") == 0) return 1;
+    }
+    const char *env = getenv("REMOTE_BLE_TLS");
+    return env != NULL && strcmp(env, "true") == 0;
+}
 
 static void *runJvm(void *arg) {
     (void)arg;
@@ -107,6 +120,6 @@ int main(int argc, char **argv) {
     }
     pthread_detach(jvmThread);
 
-    agent_menu_run(port); // blocks, running the menu bar app until Quit or process exit
+    agent_menu_run(port, agentServesTls(argc, argv)); // blocks, running the menu bar app until Quit or process exit
     return 0;
 }

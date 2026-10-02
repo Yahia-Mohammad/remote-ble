@@ -683,7 +683,9 @@ configured through `settings.writePolicyEnforced`.
 > `:agent:printJvmRuntimeClasspath` to assemble the JVM classpath. The launcher's main
 > thread runs a menu bar status item ([`macos-launcher/MenuBar.swift`](../agent/macos-launcher/MenuBar.swift),
 > 🟢/🟡 dot + recent activity, polling the dashboard below) so it's visible at a glance
-> that the agent is running, without needing `ps` or a browser tab.
+> that the agent is running, without needing `ps` or a browser tab. It shows clients, devices
+> and activity only when `REMOTE_BLE_OPERATOR_TOKEN` is set, since the dashboard needs it; with
+> `--tls` it polls `https://` on loopback and accepts the agent's self-signed certificate there.
 
 The endpoint and optional **status dashboard** share the port: `ws://<host>:8080/agent` for
 clients and `http://<host>:8080/` for the dashboard. The dashboard is disabled unless the

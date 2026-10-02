@@ -45,6 +45,7 @@ fun main(args: Array<String>) {
         hasCredential = token != null || namedCredentials.isNotEmpty(),
         allowInsecureLan = System.getenv("REMOTE_BLE_ALLOW_INSECURE_LAN")?.toBooleanStrictOrNull() == true,
     )
+    validateCleartext(bindHost, tls = tlsFront != null, allowCleartextLan = strictFlag(System::getenv, "REMOTE_BLE_ALLOW_CLEARTEXT_LAN"))
     val config = AgentConfig(
         bindHost = bindHost,
         port = cli.port,
@@ -251,6 +252,23 @@ internal fun validateBind(requested: String, hasCredential: Boolean, allowInsecu
         Logger.warn(LogTags.AGENT) { "starting unauthenticated non-loopback listener because insecure development override is enabled" }
     }
     return address.hostAddress
+}
+
+/**
+ * TLS-PIN-05: a listener other devices can reach serves `wss://`, or cleartext only because the
+ * operator said so with `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true`. Loopback stays cleartext: a tunnel
+ * (`adb forward`, `iproxy`) or the TLS proxy recipe sits in front of it, and nothing crosses the
+ * network. Separate from [validateBind]'s token rule, so each refusal names its own opt-in.
+ */
+internal fun validateCleartext(bindHost: String, tls: Boolean, allowCleartextLan: Boolean) {
+    if (tls || InetAddress.getByName(bindHost).isLoopbackAddress) return
+    check(allowCleartextLan) {
+        "a non-loopback bind ($bindHost) would serve cleartext ws://: pass --tls (REMOTE_BLE_TLS=true), or set " +
+            "REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true to keep cleartext; see docs/migrate-to-0.14.0.md"
+    }
+    Logger.warn(LogTags.AGENT) {
+        "serving cleartext ws:// on $bindHost (REMOTE_BLE_ALLOW_CLEARTEXT_LAN): the token, advertisements and GATT values cross the network readable"
+    }
 }
 
 /** Parses `principal=secret,other=secret`; names are never written to the log. */

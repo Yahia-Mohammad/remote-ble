@@ -139,4 +139,17 @@ class MainTest {
         assertTrue(parseCli(arrayOf("--tls", "--print-pairing")).printPairing)
         assertFalse(parseCli(arrayOf("--tls")).printPairing)
     }
+
+    @Test
+    fun tlsPin05ANonLoopbackBindServesCleartextOnlyWhenAllowed() {
+        val refused = assertFailsWith<IllegalStateException> { validateCleartext("0.0.0.0", tls = false, allowCleartextLan = false) }
+        assertTrue("REMOTE_BLE_ALLOW_CLEARTEXT_LAN" in refused.message.orEmpty() && "--tls" in refused.message.orEmpty())
+        assertFailsWith<IllegalStateException> { validateCleartext("192.168.1.20", tls = false, allowCleartextLan = false) }
+
+        validateCleartext("0.0.0.0", tls = true, allowCleartextLan = false)
+        validateCleartext("0.0.0.0", tls = false, allowCleartextLan = true)
+        // Loopback keeps serving ws:// for tunnels and the TLS proxy recipe.
+        validateCleartext("127.0.0.1", tls = false, allowCleartextLan = false)
+        validateCleartext("::1", tls = false, allowCleartextLan = false)
+    }
 }

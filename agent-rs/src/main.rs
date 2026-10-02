@@ -56,6 +56,11 @@ struct Args {
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_INSECURE_LAN")]
     allow_insecure_lan: bool,
 
+    /// Permit a non-loopback listener without `--tls`, which serves cleartext `ws://` the whole
+    /// network can read (TLS-PIN-05). Without it such a bind refuses to start.
+    #[arg(long, default_value_t = false, env = "REMOTE_BLE_ALLOW_CLEARTEXT_LAN")]
+    allow_cleartext_lan: bool,
+
     /// BLE-disconnect grace window in milliseconds
     #[arg(long, default_value_t = 10000, env = "REMOTE_BLE_LEASE_GRACE_MS")]
     lease_grace_ms: u64,
@@ -317,6 +322,14 @@ fn validate_operator_token(
 
 fn validate_bind(args: &Args, has_token: bool) -> Result<(), String> {
     validate_bind_policy(args.bind, has_token, args.allow_insecure_lan)?;
+    validate_cleartext_policy(args.bind, args.tls, args.allow_cleartext_lan)?;
+    if !args.bind.is_loopback() && !args.tls {
+        tracing::warn!(
+            "serving cleartext ws:// on {} (REMOTE_BLE_ALLOW_CLEARTEXT_LAN): the token, advertisements \
+             and GATT values cross the network readable",
+            args.bind
+        );
+    }
     if !args.bind.is_loopback() && !has_token {
         tracing::warn!(
             "starting unauthenticated non-loopback listener because the insecure development override is enabled"
@@ -413,6 +426,24 @@ fn validate_bind_policy(
     Ok(())
 }
 
+/// TLS-PIN-05: a listener other devices can reach serves `wss://`, or cleartext only because the
+/// operator said so. Loopback stays cleartext, for tunnels and the TLS proxy recipe. Separate from
+/// the token rule, so each refusal names its own opt-in. Matches the Kotlin agent's
+/// `validateCleartext`.
+fn validate_cleartext_policy(
+    bind: IpAddr,
+    tls: bool,
+    allow_cleartext_lan: bool,
+) -> Result<(), String> {
+    if tls || bind.is_loopback() || allow_cleartext_lan {
+        return Ok(());
+    }
+    Err(format!(
+        "a non-loopback bind ({bind}) would serve cleartext ws://: pass --tls (REMOTE_BLE_TLS=true), \
+         or set REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true to keep cleartext; see docs/migrate-to-0.14.0.md"
+    ))
+}
+
 /// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM.
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -456,6 +487,20 @@ mod tests {
             validate_bind_policy(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), true, false).is_err()
         );
         assert!(validate_bind_policy(IpAddr::V6(Ipv6Addr::LOCALHOST), false, false).is_ok());
+    }
+
+    #[test]
+    fn tls_pin_05_a_non_loopback_bind_serves_cleartext_only_when_allowed() {
+        let lan = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let refused = validate_cleartext_policy(lan, false, false).unwrap_err();
+        assert!(refused.contains("REMOTE_BLE_ALLOW_CLEARTEXT_LAN") && refused.contains("--tls"));
+        assert!(validate_cleartext_policy("192.168.1.20".parse().unwrap(), false, false).is_err());
+
+        assert!(validate_cleartext_policy(lan, true, false).is_ok());
+        assert!(validate_cleartext_policy(lan, false, true).is_ok());
+        // Loopback keeps serving ws:// for tunnels and the TLS proxy recipe.
+        assert!(validate_cleartext_policy(IpAddr::V4(Ipv4Addr::LOCALHOST), false, false).is_ok());
+        assert!(validate_cleartext_policy(IpAddr::V6(Ipv6Addr::LOCALHOST), false, false).is_ok());
     }
 
     #[test]

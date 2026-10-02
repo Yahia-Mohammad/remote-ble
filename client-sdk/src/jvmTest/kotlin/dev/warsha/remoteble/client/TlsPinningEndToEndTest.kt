@@ -37,6 +37,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
@@ -139,7 +140,14 @@ class TlsPinningEndToEndTest {
         val gaveUp = CompletableTracker()
         val transport = pinnedTransport(server.resolvedPort, wrongPin, ReconnectPolicy(onGaveUp = gaveUp::fire))
 
-        val failure = assertFailsWith<AgentIdentityMismatchException> { transport.connect() }
+        // Not assertFailsWith: if connect() returns, the transport took the failure for a transient
+        // one and is retrying, and only what it logged says what it saw instead.
+        val failure = try {
+            transport.connect()
+            fail("connect() returned in state ${transport.state.value} instead of failing with the identity error; logged: $logged")
+        } catch (mismatch: AgentIdentityMismatchException) {
+            mismatch
+        }
 
         assertEquals(wrongPin, failure.expected)
         assertEquals(identity.fingerprint, failure.presented)

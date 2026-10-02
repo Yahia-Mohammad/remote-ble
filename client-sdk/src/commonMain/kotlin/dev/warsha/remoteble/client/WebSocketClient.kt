@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.client
 
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import io.ktor.client.HttpClient
 
 /**
@@ -14,3 +15,16 @@ import io.ktor.client.HttpClient
  * `cioWebSocketHttpClient()` there for a plain `ws://` agent.
  */
 expect fun defaultWebSocketHttpClient(): HttpClient
+
+/**
+ * A WebSocket [HttpClient] for a `wss://` agent whose identity this client pinned at pairing.
+ *
+ * The agent's certificate is self-signed, so no certificate authority is consulted: the connection
+ * is trusted exactly when the agent's TLS key hashes to [fingerprint]. A different key fails the
+ * handshake with [AgentIdentityMismatchException] before any request, and so before the bearer
+ * token, is sent, and the transport gives up rather than retrying. Agents are reached by IP
+ * addresses their certificates cannot name, so host names are not what is checked; the pin is.
+ *
+ * JVM: Ktor CIO (TLS 1.2). Android: OkHttp. iOS and macOS: Darwin (NSURLSession).
+ */
+expect fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient

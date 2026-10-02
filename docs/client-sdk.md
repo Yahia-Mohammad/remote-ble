@@ -247,7 +247,9 @@ val transport = WebSocketAgentTransport(
 )
 ```
 
-On Apple targets NSURLSession reports a refused challenge as a plain cancellation, so the client
+It is declared in common code, so a shared pairing screen can build it. On Apple targets it needs no
+App Transport Security exception: a default-ATS app reached an agent's LAN address over pinned
+`wss://`. NSURLSession reports a refused challenge as a plain cancellation, so the client
 records the mismatch in its challenge handler and raises `AgentIdentityMismatchException` in place of
 that cancellation.
 

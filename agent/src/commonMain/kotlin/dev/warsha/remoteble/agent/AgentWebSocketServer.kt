@@ -333,7 +333,12 @@ class AgentWebSocketServer(
         awaitBind(instance, engineScope, engineFailure)
         if (tls != null) {
             val started = try {
-                tls.start(host, port, boundPort.value)
+                tls.start(host, port, boundPort.value) { reason ->
+                    // The phone apps configure no Logger sink, so the activity log is where a user
+                    // of one can see that the agent stopped listening.
+                    Logger.error(LogTags.SERVER) { "TLS listener failed: $reason" }
+                    monitor?.agentEvent("TLS listener failed ($reason): stop and start the agent")
+                }
             } catch (failure: Throwable) {
                 // The public port is the one that matters; without it the plain listener is useless.
                 abandon(instance, engineScope)

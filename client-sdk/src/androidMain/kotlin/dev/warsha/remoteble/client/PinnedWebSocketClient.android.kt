@@ -8,18 +8,12 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLPeerUnverifiedException
 
 /**
- * A WebSocket [HttpClient] for a `wss://` agent whose identity this client pinned at pairing.
- *
- * The agent's certificate is self-signed, so no certificate authority is consulted: the connection
- * is trusted exactly when the agent's TLS key hashes to [fingerprint]. A different key fails the
- * handshake with [AgentIdentityMismatchException] before any request, and so before the bearer
- * token, is sent.
- *
+ * Android: OkHttp with the trust manager the JVM client uses, accepting exactly the pinned key.
  * Agents are reached by IP addresses their certificates cannot name, so OkHttp's host-name check
  * defers to the pin too. It checks the session's certificate again rather than passing everything,
  * because a resumed session skips the trust manager, and this check is what still runs.
  */
-fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient = HttpClient(OkHttp) {
+actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient = HttpClient(OkHttp) {
     engine {
         config {
             val trustManager = PinningTrustManager(fingerprint)

@@ -86,10 +86,14 @@ import platform.posix.free
  */
 class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
 
-    override suspend fun start(host: String, port: Int, upstreamPort: Int): TlsFront =
-        Running(identity, upstreamPort).also { it.listen(host, port) }
+    override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
+        Running(identity, upstreamPort, onFailure).also { it.listen(host, port) }
 
-    private class Running(private val identity: IosTlsIdentity, private val upstreamPort: Int) : TlsFront {
+    private class Running(
+        private val identity: IosTlsIdentity,
+        private val upstreamPort: Int,
+        private val onFailure: (reason: String) -> Unit,
+    ) : TlsFront {
         private val queue = dispatch_queue_create("dev.warsha.remoteble.agent.tls-front", null)
         private val lock = SynchronizedObject()
         private val peers = mutableMapOf<Int, PeerAddress>()
@@ -125,6 +129,9 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
                 when (state) {
                     nw_listener_state_ready -> ready.complete(nw_listener_get_port(created).toInt())
                     nw_listener_state_failed -> {
+                        // Once ready, a failure (a network change can cause one) has no caller left to
+                        // throw to, and the agent would look up while serving nothing.
+                        if (ready.isCompleted) onFailure("port $boundPort, ${describe(error)}")
                         ready.completeExceptionally(AgentBindException(host, port, IllegalStateException(describe(error))))
                         nw_listener_cancel(created)
                     }

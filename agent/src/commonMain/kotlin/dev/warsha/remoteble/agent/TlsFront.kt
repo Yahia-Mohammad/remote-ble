@@ -28,9 +28,10 @@ interface TlsFront {
     fun interface Factory {
         /**
          * Binds [host]:[port] (0 for an ephemeral port) and relays to `127.0.0.1:[upstreamPort]`.
-         * Throws [AgentBindException] if the public port cannot be bound.
+         * Throws [AgentBindException] if the public port cannot be bound. [onFailure] hears of a
+         * listener that fails after starting, when there is no caller left to throw to.
          */
-        suspend fun start(host: String, port: Int, upstreamPort: Int): TlsFront
+        suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront
     }
 }
 

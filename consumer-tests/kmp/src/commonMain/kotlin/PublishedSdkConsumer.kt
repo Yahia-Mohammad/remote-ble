@@ -1,7 +1,9 @@
 import dev.warsha.remoteble.client.AgentTransport
 import dev.warsha.remoteble.client.WebSocketAgentTransport
 import dev.warsha.remoteble.client.defaultWebSocketHttpClient
+import dev.warsha.remoteble.client.pinnedWebSocketHttpClient
 import dev.warsha.remoteble.client.di.RemoteBleClientConfig
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import dev.warsha.remoteble.protocol.ProtocolVersionSelection
 import dev.warsha.remoteble.protocol.selectProtocolVersion
 import kotlinx.coroutines.CoroutineScope
@@ -22,3 +24,10 @@ fun configuredAgentUrl(): String {
  */
 fun defaultTransport(scope: CoroutineScope): AgentTransport =
     WebSocketAgentTransport(configuredAgentUrl(), scope, defaultWebSocketHttpClient())
+
+/** The pinned client is common API, so shared code (a pairing screen, say) can build it. */
+fun pinnedTransport(scope: CoroutineScope): AgentTransport = WebSocketAgentTransport(
+    "wss://127.0.0.1:8080/agent",
+    scope,
+    pinnedWebSocketHttpClient(AgentFingerprint.parse("sha256:" + "0".repeat(64))),
+)

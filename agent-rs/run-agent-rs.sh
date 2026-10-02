@@ -146,11 +146,15 @@ if [ "$OS" = "Darwin" ]; then
     "$APP/Contents/MacOS/agent-rs" >/dev/null 2>&1 || true
   codesign -f -s - "$APP" >/dev/null 2>&1 || true
 
-  log "Launching agent on ws://0.0.0.0:$PORT/agent (logs: $LOG)…"
+  log "Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1} (logs: $LOG)…"
   : > "$LOG"
   OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
     --env "RUST_LOG=${RUST_LOG:-agent_rs=debug,info}")
-  [ -n "${REMOTE_BLE_TOKEN:-}" ] && OPEN_ARGS+=(--env "REMOTE_BLE_TOKEN=$REMOTE_BLE_TOKEN")
+  # Every REMOTE_BLE_* variable, as run-agent.sh forwards them: `open` passes on only what --env
+  # names, and an allowlist of the token alone left REMOTE_BLE_BIND and REMOTE_BLE_TLS behind.
+  while IFS='=' read -r name _; do
+    OPEN_ARGS+=(--env "$name=${!name}")
+  done < <(env | grep '^REMOTE_BLE_[A-Z0-9_]*=' || true)
   open "${OPEN_ARGS[@]}" --args --port "$PORT"
 
   cleanup() { echo; echo "==> Stopping agent…"; pkill -f "RemoteBleAgentRs.app/Contents/MacOS/agent-rs" 2>/dev/null || true; }
@@ -158,7 +162,7 @@ if [ "$OS" = "Darwin" ]; then
   log "Streaming logs (Ctrl-C to stop the agent)…"
   tail -f "$LOG"
 else
-  log "Launching agent on ws://0.0.0.0:$PORT/agent…"
+  log "Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1}…"
   export RUST_LOG="${RUST_LOG:-agent_rs=debug,info}"
   exec "$BIN" --port "$PORT"
 fi

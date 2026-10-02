@@ -305,15 +305,17 @@ Opt-in on every agent; see [proposals/agent-transport-encryption.md](proposals/a
 | Reinstall | n/a | n/a | New identity: the Keystore key goes with the app | New identity: the first run of an installation discards a Keychain leftover |
 | Termination | In-process front relaying to CIO on loopback, real peer via registry | `tokio-rustls` before the upgrade, peer address native | Same front as the JVM | `NWListener` front, same registry; byte pump in Objective-C |
 | Handshake bound | 10 s total, however the bytes trickle in | 10 s total | Same front as the JVM | 10 s timer; the socket is released 15–20 s in |
+| Silent after the handshake | Closed at CIO's 45 s idle timeout | Closed at 10 s (upgrade request deadline) | Same as the JVM | Same as the JVM |
 | Connection limits | 16 per host, 128 in all: the blocking front holds threads per connection, on a pool of its own | None needed: async, a connection costs memory only | Same front as the JVM | None needed: async, as Rust |
-| Dashboard over TLS | ✅ (`https://`) | n/a (no dashboard) | ✅ (`https://`) | Same server; not exercised on iOS |
+| Dashboard over TLS | ✅ (`https://`) | n/a (no dashboard) | ✅ (`https://`) | ✅ (`https://`), on the simulator |
 
 **Parity:** Full match on the wire, and on disk between the desktop agents. Interop checked both ways on
 2026-10-01: a file written by either desktop agent loads in the other with the same fingerprint, and
 OpenSSL computes the same SPKI digest. That check found the JDK's PKCS#8 encoding omits the EC public key,
 which `ring` requires; the JVM agent now writes it. The Android agent below Android 10 offers TLS 1.2 only,
 because the platform has no 1.3 server; every client speaks 1.2, and the spec makes 1.3 a SHOULD for this.
-The iOS agent is verified on the simulator only; its real peer address awaits a run on a physical iPhone.
+The iOS agent is verified on the simulator only, real peer address included: a request to the Mac's LAN
+address reaches it from a non-loopback peer, and the dashboard gate refuses it.
 
 ---
 

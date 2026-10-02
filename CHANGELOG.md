@@ -31,7 +31,8 @@ protocol version: **1**.
   `--tls` (`REMOTE_BLE_TLS=true`) and share one identity file; the Android and iOS agent apps have an
   **Encrypt connections (wss://)** switch, keep the key in Android Keystore or the Keychain, show the
   fingerprint, and offer a confirmed **New identity**. A reset (`--reset-identity`) breaks every
-  pinned client until it pairs again. Off by default for now — see
+  pinned client until it pairs again, and so does reinstalling a phone agent. Every agent offers only
+  AEAD cipher suites (AES-GCM, ChaCha20-Poly1305). Off by default for now — see
   [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39) and
   [the design record](docs/proposals/agent-transport-encryption.md).
 - **`pinnedWebSocketHttpClient(fingerprint)` in `client-sdk`, on every target.** It trusts exactly the

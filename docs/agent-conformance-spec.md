@@ -98,8 +98,9 @@ activity log shows the peer address for `07`.
 
 **The iOS agent** runs the same server behind a Network.framework front of its own, so its scenarios
 are checked the same way, on the simulator so far: `pinRun` for `01`, `02` and `06`, and the app's
-relaunch and **New identity** for `03`. `07` needs a physical iPhone, since the simulator shares the
-Mac's loopback.
+relaunch and **New identity** for `03`. For `07`, the dashboard's own-device gate serves a request
+over loopback and refuses one sent to the Mac's LAN address, which reaches the simulator's agent from a
+non-loopback peer.
 
 **The Apple client** pins in NSURLSession's challenge handler. No host test can stand a TLS server up
 for it, so `01` and `02` are checked on the iOS simulator against the JVM agent; the SPKI it pins is

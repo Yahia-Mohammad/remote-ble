@@ -300,7 +300,8 @@ Opt-in on every agent; see [proposals/agent-transport-encryption.md](proposals/a
 | Fingerprint shown | Logged at start: `Agent identity: sha256:<hex>` | Same | On screen, selectable | Same as Android |
 | TLS versions | 1.3 and 1.2 (JSSE) | 1.3 and 1.2 (rustls, `ring`) | 1.3 and 1.2 (Conscrypt) from Android 10; 1.2 below | 1.3 and 1.2 (Network.framework) |
 | Termination | In-process front relaying to CIO on loopback, real peer via registry | `tokio-rustls` before the upgrade, peer address native | Same front as the JVM | `NWListener` front, same registry; byte pump in Objective-C |
-| Handshake bound | 10 s | 10 s | 10 s | 10 s timer; the socket is released 15–20 s in |
+| Handshake bound | 10 s total, however the bytes trickle in | 10 s total | Same front as the JVM | 10 s timer; the socket is released 15–20 s in |
+| Connection limits | 16 per host, 128 in all: the blocking front holds threads per connection, on a pool of its own | None needed: async, a connection costs memory only | Same front as the JVM | None needed: async, as Rust |
 | Dashboard over TLS | ✅ (`https://`) | n/a (no dashboard) | ✅ (`https://`) | Same server; not exercised on iOS |
 
 **Parity:** Full match on the wire, and on disk between the desktop agents. Interop checked both ways on

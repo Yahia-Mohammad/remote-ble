@@ -9,29 +9,54 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.Principal
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509ExtendedKeyManager
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
  * [TlsFront] on the platform's JSSE: an `SSLServerSocket` holding the agent's identity, relaying
- * each connection to the plain listener with one thread-blocking pump per direction. Agents serve a
- * handful of clients, so blocking I/O on [Dispatchers.IO] is simpler than an `SSLEngine` state
- * machine at no cost that matters.
+ * each connection to the plain listener with one thread-blocking pump per direction.
+ *
+ * Blocking I/O makes every connection hold a thread, so three limits keep a hostile peer from
+ * holding the agent:
+ *
+ * - The handshake has a deadline ([handshakeTimeout]) that closes the socket however the bytes
+ *   trickle in. A socket read timeout would not do: it bounds each read, so a peer sending one byte
+ *   per interval held a handshake open indefinitely.
+ * - The threads are the front's own, never [Dispatchers.IO]: silent peers once filled that shared
+ *   pool and held honest clients' handshakes up to the timeout.
+ * - One host holds at most [maxPerHost] connections, and the front at most [maxConnections]; a
+ *   connection over either is closed at once.
  *
  * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, the SDK's JVM
  * engine, speaks nothing newer.
  */
-class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
+class JsseTlsFront internal constructor(
+    private val identity: AgentTlsIdentity,
+    private val handshakeTimeout: Duration,
+    private val maxPerHost: Int,
+    private val maxConnections: Int,
+) : TlsFront.Factory {
+
+    constructor(identity: AgentTlsIdentity) : this(identity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
 
     override suspend fun start(host: String, port: Int, upstreamPort: Int): TlsFront = withContext(Dispatchers.IO) {
         val server = try {
@@ -70,10 +95,14 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
         }
     }
 
-    private class Running(private val server: SSLServerSocket, private val upstreamPort: Int) : TlsFront {
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private inner class Running(private val server: SSLServerSocket, private val upstreamPort: Int) : TlsFront {
+        private val threads = Executors.newCachedThreadPool(daemonThreads("remoteble-tls"))
+        private val deadlines = Executors.newSingleThreadScheduledExecutor(daemonThreads("remoteble-tls-deadline"))
+        private val scope = CoroutineScope(SupervisorJob() + threads.asCoroutineDispatcher())
         private val peers = ConcurrentHashMap<Int, PeerAddress>()
         private val live = ConcurrentHashMap.newKeySet<Socket>()
+        private val perHost = ConcurrentHashMap<String, AtomicInteger>()
+        private val total = AtomicInteger()
 
         override val port: Int get() = server.localPort
 
@@ -81,15 +110,42 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
 
         fun acceptLoop() {
             scope.launch {
-                while (isActive) {
-                    val client = try {
-                        server.accept() as SSLSocket
-                    } catch (_: IOException) {
-                        break // closed by stop()
+                acceptUntilClosed(accept = server::accept, isClosed = server::isClosed) { socket ->
+                    val client = socket as SSLSocket
+                    val host = client.inetAddress.hostAddress
+                    if (admit(host)) {
+                        launch {
+                            try {
+                                relay(client)
+                            } finally {
+                                release(host)
+                            }
+                        }
+                    } else {
+                        Logger.debug(LogTags.SERVER) { "TLS connection from $host refused: connection limit reached" }
+                        client.closeQuietly()
                     }
-                    launch { relay(client) }
                 }
             }
+        }
+
+        private fun admit(host: String): Boolean {
+            if (total.incrementAndGet() > maxConnections) {
+                total.decrementAndGet()
+                return false
+            }
+            val count = perHost.computeIfAbsent(host) { AtomicInteger() }
+            if (count.incrementAndGet() > maxPerHost) {
+                count.decrementAndGet()
+                total.decrementAndGet()
+                return false
+            }
+            return true
+        }
+
+        private fun release(host: String) {
+            perHost[host]?.let { count -> if (count.decrementAndGet() <= 0) perHost.remove(host, count) }
+            total.decrementAndGet()
         }
 
         private suspend fun relay(client: SSLSocket) {
@@ -97,10 +153,7 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
             var upstream: Socket? = null
             live += client
             try {
-                // Bounded, so a peer that opens TCP and never speaks TLS cannot hold a pump forever.
-                client.soTimeout = HANDSHAKE_TIMEOUT_MILLIS
-                client.startHandshake()
-                client.soTimeout = 0
+                handshake(client)
                 upstream = Socket().apply { connect(InetSocketAddress(UPSTREAM_HOST, upstreamPort)) }
                 live += upstream
                 // Registered before a single byte is relayed, so the plain listener can never handle
@@ -117,12 +170,22 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
             }
         }
 
+        /** Completes the handshake within [handshakeTimeout] in total, or closes [client] trying. */
+        private fun handshake(client: SSLSocket) {
+            val deadline = deadlines.schedule({ client.closeQuietly() }, handshakeTimeout.inWholeMilliseconds, TimeUnit.MILLISECONDS)
+            try {
+                client.startHandshake()
+            } finally {
+                deadline.cancel(false)
+            }
+        }
+
         /**
          * Pumps both directions until either ends. Whichever ends first closes both sockets, which
          * is also what unblocks the other pump's read. A WebSocket closes in-band before TCP does,
          * so ending both directions together loses nothing.
          */
-        private suspend fun pumpBothWays(client: SSLSocket, upstream: Socket) = withContext(Dispatchers.IO) {
+        private suspend fun pumpBothWays(client: SSLSocket, upstream: Socket) = coroutineScope {
             launch {
                 pump(client.inputStream, upstream.outputStream)
                 client.closeQuietly()
@@ -151,19 +214,60 @@ class JsseTlsFront(private val identity: AgentTlsIdentity) : TlsFront.Factory {
             server.closeQuietly()
             live.forEach { it.closeQuietly() }
             scope.cancel()
+            deadlines.shutdownNow()
+            threads.shutdown()
         }
     }
 
-    private companion object {
+    internal companion object {
+        val HANDSHAKE_TIMEOUT = 10.seconds
+        // Agents serve a handful of clients, and one host is usually one client; a test rig or a
+        // conformance run opens a few more. Each connection holds a thread while it handshakes and
+        // two while it relays.
+        const val MAX_PER_HOST = 16
+        const val MAX_CONNECTIONS = 128
+
         val PROTOCOLS = listOf("TLSv1.3", "TLSv1.2")
         const val BACKLOG = 50
-        const val HANDSHAKE_TIMEOUT_MILLIS = 10_000
         const val BUFFER_BYTES = 16 * 1024
 
         // The address the contract names, spelled out. `InetAddress.getLoopbackAddress()` is
         // 127.0.0.1 on the JDK but ::1 on Android, where CIO's IPv4-only listener refuses it.
         val UPSTREAM_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     }
+}
+
+/**
+ * Accepts until the listener is closed, handing each connection to [onAccepted]. A failed accept
+ * on an open listener (fd exhaustion, a peer that reset between SYN and accept) is transient: it is
+ * logged and retried with a backoff capped at [maxBackoff], because ending the loop would leave an
+ * agent that looks up and serves nothing. Only a closed listener ends it.
+ */
+internal suspend fun acceptUntilClosed(
+    accept: () -> Socket,
+    isClosed: () -> Boolean,
+    maxBackoff: Duration = 1.seconds,
+    onAccepted: (Socket) -> Unit,
+) {
+    var backoff = Duration.ZERO
+    while (true) {
+        val socket = try {
+            accept()
+        } catch (failure: IOException) {
+            if (isClosed()) return
+            backoff = (backoff * 2).coerceIn(50.milliseconds, maxBackoff)
+            Logger.warn(LogTags.SERVER) { "TLS accept failed (${failure.message}); retrying in $backoff" }
+            delay(backoff)
+            continue
+        }
+        backoff = Duration.ZERO
+        onAccepted(socket)
+    }
+}
+
+private fun daemonThreads(name: String): ThreadFactory {
+    val count = AtomicInteger()
+    return ThreadFactory { runnable -> Thread(runnable, "$name-${count.incrementAndGet()}").apply { isDaemon = true } }
 }
 
 private fun java.io.Closeable.closeQuietly() {

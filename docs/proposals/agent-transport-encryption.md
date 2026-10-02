@@ -336,3 +336,13 @@ holding a Keychain identity inside the test process.
 
 **Phase 3 is code-complete.** Its one open check is the iOS agent on a physical iPhone, for the real
 peer address (`TLS-PIN-07`). Next is phase 4, pairing.
+
+**Review hardening (2026-10-02).** A review of phases 1–3 found the JSSE front, which the JVM and Android
+agents share, could be held by any LAN peer without the token. Its 10 s bound was a socket read timeout,
+which bounds each read: a peer trickling one byte every 7 s kept a handshake open past 49 s. And its
+blocking pumps ran on the shared `Dispatchers.IO`, so 80 silent connections held an honest client's
+handshake for 9 s. A transient accept error also ended its accept loop, leaving an agent that looked up
+and served nothing. The front now has a real deadline, threads of its own, limits of 16 connections per
+host and 128 in all, and an accept loop that backs off and retries; `JsseTlsFrontTest` reproduces each,
+and each test fails against the old behaviour. On a live agent the trickled handshake now closes at
+10.0 s. The Rust and iOS fronts are asynchronous and already had real deadlines.

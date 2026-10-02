@@ -71,6 +71,7 @@ import platform.Security.kSecPrivateKeyAttrs
 import platform.Security.kSecReturnRef
 import platform.Security.kSecValueRef
 import platform.Foundation.NSDate
+import platform.Foundation.NSUserDefaults
 import platform.Foundation.timeIntervalSince1970
 
 /**
@@ -91,6 +92,7 @@ class IosTlsIdentity internal constructor(internal val ref: SecIdentityRef, val 
 object IosAgentIdentityStore {
     private const val LABEL = "RemoteBLE Agent identity"
     private const val TAG = "dev.warsha.remoteble.agent.identity"
+    private const val INSTALLED = "remote_ble_agent_identity_installed"
 
     /** DER `SubjectPublicKeyInfo` header for an uncompressed P-256 point (id-ecPublicKey, prime256v1). */
     private val P256_SPKI_PREFIX = byteArrayOf(
@@ -104,7 +106,7 @@ object IosAgentIdentityStore {
      * pairs again: that is the point of a reset.
      */
     fun loadOrCreate(reset: Boolean = false): IosTlsIdentity {
-        if (reset) delete()
+        if (reset || !installed()) delete()
         existing()?.let { return it }
         // A key without its certificate is a creation interrupted before the certificate was
         // stored. Its key was never presented to anyone, so start again.
@@ -113,6 +115,19 @@ object IosAgentIdentityStore {
         return existing()
             ?.also { Logger.info(LogTags.AGENT) { "created agent identity ${it.fingerprint}" } }
             ?: error("the Keychain did not pair the agent's key and certificate")
+    }
+
+    /**
+     * Whether this installation has already been through here. Keychain items outlive an uninstall,
+     * while the agent's tokens and settings do not, and Android's Keystore key goes with the app. So
+     * the first run of an installation discards whatever identity a previous one left: reinstalling
+     * means a new identity on both platforms.
+     */
+    private fun installed(): Boolean {
+        val defaults = NSUserDefaults.standardUserDefaults
+        if (defaults.boolForKey(INSTALLED)) return true
+        defaults.setBool(true, INSTALLED)
+        return false
     }
 
     private fun existing(): IosTlsIdentity? = cf { scope ->

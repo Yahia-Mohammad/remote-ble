@@ -233,7 +233,9 @@ which every client speaks.
 **iOS agent.** The same switch, fingerprint and **New identity**. The key is generated in the Keychain
 and never leaves it. iOS can neither create a certificate nor make an identity from a key and a
 certificate, so the agent signs its certificate with the Keychain key and stores it beside the key,
-and the Keychain pairs the two. An `NWListener` serves it (`NetworkTlsFront`), TLS 1.3 or 1.2, relaying
+and the Keychain pairs the two. Keychain items outlive an uninstall, so the first run of a new
+installation discards any identity a previous one left: as on Android, reinstalling the app means a
+new identity, and paired clients must pair again. An `NWListener` serves it (`NetworkTlsFront`), TLS 1.3 or 1.2, relaying
 to CIO on loopback with the same peer registry. Its byte pump is Objective-C
 (`agent/src/nativeInterop/cinterop/tlsrelay.def`), because Kotlin/Native cannot take
 Network.framework's receive callback; the record has the details.

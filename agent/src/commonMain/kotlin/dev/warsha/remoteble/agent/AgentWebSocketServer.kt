@@ -45,7 +45,11 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -99,7 +103,9 @@ class AgentWebSocketServer(
     private val tls: TlsFront.Factory? = null,
 ) {
     private var server: EmbeddedServer<*, *>? = null
-    private val front = atomic<TlsFront?>(null)
+    // A flow so a request can wait for it: the front relays from the moment it binds, before
+    // [start] has resumed to record it here.
+    private val front = MutableStateFlow<TlsFront?>(null)
 
     // The scope owning the running engine's job, so [stop] retires it with the server rather than
     // leaving a SupervisorJob (and its exception handler) alive for the process's lifetime.
@@ -173,7 +179,10 @@ class AgentWebSocketServer(
             // Resolved first, in Setup, so the credential gate below and every route see the real
             // peer. Without a front, or for a connection no relay owns, it is simply the TCP peer.
             intercept(ApplicationCallPipeline.Setup) {
-                front.value?.peerOf(call.request.origin.remotePort)?.let { call.attributes.put(PeerAttribute, it) }
+                // A relayed request can arrive before start() has recorded the front, and must not
+                // be taken for loopback meanwhile; behind TLS, wait for the front rather than guess.
+                val relay = front.value ?: if (tls != null) withTimeoutOrNull(BIND_TIMEOUT) { front.filterNotNull().first() } else null
+                relay?.peerOf(call.request.origin.remotePort)?.let { call.attributes.put(PeerAttribute, it) }
             }
             install(WebSockets) {
                 pingPeriodMillis = pingPeriod.inWholeMilliseconds
@@ -435,7 +444,7 @@ class AgentWebSocketServer(
 
     fun stop(gracePeriodMillis: Long = 100, timeoutMillis: Long = 500) {
         // The front first, so no new connection is relayed into a listener that is going away.
-        front.getAndSet(null)?.stop()
+        front.getAndUpdate { null }?.stop()
         server?.stop(gracePeriodMillis, timeoutMillis)
         engineJob?.cancel()
         server = null

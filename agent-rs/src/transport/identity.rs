@@ -157,9 +157,7 @@ fn generate() -> Result<String, IdentityError> {
     let mut serial = [0u8; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut serial)
         .map_err(|_| IdentityError::Generate("no system randomness".into()))?;
-    // A positive serial: a set top bit would encode as a negative INTEGER.
-    serial[0] &= 0x7F;
-    params.serial_number = Some(SerialNumber::from_slice(&serial));
+    params.serial_number = Some(SerialNumber::from_slice(&positive_serial(serial)));
     let certificate = params.self_signed(&key).map_err(failed)?;
     Ok(format!("{}{}", key.serialize_pem(), certificate.pem()))
 }
@@ -203,6 +201,16 @@ fn read(path: &Path) -> Result<AgentIdentity, IdentityError> {
         certificate,
         key,
     })
+}
+
+/// RFC 5280 §4.1.2.2 requires a positive serial. A set top bit would encode as a negative INTEGER,
+/// and random bytes can be all zero.
+fn positive_serial(mut serial: [u8; 16]) -> [u8; 16] {
+    serial[0] &= 0x7F;
+    if serial.iter().all(|&byte| byte == 0) {
+        serial[15] = 1;
+    }
+    serial
 }
 
 /// The permission bits of `path` if group or others may access it. Always `None` off Unix, where
@@ -390,6 +398,15 @@ mod tests {
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(FILE_NAME)]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_serial_is_positive_whatever_the_random_bytes() {
+        assert_eq!(positive_serial([0; 16])[15], 1);
+        assert_eq!(positive_serial([0xFF; 16])[0], 0x7F);
+        let mut top_only = [0u8; 16];
+        top_only[0] = 0x80;
+        assert_ne!(positive_serial(top_only), [0; 16]);
     }
 
     #[test]

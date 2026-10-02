@@ -18,6 +18,13 @@ import dev.warsha.remoteble.protocol.AGENT_TLS_SERVER_NAME
  */
 internal object SelfSignedCertificate {
 
+    /**
+     * RFC 5280 §4.1.2.2 requires a positive serial; [Der.integer] keeps it non-negative, and this
+     * keeps it from being zero, which random bytes can be.
+     */
+    private fun nonZero(serial: ByteArray): ByteArray =
+        if (serial.any { it != 0.toByte() }) serial else byteArrayOf(1)
+
     /** No well-defined expiry (RFC 5280 §4.1.2.5): clients pin the key and ignore validity. */
     private const val NO_EXPIRY = "99991231235959Z"
 
@@ -32,7 +39,7 @@ internal object SelfSignedCertificate {
         val name = Der.seq(Der.set(Der.seq(Der.oid(COMMON_NAME), Der.utf8(commonName))))
         val tbs = Der.seq(
             Der.explicit(0, Der.integer(byteArrayOf(2))),
-            Der.integer(serial),
+            Der.integer(nonZero(serial)),
             algorithm,
             name,
             Der.seq(Der.time(notBeforeEpochSeconds), Der.generalizedTime(NO_EXPIRY)),

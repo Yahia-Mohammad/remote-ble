@@ -141,6 +141,25 @@ class AgentIdentityTest {
     }
 
     @Test
+    fun theSerialIsPositiveEvenWhenTheRandomBytesAreNot() {
+        val keys = java.security.KeyPairGenerator.getInstance("EC").apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+        fun serialOf(bytes: ByteArray): java.math.BigInteger {
+            val der = SelfSignedCertificate.build(
+                spki = keys.public.encoded,
+                serial = bytes,
+                notBeforeEpochSeconds = 0,
+                sign = { tbs -> java.security.Signature.getInstance("SHA256withECDSA").run { initSign(keys.private); update(tbs); sign() } },
+            )
+            val certificate = java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(der.inputStream()) as java.security.cert.X509Certificate
+            return certificate.serialNumber
+        }
+
+        assertEquals(java.math.BigInteger.ONE, serialOf(ByteArray(16)))
+        assertEquals(java.math.BigInteger("ff", 16), serialOf(ByteArray(15) + byteArrayOf(-1)))
+    }
+
+    @Test
     fun timesBeyond2049UseGeneralizedTime() {
         // 2050-01-01T00:00:00Z: the first instant RFC 5280 forbids as UTCTime.
         assertEquals("18 0f 32303530303130313030303030305a", Der.time(2524608000L).hex())

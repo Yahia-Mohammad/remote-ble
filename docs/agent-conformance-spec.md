@@ -70,7 +70,8 @@ An agent that does:
    trust; such a client presents this name.
 3. MUST offer TLS 1.2 with an ECDHE-ECDSA AES-GCM suite, because the reference JVM client speaks
    nothing newer, and SHOULD offer TLS 1.3 too. An agent whose platform has no TLS 1.3 server
-   (Android before 10) conforms on 1.2 alone.
+   (Android before 10) conforms on 1.2 alone. It SHOULD offer only AEAD suites (AES-GCM,
+   ChaCha20-Poly1305); every agent here does.
 4. MUST complete the TLS handshake before reading the upgrade request, so a client that rejects the
    identity never sends its bearer token.
 5. MUST apply every peer-address decision (authentication rate limiting, the dashboard's own-device

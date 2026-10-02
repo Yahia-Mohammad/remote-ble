@@ -47,7 +47,9 @@ import kotlinx.coroutines.withContext
  *   connection over either is closed at once.
  *
  * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, the SDK's JVM
- * engine, speaks nothing newer.
+ * engine, speaks nothing newer. Only AEAD suites are offered, as rustls and the iOS front offer: the
+ * platforms' 1.2 defaults still include CBC ones, whose padding checks have a history of timing
+ * oracles, and every client this project knows negotiates AES-GCM.
  */
 class JsseTlsFront internal constructor(
     private val identity: AgentTlsIdentity,
@@ -66,6 +68,7 @@ class JsseTlsFront internal constructor(
             throw AgentBindException(host, port, failure)
         }
         server.enabledProtocols = PROTOCOLS.filter { it in server.supportedProtocols }.toTypedArray()
+        server.enabledCipherSuites = server.supportedCipherSuites.filter(::isAead).toTypedArray()
         Running(server, upstreamPort).also { it.acceptLoop() }
     }
 
@@ -237,6 +240,14 @@ class JsseTlsFront internal constructor(
         val UPSTREAM_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     }
 }
+
+/**
+ * Whether [suite] is AEAD: every TLS 1.3 suite, and the ECDHE-ECDSA GCM and ChaCha20-Poly1305 ones of
+ * 1.2. An agent's key is EC, so no RSA suite could be negotiated anyway.
+ */
+internal fun isAead(suite: String): Boolean =
+    suite.startsWith("TLS_AES_") || suite.startsWith("TLS_CHACHA20_") ||
+        (suite.startsWith("TLS_ECDHE_ECDSA_WITH_") && ("_GCM_" in suite || "_CHACHA20_POLY1305_" in suite))
 
 /**
  * Accepts until the listener is closed, handing each connection to [onAccepted]. A failed accept

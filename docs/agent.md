@@ -215,7 +215,8 @@ fails inside the TLS handshake, before the bearer token is sent.
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
 each connection to CIO on an ephemeral loopback port. Its I/O blocks, so it runs on threads of its
 own, gives every handshake a 10 s deadline, and holds at most 16 connections per host and 128 in all;
-a connection over a limit is closed at once. The front records which relay port belongs to
+a connection over a limit is closed at once. Every agent offers only AEAD suites (AES-GCM and
+ChaCha20-Poly1305), never the CBC ones still in the platforms' TLS 1.2 defaults. The front records which relay port belongs to
 which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
 client look local. The design and the remaining phases (pairing QR codes, encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).

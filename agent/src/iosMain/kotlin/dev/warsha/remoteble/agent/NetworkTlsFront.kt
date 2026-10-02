@@ -54,8 +54,15 @@ import platform.Network.nw_protocol_stack_set_transport_protocol
 import platform.Network.nw_tcp_create_options
 import platform.Network.nw_tls_copy_sec_protocol_options
 import platform.Security.sec_identity_create
+import platform.Security.sec_protocol_options_append_tls_ciphersuite
 import platform.Security.sec_protocol_options_set_local_identity
 import platform.Security.sec_protocol_options_set_min_tls_protocol_version
+import platform.Security.tls_ciphersuite_AES_128_GCM_SHA256
+import platform.Security.tls_ciphersuite_AES_256_GCM_SHA384
+import platform.Security.tls_ciphersuite_CHACHA20_POLY1305_SHA256
+import platform.Security.tls_ciphersuite_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+import platform.Security.tls_ciphersuite_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+import platform.Security.tls_ciphersuite_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
 import platform.Security.tls_protocol_version_TLSv12
 import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.NSEC_PER_SEC
@@ -71,7 +78,8 @@ import platform.posix.free
  * reads from its own threads, does.
  *
  * TLS 1.2 is the floor, not legacy tolerance: Ktor's CIO client, the SDK's JVM engine, speaks
- * nothing newer. Network.framework offers 1.3 above it.
+ * nothing newer. Network.framework offers 1.3 above it. Only AEAD suites are offered, as on the other
+ * agents: the platform's 1.2 defaults include CBC ones.
  *
  * Two Kotlin/Native interop traps shape this file:
  *
@@ -111,6 +119,7 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
                     val options = nw_tls_copy_sec_protocol_options(tls)
                     sec_protocol_options_set_local_identity(options, sec_identity_create(identity.ref))
                     sec_protocol_options_set_min_tls_protocol_version(options, tls_protocol_version_TLSv12)
+                    AEAD_SUITES.forEach { sec_protocol_options_append_tls_ciphersuite(options, it) }
                 },
                 { _ -> },
             )
@@ -248,6 +257,16 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
         // The address TlsFront's contract names, which CIO's IPv4-only loopback listener answers.
         const val UPSTREAM_HOST = "127.0.0.1"
         const val HANDSHAKE_TIMEOUT_SECONDS = 10L
+
+        // TLS 1.3's suites, then 1.2's ECDHE-ECDSA AEAD ones: what rustls and the JSSE front offer.
+        val AEAD_SUITES = listOf(
+            tls_ciphersuite_AES_128_GCM_SHA256,
+            tls_ciphersuite_AES_256_GCM_SHA384,
+            tls_ciphersuite_CHACHA20_POLY1305_SHA256,
+            tls_ciphersuite_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            tls_ciphersuite_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            tls_ciphersuite_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        )
 
         // Runs on the front's queue, like everything else that touches a relay.
         val PUMP_ENDED = staticCFunction { context: COpaquePointer? ->

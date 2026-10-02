@@ -68,6 +68,7 @@ import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.NSEC_PER_SEC
 import platform.darwin.dispatch_after
 import platform.darwin.dispatch_queue_create
+import platform.darwin.dispatch_sync
 import platform.darwin.dispatch_time
 import platform.posix.free
 
@@ -243,10 +244,10 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
 
         override fun stop() {
             listener?.let { nw_listener_cancel(it) }
-            val open = synchronized(lock) { live.toList() }
-            open.forEach { relay ->
-                nw_connection_cancel(relay.client)
-                relay.upstream?.let { nw_connection_cancel(it) }
+            // On the queue, like every other touch of a relay: a relay connecting upstream sets its
+            // upstream there, and closing from here could miss it.
+            dispatch_sync(queue) {
+                synchronized(lock) { live.toList() }.forEach { it.close(null) }
             }
         }
     }

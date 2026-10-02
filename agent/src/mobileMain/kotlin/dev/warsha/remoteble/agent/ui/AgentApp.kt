@@ -47,6 +47,8 @@ import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.AgentSecret
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.lanIPv4Address
+import dev.warsha.remoteble.agent.loadEncryptPreference
+import dev.warsha.remoteble.agent.persistEncryptPreference
 import dev.warsha.remoteble.agent.persistToken
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentPairing
@@ -109,9 +111,10 @@ fun AgentApp(
     var allowRemoteDashboard by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }
-    // Off by default until the phone agents switch to TLS by default, which needs every client able
-    // to pin first (docs/proposals/agent-transport-encryption.md, phase 5).
-    var encrypt by remember { mutableStateOf(false) }
+    // On by default (docs/proposals/agent-transport-encryption.md, phase 5): every client can pin,
+    // and pairing hands it the fingerprint. Turning it off is remembered, and visible on screen.
+    var encrypt by remember { mutableStateOf(tls != null) }
+    var encryptEdited by remember { mutableStateOf(false) }
     // Loaded when encryption is switched on, so the fingerprint can be read before Start.
     val identities = remember(tls) { AgentIdentityLoader(tls) }
     // The scheme the running agent was started with, which a later toggle must not misreport.
@@ -129,6 +132,7 @@ fun AgentApp(
         // in flight — only seed the field from persistence if it's still untouched and empty.
         if (!tokenEdited && token.isNullOrBlank()) token = persisted
         if (!operatorTokenEdited && operatorToken.isNullOrBlank()) operatorToken = persistedOperator
+        if (tls != null && !encryptEdited) loadEncryptPreference()?.let { encrypt = it }
     }
 
     LaunchedEffect(running) {
@@ -236,7 +240,11 @@ fun AgentApp(
                         EncryptionPanel(
                             running = running,
                             encrypt = encrypt,
-                            onEncryptChange = { encrypt = it },
+                            onEncryptChange = { choice ->
+                                encryptEdited = true
+                                encrypt = choice
+                                scope.launch { persistEncryptPreference(choice) }
+                            },
                             fingerprint = identities.identity?.fingerprint?.toString(),
                             failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
@@ -495,7 +503,15 @@ private fun EncryptionPanel(
         Text("Encrypt connections (wss://)", style = MaterialTheme.typography.bodySmall)
         Switch(checked = encrypt, onCheckedChange = onEncryptChange, enabled = !running)
     }
-    if (!encrypt) return
+    if (!encrypt) {
+        Text(
+            "Off: clients connect over cleartext ws://, which anyone on this network can read, token " +
+                "included. Turn it on unless a tunnel or proxy encrypts the connection instead.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        return
+    }
     failure?.let {
         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }

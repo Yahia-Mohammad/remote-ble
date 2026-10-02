@@ -29,3 +29,12 @@ enum class AgentSecret {
 expect suspend fun loadPersistedToken(secret: AgentSecret = AgentSecret.CLIENT_TOKEN): String?
 
 expect suspend fun persistToken(token: String?, secret: AgentSecret = AgentSecret.CLIENT_TOKEN)
+
+/**
+ * The phone agent's **Encrypt connections** choice, as last made: `null` when never made, which
+ * the app reads as on. Remembered so turning encryption off is a choice made once and seen, not one
+ * quietly undone, nor quietly kept by a new install; the `jvm()` CLI's `--tls` is given each run.
+ */
+expect suspend fun loadEncryptPreference(): Boolean?
+
+expect suspend fun persistEncryptPreference(encrypt: Boolean)

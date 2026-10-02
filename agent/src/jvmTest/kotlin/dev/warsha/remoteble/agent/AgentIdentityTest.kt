@@ -10,7 +10,9 @@ import kotlin.io.path.ExperimentalPathApi
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AgentIdentityTest {
@@ -94,6 +96,33 @@ class AgentIdentityTest {
     }
 
     @Test
+    fun aFileOthersCanReadIsReportedButStillLoads() {
+        val path = dir.resolve("agent-identity.pem")
+        val created = AgentIdentityStore.loadOrCreate(path)
+        if (!path.fileSystem.supportedFileAttributeViews().contains("posix")) return
+        assertNull(AgentIdentityStore.looseMode(path))
+
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-r--r--"))
+
+        assertEquals("rw-r--r--", AgentIdentityStore.looseMode(path))
+        assertEquals(created.fingerprint, AgentIdentityStore.loadOrCreate(path).fingerprint)
+    }
+
+    @Test
+    fun aKeyThatDoesNotBelongToTheCertificateIsRefused() {
+        val (a, b) = dir.resolve("a.pem") to dir.resolve("b.pem")
+        AgentIdentityStore.loadOrCreate(a)
+        AgentIdentityStore.loadOrCreate(b)
+        val keyOfA = Files.readString(a).substringBefore("-----BEGIN CERTIFICATE-----")
+        val certOfB = "-----BEGIN CERTIFICATE-----" + Files.readString(b).substringAfter("-----BEGIN CERTIFICATE-----")
+        val mixed = dir.resolve("mixed.pem").also { Files.writeString(it, keyOfA + certOfB) }
+
+        val failure = assertFailsWith<IllegalStateException> { AgentIdentityStore.loadOrCreate(mixed) }
+
+        assertTrue("does not belong" in failure.message.orEmpty(), failure.message)
+    }
+
+    @Test
     fun defaultPathsFollowEachPlatformsConvention() {
         val env = mapOf("APPDATA" to "C:\\Users\\a\\AppData\\Roaming", "XDG_CONFIG_HOME" to "/xdg")
         assertEquals(
@@ -109,6 +138,25 @@ class AgentIdentityTest {
             Paths.get("C:\\Users\\a\\AppData\\Roaming", "RemoteBLE", "agent-identity.pem"),
             AgentIdentityStore.defaultPath("Windows 11", env::get, "/home/a"),
         )
+    }
+
+    @Test
+    fun theSerialIsPositiveEvenWhenTheRandomBytesAreNot() {
+        val keys = java.security.KeyPairGenerator.getInstance("EC").apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+        fun serialOf(bytes: ByteArray): java.math.BigInteger {
+            val der = SelfSignedCertificate.build(
+                spki = keys.public.encoded,
+                serial = bytes,
+                notBeforeEpochSeconds = 0,
+                sign = { tbs -> java.security.Signature.getInstance("SHA256withECDSA").run { initSign(keys.private); update(tbs); sign() } },
+            )
+            val certificate = java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(der.inputStream()) as java.security.cert.X509Certificate
+            return certificate.serialNumber
+        }
+
+        assertEquals(java.math.BigInteger.ONE, serialOf(ByteArray(16)))
+        assertEquals(java.math.BigInteger("ff", 16), serialOf(ByteArray(15) + byteArrayOf(-1)))
     }
 
     @Test

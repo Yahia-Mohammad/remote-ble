@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package dev.warsha.remoteble.client
 
@@ -8,8 +8,6 @@ import io.ktor.client.engine.darwin.Darwin
 import io.ktor.client.plugins.HttpSend
 import io.ktor.client.plugins.plugin
 import io.ktor.client.plugins.websocket.WebSockets
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.addressOf
@@ -42,11 +40,12 @@ import platform.Security.SecTrustRef
  * Security needs no exception for it: a default-ATS app reached an agent's LAN address this way.
  *
  * NSURLSession reports a cancelled challenge as a generic cancellation, so the handler records the
- * mismatch and the client raises [AgentIdentityMismatchException] in its place, which the transport
- * treats as terminal.
+ * mismatch against the host and port it came from, and the next failure of a request to that origin
+ * raises [AgentIdentityMismatchException] in its place, which the transport treats as terminal. Keyed
+ * so that a request to some other address, failing for its own reason, is never reported as this.
  */
 actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient {
-    val refused = AtomicReference<AgentIdentityMismatchException?>(null)
+    val refused = PendingRefusals()
     val client = HttpClient(Darwin) {
         engine {
             // The dispositions are NSInteger, which Ktor's shared Darwin metadata commonizes to a
@@ -61,7 +60,7 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
                     if (presented == fingerprint) {
                         completionHandler(NSURLSessionAuthChallengeUseCredential.convert(), NSURLCredential.credentialForTrust(trust))
                     } else {
-                        refused.store(AgentIdentityMismatchException(fingerprint, presented))
+                        refused.record(PendingRefusals.origin(space.host, space.port), AgentIdentityMismatchException(fingerprint, presented))
                         completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge.convert(), null)
                     }
                 }
@@ -73,7 +72,7 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
         try {
             execute(request)
         } catch (failure: Throwable) {
-            throw refused.exchange(null) ?: failure
+            throw refused.take(PendingRefusals.origin(request.url.host, request.url.port)) ?: failure
         }
     }
     return client

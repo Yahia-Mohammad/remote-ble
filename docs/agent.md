@@ -209,13 +209,14 @@ fails inside the TLS handshake, before the bearer token is sent.
 | Setting | Meaning |
 |---|---|
 | `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Off by default for now. |
-| `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions. |
+| `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions; a file other users can read still loads, with a warning, since a mounted container secret often cannot be narrowed. A key that does not belong to the certificate is refused. |
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
 
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
 each connection to CIO on an ephemeral loopback port. Its I/O blocks, so it runs on threads of its
 own, gives every handshake a 10 s deadline, and holds at most 16 connections per host and 128 in all;
-a connection over a limit is closed at once. The front records which relay port belongs to
+a connection over a limit is closed at once. Every agent offers only AEAD suites (AES-GCM and
+ChaCha20-Poly1305), never the CBC ones still in the platforms' TLS 1.2 defaults. The front records which relay port belongs to
 which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
 client look local. The design and the remaining phases (pairing QR codes, encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
@@ -232,7 +233,9 @@ which every client speaks.
 **iOS agent.** The same switch, fingerprint and **New identity**. The key is generated in the Keychain
 and never leaves it. iOS can neither create a certificate nor make an identity from a key and a
 certificate, so the agent signs its certificate with the Keychain key and stores it beside the key,
-and the Keychain pairs the two. An `NWListener` serves it (`NetworkTlsFront`), TLS 1.3 or 1.2, relaying
+and the Keychain pairs the two. Keychain items outlive an uninstall, so the first run of a new
+installation discards any identity a previous one left: as on Android, reinstalling the app means a
+new identity, and paired clients must pair again. An `NWListener` serves it (`NetworkTlsFront`), TLS 1.3 or 1.2, relaying
 to CIO on loopback with the same peer registry. Its byte pump is Objective-C
 (`agent/src/nativeInterop/cinterop/tlsrelay.def`), because Kotlin/Native cannot take
 Network.framework's receive callback; the record has the details.

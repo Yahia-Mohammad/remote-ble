@@ -7,12 +7,14 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.thread
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -71,16 +73,33 @@ class JsseTlsFrontTest {
         }
     }
 
-    private fun honestHandshake(port: Int) {
+    /** Handshakes as a client offering only [protocol] and [suites]; the negotiated suite. */
+    private fun honestHandshake(port: Int, protocol: String? = null, suites: List<String>? = null): String {
         val trustAll = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
         }
         val context = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustAll), null) }
-        (context.socketFactory.createSocket("127.0.0.1", port) as SSLSocket).use { socket ->
+        return (context.socketFactory.createSocket("127.0.0.1", port) as SSLSocket).use { socket ->
             socket.soTimeout = 30_000
+            protocol?.let { socket.enabledProtocols = arrayOf(it) }
+            suites?.let { socket.enabledCipherSuites = it.toTypedArray() }
             socket.startHandshake()
+            socket.session.cipherSuite
+        }
+    }
+
+    @Test
+    fun onlyAeadSuitesAreNegotiated() {
+        val front = front()
+
+        assertEquals("TLS_AES_128_GCM_SHA256", honestHandshake(front.port, "TLSv1.3", listOf("TLS_AES_128_GCM_SHA256")))
+        for (suite in listOf("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256")) {
+            assertEquals(suite, honestHandshake(front.port, "TLSv1.2", listOf(suite)))
+        }
+        for (suite in listOf("TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA")) {
+            assertFailsWith<SSLHandshakeException>(suite) { honestHandshake(front.port, "TLSv1.2", listOf(suite)) }
         }
     }
 

@@ -70,7 +70,8 @@ An agent that does:
    trust; such a client presents this name.
 3. MUST offer TLS 1.2 with an ECDHE-ECDSA AES-GCM suite, because the reference JVM client speaks
    nothing newer, and SHOULD offer TLS 1.3 too. An agent whose platform has no TLS 1.3 server
-   (Android before 10) conforms on 1.2 alone.
+   (Android before 10) conforms on 1.2 alone. It SHOULD offer only AEAD suites (AES-GCM,
+   ChaCha20-Poly1305); every agent here does.
 4. MUST complete the TLS handshake before reading the upgrade request, so a client that rejects the
    identity never sends its bearer token.
 5. MUST apply every peer-address decision (authentication rate limiting, the dashboard's own-device
@@ -97,8 +98,9 @@ activity log shows the peer address for `07`.
 
 **The iOS agent** runs the same server behind a Network.framework front of its own, so its scenarios
 are checked the same way, on the simulator so far: `pinRun` for `01`, `02` and `06`, and the app's
-relaunch and **New identity** for `03`. `07` needs a physical iPhone, since the simulator shares the
-Mac's loopback.
+relaunch and **New identity** for `03`. For `07`, the dashboard's own-device gate serves a request
+over loopback and refuses one sent to the Mac's LAN address, which reaches the simulator's agent from a
+non-loopback peer.
 
 **The Apple client** pins in NSURLSession's challenge handler. No host test can stand a TLS server up
 for it, so `01` and `02` are checked on the iOS simulator against the JVM agent; the SPKI it pins is

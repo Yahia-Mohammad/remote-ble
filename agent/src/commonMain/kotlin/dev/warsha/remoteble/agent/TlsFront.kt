@@ -1,5 +1,9 @@
 package dev.warsha.remoteble.agent
 
+import kotlin.time.Duration
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.withTimeoutOrNull
+
 /**
  * Terminates TLS for an [AgentWebSocketServer] and relays each connection, decrypted, to the
  * server's plain listener on loopback.
@@ -38,3 +42,22 @@ interface TlsFront {
 data class PeerAddress(val host: String, val port: Int) {
     override fun toString(): String = "$host:$port"
 }
+
+/**
+ * Waits up to [timeout] for an asynchronous listener to report the port it bound through [ready].
+ * However the wait ends without one (the timeout, a reported failure, the caller's cancellation),
+ * [cancel] releases the listener before the failure propagates; the timeout throws [timedOut].
+ * Bounded because a listener can wait indefinitely, as Network.framework's does for a usable network.
+ */
+internal suspend fun awaitListening(
+    ready: Deferred<Int>,
+    timeout: Duration,
+    cancel: () -> Unit,
+    timedOut: () -> Throwable,
+): Int =
+    try {
+        withTimeoutOrNull(timeout) { ready.await() } ?: throw timedOut()
+    } catch (failure: Throwable) {
+        cancel()
+        throw failure
+    }

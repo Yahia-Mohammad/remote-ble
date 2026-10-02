@@ -43,12 +43,23 @@ class AgentFingerprint private constructor(private val digest: ByteArray) {
             val hex = trimmed.substring(PREFIX.length)
             require(hex.length == DIGEST_BYTES * 2) { "fingerprint needs ${DIGEST_BYTES * 2} hex digits, got ${hex.length}" }
             val digest = ByteArray(DIGEST_BYTES) { i ->
-                val hi = hex[2 * i].digitToIntOrNull(16)
-                val lo = hex[2 * i + 1].digitToIntOrNull(16)
+                val hi = hexDigit(hex[2 * i])
+                val lo = hexDigit(hex[2 * i + 1])
                 require(hi != null && lo != null) { "fingerprint is not hex: $text" }
                 ((hi shl 4) or lo).toByte()
             }
             return AgentFingerprint(digest)
+        }
+
+        /**
+         * ASCII hex only. `digitToIntOrNull` also takes other scripts' digits and fullwidth letters,
+         * so a fingerprint would have more than one accepted spelling.
+         */
+        private fun hexDigit(c: Char): Int? = when (c) {
+            in '0'..'9' -> c - '0'
+            in 'a'..'f' -> c - 'a' + 10
+            in 'A'..'F' -> c - 'A' + 10
+            else -> null
         }
 
         /** [parse], or `null` instead of throwing. */

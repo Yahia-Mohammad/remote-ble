@@ -404,6 +404,16 @@ pub struct ServerConfig {
 /// never speaks TLS cannot hold a task forever.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a connection may take to send its upgrade request, counted once TCP is accepted (and
+/// TLS, if any, has completed). Without it a peer that goes silent holds its task and descriptor
+/// forever, and enough of them exhaust the descriptors the accept loop needs. The Kotlin agents
+/// get the same bound from CIO's idle timeout. Shorter under test, so the test that checks it
+/// stays quick.
+#[cfg(not(test))]
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn constant_time_eq(expected: &str, candidate: &str) -> bool {
     let expected = expected.as_bytes();
     let candidate = candidate.as_bytes();
@@ -963,14 +973,17 @@ impl AgentServer {
             Ok(response)
         };
 
-        match tokio_tungstenite::accept_hdr_async_with_config(
-            stream,
-            callback,
-            Some(websocket_config()),
+        let upgrade = tokio::time::timeout(
+            UPGRADE_TIMEOUT,
+            tokio_tungstenite::accept_hdr_async_with_config(
+                stream,
+                callback,
+                Some(websocket_config()),
+            ),
         )
-        .await
-        {
-            Ok(ws_stream) => {
+        .await;
+        match upgrade {
+            Ok(Ok(ws_stream)) => {
                 let connection = NEXT_LOG_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
                 let span = tracing::info_span!("conn", connection, peer = %peer_addr);
                 tracing::info!(parent: &span, "Client connected");
@@ -992,11 +1005,19 @@ impl AgentServer {
                 .instrument(span)
                 .await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if let Some(generation) = session_generation {
                     live_sessions.release(&client_id, generation);
                 }
                 tracing::warn!("Handshake failed for {}: {}", peer_addr, e);
+            }
+            Err(_) => {
+                // The callback may already have taken the live session before the response was
+                // written; the deadline still ends the attempt, so release it.
+                if let Some(generation) = session_generation {
+                    live_sessions.release(&client_id, generation);
+                }
+                tracing::debug!("upgrade request from {} timed out", peer_addr);
             }
         }
     }
@@ -5688,6 +5709,78 @@ mod tests {
         drop(client);
         assert!(!running.is_finished(), "the accept loop must keep running");
         running.abort();
+    }
+
+    /// A peer that connects and then never sends its upgrade request is closed at the deadline,
+    /// over TLS (after a completed handshake) and over cleartext alike, rather than holding its
+    /// connection and descriptor forever.
+    #[tokio::test]
+    async fn a_silent_peer_is_closed_at_the_upgrade_deadline() {
+        use tokio::io::AsyncReadExt;
+
+        let identity = tls_identity("silent");
+        let check = |tls: bool| {
+            let identity = &identity;
+            async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = Arc::new(AgentServer::new(
+                    ServerConfig {
+                        addr,
+                        credentials: Arc::new(HashMap::from([(
+                            "alpha".to_string(),
+                            "secret-a".to_string(),
+                        )])),
+                        strict_identifiers: Arc::new(AtomicBool::new(false)),
+                        scan_concurrency: ScanConcurrencyMode::Multiplexed,
+                        transport_grace: Duration::from_secs(10),
+                        operator_token: None,
+                        write_policy: WritePolicy::permissive(),
+                        tls: tls
+                            .then(|| crate::transport::identity::server_config(identity).unwrap()),
+                    },
+                    Arc::new(FakeBackend::default()),
+                    PeripheralRegistry::new(LeaseConfig::default()),
+                ));
+                let running = {
+                    let server = server.clone();
+                    tokio::spawn(
+                        async move { server.run_on(listener).await.map_err(|e| e.to_string()) },
+                    )
+                };
+                let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+                let mut stream: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if tls {
+                    let name = rustls::pki_types::ServerName::try_from(
+                        crate::transport::identity::TLS_SERVER_NAME,
+                    )
+                    .unwrap();
+                    Box::new(
+                        pinned_connector(&identity.fingerprint, &[&rustls::version::TLS13])
+                            .connect(name, tcp)
+                            .await
+                            .expect("the handshake itself must complete"),
+                    )
+                } else {
+                    Box::new(tcp)
+                };
+
+                let mut byte = [0u8; 1];
+                let read = tokio::time::timeout(
+                    UPGRADE_TIMEOUT + Duration::from_secs(5),
+                    stream.read(&mut byte),
+                )
+                .await;
+
+                assert!(
+                    matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+                    "a silent {} peer was still connected past the deadline",
+                    if tls { "TLS" } else { "cleartext" }
+                );
+                running.abort();
+            }
+        };
+        // Concurrently, so the test waits out the deadline once.
+        tokio::join!(check(true), check(false));
     }
 
     /// TLS-PIN-04 (docs/agent-conformance-spec.md §3.1): a lease held through a transport drop

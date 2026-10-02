@@ -34,6 +34,10 @@ class AgentFingerprintTest {
         assertFailsWith<IllegalArgumentException> { AgentFingerprint.parse(text.removePrefix("sha256:")) }
         assertFailsWith<IllegalArgumentException> { AgentFingerprint.parse(text.dropLast(2)) }
         assertFailsWith<IllegalArgumentException> { AgentFingerprint.parse(text.dropLast(1) + "g") }
+        // Digits of other scripts and fullwidth letters are not hex here, though Kotlin's digit
+        // parsing would take them: Arabic-Indic one, fullwidth capital A.
+        assertFailsWith<IllegalArgumentException> { AgentFingerprint.parse(text.dropLast(1) + "\u0661") }
+        assertFailsWith<IllegalArgumentException> { AgentFingerprint.parse(text.dropLast(1) + "\uFF21") }
         assertFailsWith<IllegalArgumentException> { AgentFingerprint.ofSpkiSha256(ByteArray(31)) }
         assertNull(AgentFingerprint.parseOrNull("sha1:00"))
     }

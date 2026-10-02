@@ -298,13 +298,15 @@ registry as the JSSE front. The app shows the same switch, fingerprint and **New
 Evidence, on the iPhone 17 Pro simulator (iOS 26.5), whose network is the Mac's: OpenSSL negotiates TLS
 1.3, and TLS 1.2 with ECDHE-ECDSA AES-GCM, and the SPKI digest matches the screen; `pinRun` passes (the
 CIO client over TLS 1.2, a scan, and a wrong pin refused at once); an upgrade without the token gets 401
-through the relay; the fingerprint survived every relaunch and reinstall, and **New identity** changed
+through the relay; the fingerprint survived every relaunch, and **New identity** changed
 it, after which the old pin was refused and the new one passed. A client that opens TCP and never
 speaks TLS is cut off by a 10 s timer, though Network.framework releases the socket 15–20 s in; a
 silent peer delays no other client's handshake.
 
-Not yet run on a physical iPhone, so the real peer address on iOS (`TLS-PIN-07`) is unverified: the
-simulator shares the Mac's loopback. That is the remaining hardware check for this phase.
+The real peer address on iOS (`TLS-PIN-07`) was first left for a physical iPhone, on the reasoning
+that the simulator shares the Mac's loopback. It need not wait: a request to the Mac's LAN address
+reaches the simulator's agent from a non-loopback peer, which the dashboard's own-device gate refused
+(404) while the same request over loopback was served (200). See the second review below.
 
 **Kotlin/Native broke three things in Network.framework, each found on the simulator:**
 
@@ -334,8 +336,8 @@ made one TLS attempt in 29 s, which the agent saw reset, and no handshake, so th
 rather than retrying. No CI test runs the Darwin client end to end, since that needs a TLS server
 holding a Keychain identity inside the test process.
 
-**Phase 3 is code-complete.** Its one open check is the iOS agent on a physical iPhone, for the real
-peer address (`TLS-PIN-07`). Next is phase 4, pairing.
+**Phase 3 is complete.** It has not been run on a physical iPhone, and nothing remaining needs one. Next
+is phase 4, pairing.
 
 **Review hardening (2026-10-02).** A review of phases 1–3 found the JSSE front, which the JVM and Android
 agents share, could be held by any LAN peer without the token. Its 10 s bound was a socket read timeout,
@@ -346,3 +348,30 @@ and served nothing. The front now has a real deadline, threads of its own, limit
 host and 128 in all, and an accept loop that backs off and retries; `JsseTlsFrontTest` reproduces each,
 and each test fails against the old behaviour. On a live agent the trickled handshake now closes at
 10.0 s. The Rust and iOS fronts are asynchronous and already had real deadlines.
+
+**Second review (2026-10-02).** Each item below was reproduced or confirmed first, and its test fails
+against the old code:
+
+- **A request relayed before `start()` returned took the relay's address.** The front accepts from the
+  moment it binds, but the server learned of it only when `start()` resumed, which a phone's busy main
+  thread can hold up; a request in between was seen as loopback, against §3.1's peer rule. Behind TLS,
+  peer resolution now waits for the front.
+- **The Rust agent never timed out the upgrade request.** A peer that finished the TLS handshake, or
+  opened cleartext TCP, and then went silent held its connection and descriptor forever. It now has
+  10 s; the Kotlin agents already closed such a peer at CIO's 45 s idle timeout.
+- **The iOS listener's start waited for readiness without bound**, so one left waiting for a usable
+  network would hold Start forever. It now fails after the bind timeout and cancels the listener.
+- **Platform TLS 1.2 defaults included CBC suites** on the JSSE and iOS fronts (OpenSSL negotiated
+  `ECDHE-ECDSA-AES128-SHA` with the iOS agent). Every agent now offers only AEAD suites, checked on the
+  iOS simulator and on Android API 24 and 36.
+- **A reinstalled iOS agent kept its Keychain identity** while losing its tokens and settings. The
+  first run of an installation now discards it, as Android's Keystore does.
+- **Smaller:** the JVM agent loaded a key not matching its certificate (Rust refused it); neither
+  desktop agent warned about a world-readable identity file; the Rust temp file was named by PID, which
+  collides between containers; iOS `stop()` read relay state off its queue; the Darwin client could
+  attribute an identity mismatch to another origin's failure; a failed **New identity** left the
+  deleted identity on screen; fingerprints parsed other scripts' digits as hex; and random serial bytes
+  could, at odds of 2⁻¹²⁸, make a zero serial, which RFC 5280 forbids.
+- **Considered and kept:** the JSSE front limits connections per address, not per IPv6 /64. Every
+  device on a home LAN shares one /64, so grouping would let one device fill the slot all of them need;
+  a host using many addresses still meets the total of 128.

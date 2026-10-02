@@ -157,9 +157,7 @@ fn generate() -> Result<String, IdentityError> {
     let mut serial = [0u8; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut serial)
         .map_err(|_| IdentityError::Generate("no system randomness".into()))?;
-    // A positive serial: a set top bit would encode as a negative INTEGER.
-    serial[0] &= 0x7F;
-    params.serial_number = Some(SerialNumber::from_slice(&serial));
+    params.serial_number = Some(SerialNumber::from_slice(&positive_serial(serial)));
     let certificate = params.self_signed(&key).map_err(failed)?;
     Ok(format!("{}{}", key.serialize_pem(), certificate.pem()))
 }
@@ -173,6 +171,16 @@ fn read(path: &Path) -> Result<AgentIdentity, IdentityError> {
         path: path.to_path_buf(),
         source,
     })?;
+    if let Some(mode) = loose_mode(path) {
+        // A warning rather than a refusal: a container's mounted secret is often world-readable
+        // and owned by someone else, so the agent could neither fix it nor start.
+        tracing::warn!(
+            "agent identity {} is readable by other users (mode {mode:o}); anyone who can read it \
+             can impersonate this agent. Restrict it: chmod 600 {}",
+            path.display(),
+            path.display()
+        );
+    }
     let key = PrivatePkcs8KeyDer::from_pem_slice(&pem)
         .map_err(|e| invalid(format!("no PKCS#8 PRIVATE KEY block ({e})")))?;
     let certificate = CertificateDer::from_pem_slice(&pem)
@@ -195,6 +203,32 @@ fn read(path: &Path) -> Result<AgentIdentity, IdentityError> {
     })
 }
 
+/// RFC 5280 §4.1.2.2 requires a positive serial. A set top bit would encode as a negative INTEGER,
+/// and random bytes can be all zero.
+fn positive_serial(mut serial: [u8; 16]) -> [u8; 16] {
+    serial[0] &= 0x7F;
+    if serial.iter().all(|&byte| byte == 0) {
+        serial[15] = 1;
+    }
+    serial
+}
+
+/// The permission bits of `path` if group or others may access it. Always `None` off Unix, where
+/// the per-user directory's ACL is the protection.
+fn loose_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Publishes `pem` at `path` without ever replacing an existing file, so a concurrent creator's
 /// identity is kept. A rename would not do: on POSIX it silently replaces the target. A hard link
 /// is atomic and fails if the name exists; where links are unsupported, the fallback refuses an
@@ -209,15 +243,23 @@ fn write(path: &Path, pem: &str) -> Result<(), IdentityError> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(io_error)?;
-    let temp = dir.join(format!(".agent-identity.{}.tmp", std::process::id()));
+    // Random, not the PID: containers sharing a volume each run the agent as PID 1.
+    let mut nonce = [0u8; 8];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+        .map_err(|_| IdentityError::Generate("no system randomness".into()))?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temp = dir.join(format!(".agent-identity.{nonce}.tmp"));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // Opened before the cleanup below can run, so a failure here never removes another's file.
+    let mut file = options.open(&temp).map_err(io_error)?;
     let result = (|| {
-        let mut file = options.open(&temp)?;
         file.write_all(pem.as_bytes())?;
         file.sync_all()?;
+        // Closed before publishing: Windows refuses to rename an open file.
+        drop(file);
         match fs::hard_link(&temp, path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()), // lost the race
@@ -255,13 +297,14 @@ pub fn certificate_spki(certificate: &[u8]) -> Option<&[u8]> {
     let mut rest = tbs.get(tbs_header..)?;
     for _ in 0..6 {
         let (h, len) = header(rest)?;
-        rest = rest.get(h + len..)?;
+        rest = rest.get(h.checked_add(len)?..)?;
     }
     let (h, len) = header(rest)?;
     if rest.first() != Some(&0x30) {
         return None; // an SPKI is a SEQUENCE
     }
-    rest.get(..h + len)
+    // Checked: on a 32-bit target a four-byte length plus its header can overflow usize.
+    rest.get(..h.checked_add(len)?)
 }
 
 #[cfg(test)]
@@ -354,6 +397,45 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(FILE_NAME)]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_serial_is_positive_whatever_the_random_bytes() {
+        assert_eq!(positive_serial([0; 16])[15], 1);
+        assert_eq!(positive_serial([0xFF; 16])[0], 0x7F);
+        let mut top_only = [0u8; 16];
+        top_only[0] = 0x80;
+        assert_ne!(positive_serial(top_only), [0; 16]);
+    }
+
+    #[test]
+    fn another_writers_temp_file_neither_blocks_creation_nor_is_removed() {
+        let dir = temp_dir("temp");
+        // What a second container sharing the volume, also PID 1, would have open.
+        let foreign = dir.join(format!(".agent-identity.{}.tmp", std::process::id()));
+        fs::write(&foreign, "in progress").unwrap();
+
+        load_or_create(&dir.join(FILE_NAME), false).unwrap();
+
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), "in progress");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_others_can_read_is_reported_and_an_owner_only_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("loose");
+        let path = dir.join(FILE_NAME);
+        load_or_create(&path, false).unwrap();
+        assert_eq!(loose_mode(&path), None);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(loose_mode(&path), Some(0o644));
+        // Still loads: the warning is the whole response.
+        assert!(load_or_create(&path, false).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 

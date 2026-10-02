@@ -7,6 +7,7 @@ import dev.warsha.remoteble.agent.AgentWebSocketServer
 import dev.warsha.remoteble.agent.BleAgentBackend
 import dev.warsha.remoteble.agent.ClientCredentials
 import dev.warsha.remoteble.agent.JsseTlsFront
+import dev.warsha.remoteble.agent.TlsFront
 import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentFingerprint
@@ -37,6 +38,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -46,6 +48,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assume
@@ -239,6 +242,32 @@ class TlsPinningEndToEndTest {
             // the client's port proves the address came from the registry, not from the relay.
             assertEquals("127.0.0.1:${socket.localPort}", monitor.snapshot().clients.single().address)
         }
+    }
+
+    @Test
+    fun aConnectionRelayedBeforeStartReturnsStillGetsItsRealPeer() = runBlocking {
+        // The front accepts from the moment it binds, but the server learns of it only when start()
+        // resumes, which a busy caller (a phone's main thread) can hold up. A request relayed in
+        // between must still resolve to its real peer, not to the relay on loopback.
+        val monitor = AgentMonitor()
+        val listening = CompletableDeferred<Int>()
+        val slowToReturn = TlsFront.Factory { host, port, upstreamPort, onFailure ->
+            JsseTlsFront(identity).start(host, port, upstreamPort, onFailure).also {
+                listening.complete(it.port)
+                delay(1.seconds)
+            }
+        }
+        val server = AgentWebSocketServer(port = 0, monitor = monitor, tls = slowToReturn).also { servers += it }
+        val starting = scope.launch { server.start() }
+
+        rawTlsSocket("127.0.0.1", withTimeout(10.seconds) { listening.await() }).use { socket ->
+            socket.outputStream.write(upgradeRequest("/agent").toByteArray())
+            socket.outputStream.flush()
+            withTimeout(5.seconds) { while (monitor.snapshot().clients.isEmpty()) delay(20) }
+
+            assertEquals("127.0.0.1:${socket.localPort}", monitor.snapshot().clients.single().address)
+        }
+        starting.join()
     }
 
     @Test

@@ -369,5 +369,9 @@ against the old code:
 - **Smaller:** the JVM agent loaded a key not matching its certificate (Rust refused it); neither
   desktop agent warned about a world-readable identity file; the Rust temp file was named by PID, which
   collides between containers; iOS `stop()` read relay state off its queue; the Darwin client could
-  attribute an identity mismatch to another origin's failure; and a failed **New identity** left the
-  deleted identity on screen.
+  attribute an identity mismatch to another origin's failure; a failed **New identity** left the
+  deleted identity on screen; fingerprints parsed other scripts' digits as hex; and random serial bytes
+  could, at odds of 2⁻¹²⁸, make a zero serial, which RFC 5280 forbids.
+- **Considered and kept:** the JSSE front limits connections per address, not per IPv6 /64. Every
+  device on a home LAN shares one /64, so grouping would let one device fill the slot all of them need;
+  a host using many addresses still meets the total of 128.

@@ -133,6 +133,8 @@ class JsseTlsFront internal constructor(
             }
         }
 
+        // Per address, not per IPv6 /64: every device on a home LAN shares one /64, so grouping would
+        // let one device fill the slot all of them need. A host using many addresses meets the total.
         private fun admit(host: String): Boolean {
             if (total.incrementAndGet() > maxConnections) {
                 total.decrementAndGet()

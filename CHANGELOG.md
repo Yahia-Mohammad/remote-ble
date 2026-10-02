@@ -18,11 +18,29 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> The agent app entries need no release of their own: the Android and iOS agent apps are built from
-> source rather than shipped as release assets. The `client-sdk` dependency-scope fix below changes a
-> published POM and ships with the next release.
+> Built-in TLS for every agent and pinned clients in the SDK (#39, phases 1–3), opt-in until it
+> becomes the default. `:protocol` and `:client-sdk` gain public API, so these ship with the next
+> release; the agent app entries alone would not need one, since the Android and iOS agent apps are
+> built from source rather than shipped as release assets.
 
 ### Added
+
+- **Built-in TLS with a pinned identity, on every agent.** An agent can serve `wss://` itself, with no
+  proxy or certificate authority: it creates a long-lived ECDSA P-256 key and a self-signed
+  certificate, and clients pin `sha256:<hex>` of the key's SPKI. The JVM agent and `agent-rs` take
+  `--tls` (`REMOTE_BLE_TLS=true`) and share one identity file; the Android and iOS agent apps have an
+  **Encrypt connections (wss://)** switch, keep the key in Android Keystore or the Keychain, show the
+  fingerprint, and offer a confirmed **New identity**. A reset (`--reset-identity`) breaks every
+  pinned client until it pairs again. Off by default for now — see
+  [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39) and
+  [the design record](docs/proposals/agent-transport-encryption.md).
+- **`pinnedWebSocketHttpClient(fingerprint)` in `client-sdk`, on every target.** It trusts exactly the
+  pinned key (JVM: CIO; Android: OkHttp; iOS and macOS: NSURLSession), and a different key fails
+  inside the TLS handshake with `AgentIdentityMismatchException`, before the bearer token is sent. The
+  transport treats that as terminal: `GAVE_UP` at once, no retry. `:protocol` adds `AgentFingerprint`
+  (`sha256:<hex>`, parsed and printed) and `AGENT_TLS_SERVER_NAME`.
+- **`./gradlew :e2e-runner:pinRun`**, a hardware check for an agent serving `wss://`: the pinned
+  client connects and scans, and a wrong pin must be refused at once.
 
 - **Show/Hide on the agent app's token fields, and Copy token while the agent runs.** A token must
   match on every client character for character, and a typo behind the mask surfaced only as an

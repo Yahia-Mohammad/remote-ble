@@ -375,3 +375,29 @@ against the old code:
 - **Considered and kept:** the JSSE front limits connections per address, not per IPv6 /64. Every
   device on a home LAN shares one /64, so grouping would let one device fill the slot all of them need;
   a host using many addresses still meets the total of 128.
+
+**Phase 4, pairing (2026-10-02).** The URI is `AgentPairing` in `:protocol`, a strict parser and
+writer, now specified in the conformance spec §3.2; the Rust agent writes it in
+`transport::pairing`, and both are tested against one shared example. `pairingWebSocketHttpClient`
+in the SDK pins whenever a pairing carries a fingerprint. The desktop agents print it with
+`--print-pairing`, to standard output only. The phone agents show it as a QR code with a copyable
+link behind **Show pairing code**, and the JVM agent's dashboard serves the same code as SVG from
+`/api/pairing`, fetched only on request. QR codes come from `qrcode-kotlin` (MIT, no dependencies),
+whose module matrix one function turns into a Compose canvas and an SVG.
+
+The client apps take a pairing by paste, or by registering `remoteble://`, so the phone's own camera
+opens the agent's QR code in them. That was chosen over an in-app scanner, which would have needed a
+camera permission, a dependency on Android and physical phones to test. Since any app or page can
+open a link, the client shows where a pairing points, and whether it is encrypted, before applying it.
+A pinned pairing reads "Paired · encrypted"; editing the address by hand drops the pin.
+
+Evidence: macOS Vision decoded every code exactly, the token's `+ & = % / é` and an IPv6 host
+included: rendered from the matrix, from the dashboard's SVG, and from screenshots of the iOS and
+Android agents. On the simulator, `simctl openurl` with the JVM agent's printed pairing opened the iOS
+client on a cold launch; it asked, paired, connected pinned over `wss://` and scanned the simulated
+peripheral. The Android client on the emulator did the same through `am start`. `pinRun` takes a
+pairing URI too, and passed against the printed one.
+
+Not in this phase: the dashboard still shows no certificate SHA-256 for a browser's warning (§5.7);
+it belongs with phase 5, when the dashboard is `https://` by default. Client apps keep the pairing in
+memory, as they do the address and token.

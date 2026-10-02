@@ -247,6 +247,25 @@ val transport = WebSocketAgentTransport(
 )
 ```
 
+**Pairing.** An agent shows its pairing URI as a QR code or prints it (`remoteble://…`, defined in
+[the conformance spec §3.2](agent-conformance-spec.md)). `AgentPairing.parse(uri)` (in `:protocol`)
+gives its `url`, `token` and `fingerprint`, and `pairingWebSocketHttpClient(pairing)` the matching
+client: pinned whenever the pairing carries a fingerprint, so a paired encrypted agent is only ever
+trusted by its pin.
+
+```kotlin
+val pairing = AgentPairing.parse(scannedOrPasted)
+val transport = WebSocketAgentTransport(
+    pairing.url,
+    scope,
+    pairingWebSocketHttpClient(pairing),
+    authToken = { pairing.token },
+)
+```
+
+`pairing.encrypted` says whether to show "Paired · encrypted" or a not-encrypted warning.
+`toString()` leaves the token out, so a pairing can be logged; `toUri()` carries it.
+
 It is declared in common code, so a shared pairing screen can build it. On Apple targets it needs no
 App Transport Security exception: a default-ATS app reached an agent's LAN address over pinned
 `wss://`. NSURLSession reports a refused challenge as a plain cancellation, so the client

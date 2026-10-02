@@ -18,10 +18,10 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> Built-in TLS for every agent and pinned clients in the SDK (#39, phases 1–3), opt-in until it
-> becomes the default. `:protocol` and `:client-sdk` gain public API, so these ship with the next
-> release; the agent app entries alone would not need one, since the Android and iOS agent apps are
-> built from source rather than shipped as release assets.
+> Built-in TLS for every agent, pinned clients and pairing in the SDK (#39, phases 1–4), opt-in
+> until it becomes the default. `:protocol` and `:client-sdk` gain public API, so these ship with the
+> next release; the agent app entries alone would not need one, since the Android and iOS agent apps
+> are built from source rather than shipped as release assets.
 
 ### Added
 
@@ -41,7 +41,14 @@ protocol version: **1**.
   transport treats that as terminal: `GAVE_UP` at once, no retry. `:protocol` adds `AgentFingerprint`
   (`sha256:<hex>`, parsed and printed) and `AGENT_TLS_SERVER_NAME`.
 - **`./gradlew :e2e-runner:pinRun`**, a hardware check for an agent serving `wss://`: the pinned
-  client connects and scans, and a wrong pin must be refused at once.
+  client connects and scans, and a wrong pin must be refused at once. It also takes a pairing URI.
+- **Agent pairing:** `remoteble://<host>:<port>?token=…&fp=sha256:…` carries everything a client needs.
+  `:protocol` adds `AgentPairing` (strict parse, `toUri`, a `toString` without the token), and
+  `client-sdk` adds `pairingWebSocketHttpClient(pairing)`, pinned whenever the pairing carries a
+  fingerprint. The desktop agents print it with `--print-pairing`; the phone agents show it as a QR
+  code behind **Show pairing code**, and so does the JVM agent's dashboard. The sample client apps
+  open `remoteble://` links, so a phone's camera pairs them from the QR code, and take a pasted link,
+  asking before either replaces the current agent.
 
 - **Show/Hide on the agent app's token fields, and Copy token while the agent runs.** A token must
   match on every client character for character, and a typo behind the mask surfaced only as an

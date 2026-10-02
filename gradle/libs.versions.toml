@@ -7,6 +7,7 @@ ktor = "3.5.1"
 okhttp = "5.3.2"
 koin = "4.2.1"
 atomicfu = "0.33.0"
+qrcode-kotlin = "4.5.0"
 jvm-toolchain = "17"
 datastore = "1.1.7"
 
@@ -61,6 +62,8 @@ koin-test = { module = "io.insert-koin:koin-test", version.ref = "koin" }
 # synchronized have no Kotlin/Native equivalent; the agent's shared mutable state needs one
 # that works on jvm/androidTarget/iosArm64/iosSimulatorArm64 alike).
 atomicfu = { module = "org.jetbrains.kotlinx:atomicfu", version.ref = "atomicfu" }
+# QR encoding for the pairing code (MIT, no transitive dependencies). Only its module matrix is used.
+qrcode-kotlin = { module = "io.github.g0dkar:qrcode-kotlin", version.ref = "qrcode-kotlin" }
 
 # DataStore — persists the mobile agent's auth token across restarts.
 # Android-only; iOS uses NSUserDefaults directly.

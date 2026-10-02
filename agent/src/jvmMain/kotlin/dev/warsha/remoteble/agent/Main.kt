@@ -74,6 +74,7 @@ fun main(args: Array<String>) {
         simulationProfile = simulationProfile,
         writePolicy = writePolicy,
         tlsFront = tlsFront?.second,
+        tlsFingerprint = tlsFront?.first?.fingerprint,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -114,6 +115,15 @@ fun main(args: Array<String>) {
     }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
     Logger.info(LogTags.AGENT) { "Status dashboard: ${if (tlsFront != null) "https" else "http"}://localhost:${server.resolvedPort}/" }
+    if (cli.printPairing) {
+        // Standard output, not the logger: the URI carries the token, so it goes only where the
+        // operator who asked for it is looking, never into a log sink.
+        val host = pairingHost(config.bindHost) ?: "127.0.0.1".also {
+            Logger.warn(LogTags.AGENT) { "No default route to name a LAN address in the pairing; pass --bind <address> for one" }
+        }
+        app.koin.get<ClientCredentials>().pairings(host, server.resolvedPort, tlsFront?.first?.fingerprint)
+            .forEach { (principal, pairing) -> println("Pairing${principal?.let { " ($it)" }.orEmpty()}: ${pairing.toUri()}") }
+    }
 
     Runtime.getRuntime().addShutdownHook(
         Thread {
@@ -137,6 +147,7 @@ internal data class Cli(
     val simulationPath: String?,
     val tls: Boolean = false,
     val resetIdentity: Boolean = false,
+    val printPairing: Boolean = false,
 )
 
 /**
@@ -173,6 +184,7 @@ internal fun parseCli(args: Array<String>): Cli {
     var simulation: String? = null
     var tls = false
     var resetIdentity = false
+    var printPairing = false
     var index = 0
     if (args.firstOrNull()?.toIntOrNull() != null) {
         port = args[0].toInt()
@@ -186,12 +198,15 @@ internal fun parseCli(args: Array<String>): Cli {
                 ?: error("--simulate requires a profile path")
             "--tls" -> tls = true
             "--reset-identity" -> resetIdentity = true
-            else -> error("unknown argument ${args[index]}; supported: [port], --port, --bind, --simulate, --tls, --reset-identity")
+            "--print-pairing" -> printPairing = true
+            else -> error(
+                "unknown argument ${args[index]}; supported: [port], --port, --bind, --simulate, --tls, --reset-identity, --print-pairing",
+            )
         }
         index++
     }
     require(port in 1..65535) { "port must be between 1 and 65535" }
-    return Cli(bind, port, simulation, tls, resetIdentity)
+    return Cli(bind, port, simulation, tls, resetIdentity, printPairing)
 }
 
 /** Resolves a simulation profile before Koin/server startup, so malformed input never opens a port. */

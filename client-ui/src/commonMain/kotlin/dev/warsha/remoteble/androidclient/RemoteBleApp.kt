@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import dev.warsha.remoteble.androidclient.ui.DeviceScreen
+import dev.warsha.remoteble.androidclient.ui.PairingDialog
 import dev.warsha.remoteble.androidclient.ui.RemoteBleTheme
 import dev.warsha.remoteble.androidclient.ui.ScanScreen
 
@@ -25,6 +26,7 @@ fun RemoteBleApp(controller: RemoteBleController) {
                 onStopScan = controller::stopScan,
                 onUrlChanged = controller::updateUrl,
                 onTokenChanged = controller::updateToken,
+                onPairingOffered = controller::offerPairing,
                 onConnectDevice = { adv -> controller.connectDevice(adv.handle, adv.name) },
                 onHideUnnamedChanged = controller::setHideUnnamed,
             )
@@ -37,6 +39,10 @@ fun RemoteBleApp(controller: RemoteBleController) {
                 onWriteChar = controller::writeCharacteristic,
                 onToggleSub = controller::toggleSubscription,
             )
+        }
+        // Above whichever screen is showing: a pairing link can open the app on either.
+        state.pendingPairing?.let { offer ->
+            PairingDialog(offer, onConfirm = controller::confirmPairing, onDismiss = controller::dismissPairing)
         }
     }
 }

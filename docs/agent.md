@@ -67,7 +67,8 @@ Source: [`agent/src/`](../agent/src)
 | [`ConnectionWatcher.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/ConnectionWatcher.kt) | Polls `BleBackend.isConnected` every tick, `BleBackend.checkLiveness` (active probe) every `livenessInterval`, to catch unsolicited drops and start the lease release grace |
 | [`FakeAgent.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/FakeAgent.kt) | A canned, radio-free agent for client tests |
 | [`AgentMonitor.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/AgentMonitor.kt) | Thread-safe live state (clients/hardware/logs) + a `Snapshot` served as JSON (HTML dashboard) or read directly (Compose UI) |
-| [`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt) | The status dashboard HTML page + `/` and `/api/state` routes |
+| [`Dashboard.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/Dashboard.kt) | The status dashboard HTML page + `/`, `/api/state` and `/api/pairing` routes |
+| [`PairingQr.kt`](../agent/src/commonMain/kotlin/dev/warsha/remoteble/agent/PairingQr.kt) | The pairing QR code's modules (`qrcode-kotlin`), drawn by the phone UI and served as SVG by the dashboard |
 | [`Main.kt`](../agent/src/jvmMain/kotlin/dev/warsha/remoteble/agent/Main.kt) | The runnable JVM (macOS/Linux) agent entrypoint (launched via `agent/run-agent.sh`) |
 | [`AgentRunner.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/AgentRunner.kt) | The Android/iOS composition root — serialized `STOPPED → STARTING → RUNNING → STOPPING` Koin-graph lifecycle, observable state, and structured stop result (see [below](#android--ios-a-phone-as-the-agent)) |
 | [`ui/AgentApp.kt`](../agent/src/mobileMain/kotlin/dev/warsha/remoteble/agent/ui/AgentApp.kt) | The Compose Multiplatform mirror of the HTML dashboard |
@@ -211,6 +212,7 @@ fails inside the TLS handshake, before the bearer token is sent.
 | `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Off by default for now. |
 | `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions; a file other users can read still loads, with a warning, since a mounted container secret often cannot be narrowed. A key that does not belong to the certificate is refused. |
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
+| `--print-pairing` | Print the pairing URI a client takes in (`Pairing: remoteble://…`, [spec §3.2](agent-conformance-spec.md)), one line per credential. It carries the token, so it goes to standard output, never the log, and is a flag only, with no variable. The host is the bound address, or for `0.0.0.0` the address of the interface carrying the default route; with no route, loopback and a warning to `--bind` the LAN address. |
 
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
 each connection to CIO on an ephemeral loopback port. Its I/O blocks, so it runs on threads of its
@@ -239,6 +241,13 @@ new identity, and paired clients must pair again. An `NWListener` serves it (`Ne
 to CIO on loopback with the same peer registry. Its byte pump is Objective-C
 (`agent/src/nativeInterop/cinterop/tlsrelay.def`), because Kotlin/Native cannot take
 Network.framework's receive callback; the record has the details.
+
+**Pairing a client.** While a phone agent runs, **Show pairing code** reveals a QR code of its
+pairing URI and a **Copy pairing link** button; both are hidden until asked for, like the token,
+because the URI carries it. The client phone's camera opens the link in the RemoteBLE client app,
+which asks before using it. With **Encrypt connections** on, the pairing carries the fingerprint and
+the client pins it; off, it says the connection is not encrypted. The JVM agent's dashboard shows
+the same code (below), and both desktop agents print it with `--print-pairing`.
 
 ---
 
@@ -732,6 +741,10 @@ the HTTP dashboard routes are not mounted.
   `/api/state` once a second and renders three panels: **connected clients**, **connected
   hardware**, and a rolling **activity log**.
 - `GET /api/state` — a JSON snapshot from `AgentMonitor`.
+- `GET /api/pairing` — the pairing for each client credential: its URI, whether it is encrypted, and
+  its QR code as SVG. The page's **Pair a client** panel fetches it only when **Show pairing code**
+  is pressed, since it carries the client token; it is never part of the polled state, and is served
+  `no-store`. The host is chosen as for `--print-pairing`.
 
 Every dashboard route requires the operator credential, never a client credential. A browser uses
 the standard Basic-auth prompt with username `operator` and the operator token as its password;

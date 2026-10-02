@@ -11,6 +11,7 @@ import dev.warsha.remoteble.agent.TlsFront
 import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
@@ -36,6 +37,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
@@ -112,6 +114,24 @@ class TlsPinningEndToEndTest {
     }
 
     @Test
+    fun aPairingUriConnectsPinnedWithItsTokenAndAnotherIdentityIsRefused() = runBlocking<Unit> {
+        val server = AgentWebSocketServer(port = 0, authToken = "pairing-token", tls = JsseTlsFront(identity))
+            .also { servers += it }.startAndAwaitReady()
+        fun transportFor(pairing: AgentPairing) =
+            WebSocketAgentTransport(pairing.url, scope, pairingWebSocketHttpClient(pairing).also { clients += it }, authToken = { pairing.token })
+
+        // Through the URI, as a client that scanned or pasted it would.
+        val paired = AgentPairing.parse(AgentPairing("127.0.0.1", server.resolvedPort, "pairing-token", identity.fingerprint).toUri())
+        val transport = transportFor(paired)
+        transport.connect()
+        withTimeout(10.seconds) { transport.state.first { it == TransportState.CONNECTED } }
+
+        val impostor = AgentIdentityStore.loadOrCreate(dir.resolve("impostor.pem")).fingerprint
+        val misled = AgentPairing("127.0.0.1", server.resolvedPort, "pairing-token", impostor)
+        assertFailsWith<AgentIdentityMismatchException> { transportFor(misled).connect() }
+    }
+
+    @Test
     fun aDifferentIdentityFailsBeforeTheAgentSeesAnyRequest() = runBlocking {
         Logger.configure(level = LogLevel.DEBUG) { _, _, message, _ -> logged.add(message) }
         val monitor = AgentMonitor()
@@ -120,7 +140,14 @@ class TlsPinningEndToEndTest {
         val gaveUp = CompletableTracker()
         val transport = pinnedTransport(server.resolvedPort, wrongPin, ReconnectPolicy(onGaveUp = gaveUp::fire))
 
-        val failure = assertFailsWith<AgentIdentityMismatchException> { transport.connect() }
+        // Not assertFailsWith: if connect() returns, the transport took the failure for a transient
+        // one and is retrying, and only what it logged says what it saw instead.
+        val failure = try {
+            transport.connect()
+            fail("connect() returned in state ${transport.state.value} instead of failing with the identity error; logged: $logged")
+        } catch (mismatch: AgentIdentityMismatchException) {
+            mismatch
+        }
 
         assertEquals(wrongPin, failure.expected)
         assertEquals(identity.fingerprint, failure.presented)
@@ -285,6 +312,35 @@ class TlsPinningEndToEndTest {
         assertEquals(200, fromLoopback)
         assertEquals(404, fromLan)
     }
+
+    @Test
+    fun theDashboardShowsThePinnedPairingToTheOperatorOnly() = runBlocking {
+        val server = AgentWebSocketServer(
+            port = 0,
+            authToken = "client-token",
+            operatorToken = "operator-secret",
+            monitor = AgentMonitor(),
+            tls = JsseTlsFront(identity),
+            fingerprint = identity.fingerprint,
+        ).also { servers += it }.startAndAwaitReady()
+        val basic = "Basic " + Base64.getEncoder().encodeToString("operator:operator-secret".toByteArray())
+
+        val body = httpsBody("127.0.0.1", server.resolvedPort, "/api/pairing", basic)
+
+        val expected = AgentPairing("127.0.0.1", server.resolvedPort, "client-token", identity.fingerprint).toUri()
+        assertTrue("\"uri\":\"$expected\"" in body, body)
+        assertTrue("\"encrypted\":true" in body && "<svg" in body, body)
+        assertEquals(401, httpsStatus("127.0.0.1", server.resolvedPort, "/api/pairing", "Basic " + Base64.getEncoder().encodeToString("operator:wrong".toByteArray())))
+    }
+
+    private fun httpsBody(host: String, port: Int, path: String, authorization: String): String =
+        rawTlsSocket(host, port).use { socket ->
+            socket.outputStream.write(
+                "GET $path HTTP/1.1\r\nHost: $host:$port\r\nAuthorization: $authorization\r\nConnection: close\r\n\r\n".toByteArray(),
+            )
+            socket.outputStream.flush()
+            socket.inputStream.bufferedReader().readText().substringAfter("\r\n\r\n")
+        }
 
     private fun httpsStatus(host: String, port: Int, path: String, authorization: String): Int =
         rawTlsSocket(host, port).use { socket ->

@@ -1,5 +1,7 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 
@@ -38,6 +40,22 @@ class ClientCredentials private constructor(private val byName: Map<String, Stri
     fun unrevoke(name: String): Unit = synchronized(lock) { revoked -= name }
 
     fun isRevoked(name: String): Boolean = synchronized(lock) { name in revoked }
+
+    /**
+     * The pairings for an agent at [host]:[port], each with the principal it is for: one per
+     * credential not revoked, the default token first (principal `null`) and then the named ones in
+     * order, or one without a token when the agent needs none. What `--print-pairing` prints and the
+     * dashboard shows.
+     */
+    internal fun pairings(host: String, port: Int, fingerprint: AgentFingerprint?): List<Pair<String?, AgentPairing>> {
+        if (byName.isEmpty()) return listOf(null to AgentPairing(host, port, null, fingerprint))
+        val live = synchronized(lock) { byName.filterKeys { it !in revoked } }
+        val default = live[DEFAULT_PRINCIPAL]?.let { null to it }
+        val named = live.filterKeys { it != DEFAULT_PRINCIPAL }.toList().sortedBy { it.first }
+        return listOfNotNull(default).plus(named).map { (principal, secret) ->
+            principal to AgentPairing(host, port, secret, fingerprint)
+        }
+    }
 
     companion object {
         const val DEFAULT_PRINCIPAL = "default"

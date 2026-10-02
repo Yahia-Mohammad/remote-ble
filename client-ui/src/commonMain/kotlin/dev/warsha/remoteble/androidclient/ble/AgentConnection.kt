@@ -8,6 +8,8 @@ import dev.warsha.remoteble.client.RemoteScanner
 import dev.warsha.remoteble.client.TransportState
 import dev.warsha.remoteble.client.WebSocketAgentTransport
 import dev.warsha.remoteble.client.defaultWebSocketHttpClient
+import dev.warsha.remoteble.client.pinnedWebSocketHttpClient
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.DeviceHandle
 import io.ktor.client.HttpClient
@@ -40,6 +42,7 @@ class AgentConnection(private val scope: CoroutineScope) {
     private var client: HttpClient? = null
     private var url: String? = null
     private var token: String? = null
+    private var fingerprint: AgentFingerprint? = null
 
     /** The live transport state of the current session, or [TransportState.DISCONNECTED] when idle. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -49,10 +52,12 @@ class AgentConnection(private val scope: CoroutineScope) {
 
     /**
      * Returns a session connected to [url], (re)building one if needed, and suspends until
-     * the transport reports [TransportState.CONNECTED]. Throws on timeout.
+     * the transport reports [TransportState.CONNECTED]. Throws on timeout. With a [fingerprint] the
+     * agent is trusted by that pin alone ([pinnedWebSocketHttpClient]); a different key fails with
+     * `AgentIdentityMismatchException` before the token is sent.
      */
-    suspend fun connect(url: String, token: String): AgentSession {
-        val session = obtain(url.trim(), token.trim())
+    suspend fun connect(url: String, token: String, fingerprint: AgentFingerprint? = null): AgentSession {
+        val session = obtain(url.trim(), token.trim(), fingerprint)
         withTimeout(CONNECT_TIMEOUT) {
             session.transportState.first { it == TransportState.CONNECTED }
         }
@@ -76,18 +81,19 @@ class AgentConnection(private val scope: CoroutineScope) {
         client = null
         url = null
         token = null
+        fingerprint = null
     }
 
-    private suspend fun obtain(url: String, token: String): AgentSession {
+    private suspend fun obtain(url: String, token: String, fingerprint: AgentFingerprint?): AgentSession {
         val current = session.value
-        if (current != null && this.url == url && this.token == token &&
+        if (current != null && this.url == url && this.token == token && this.fingerprint == fingerprint &&
             current.transportState.value != TransportState.DISCONNECTED &&
             current.transportState.value != TransportState.INCOMPATIBLE_PROTOCOL
         ) {
             return current
         }
         close()
-        val newClient = defaultWebSocketHttpClient().also { client = it }
+        val newClient = (fingerprint?.let(::pinnedWebSocketHttpClient) ?: defaultWebSocketHttpClient()).also { client = it }
         // Blank token → no Authorization header (token-free agent); otherwise present it as the
         // bearer credential. Read via the provider lambda so a rotated value would be picked up on
         // reconnect (see WebSocketAgentTransport.authToken / F5).
@@ -99,6 +105,7 @@ class AgentConnection(private val scope: CoroutineScope) {
             session.value = it
             this.url = url
             this.token = token
+            this.fingerprint = fingerprint
         }
     }
 

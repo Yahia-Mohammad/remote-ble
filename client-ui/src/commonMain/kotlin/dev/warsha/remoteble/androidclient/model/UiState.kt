@@ -4,6 +4,7 @@ import dev.warsha.remoteble.androidclient.ble.BleUuids
 import dev.warsha.remoteble.androidclient.ble.GattDecoder
 import dev.warsha.remoteble.client.RemoteAdvertisement
 import dev.warsha.remoteble.client.TransportState
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.DeviceHandle
 import com.juul.kable.DiscoveredCharacteristic
 import com.juul.kable.DiscoveredService
@@ -22,6 +23,10 @@ data class UiState(
     // (for a token-free agent, e.g. the JVM CLI with REMOTE_BLE_TOKEN unset); the mobile agents
     // always require one and display it in their UI.
     val agentToken: String = "",
+    // The pin of a paired agent, `sha256:<hex>`; null when not paired, so connections are unpinned.
+    val agentFingerprint: String? = null,
+    // A pairing awaiting the user's confirmation.
+    val pendingPairing: PairingOffer? = null,
     val agentState: TransportState = TransportState.DISCONNECTED,
     val isScanning: Boolean = false,
     val status: String = "Idle.",
@@ -31,6 +36,18 @@ data class UiState(
 ) {
     companion object {
         const val DEFAULT_AGENT_URL: String = "ws://10.0.2.2:8080/agent"
+    }
+}
+
+/** What a pairing would change, as the confirmation shows it. The token is only said to be there. */
+data class PairingOffer(val address: String, val encrypted: Boolean, val fingerprint: String?, val hasToken: Boolean) {
+    companion object {
+        fun of(pairing: AgentPairing): PairingOffer = PairingOffer(
+            address = pairing.url,
+            encrypted = pairing.encrypted,
+            fingerprint = pairing.fingerprint?.toString(),
+            hasToken = pairing.token != null,
+        )
     }
 }
 

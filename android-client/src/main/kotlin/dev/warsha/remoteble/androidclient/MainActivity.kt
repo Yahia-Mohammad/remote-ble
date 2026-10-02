@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.androidclient
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,9 +24,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Only on a fresh start: after rotation the same intent would offer the pairing again.
+        if (savedInstanceState == null) offerPairingFrom(intent)
         setContent {
             RemoteBleApp(viewModel.controller)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        offerPairingFrom(intent)
+    }
+
+    /** A `remoteble://` link the app was opened with, held for the user's confirmation. */
+    private fun offerPairingFrom(intent: Intent?) {
+        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let(viewModel.controller::offerPairing)
     }
 }
 

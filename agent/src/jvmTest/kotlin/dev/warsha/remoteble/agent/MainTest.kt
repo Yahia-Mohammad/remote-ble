@@ -133,4 +133,10 @@ class MainTest {
             Files.deleteIfExists(policy)
         }
     }
+
+    @Test
+    fun printPairingIsAFlag() {
+        assertTrue(parseCli(arrayOf("--tls", "--print-pairing")).printPairing)
+        assertFalse(parseCli(arrayOf("--tls")).printPairing)
+    }
 }

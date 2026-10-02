@@ -5,6 +5,9 @@ import dev.warsha.remoteble.androidclient.ble.PeripheralSession
 import dev.warsha.remoteble.androidclient.model.DiscoveredDevice
 import dev.warsha.remoteble.androidclient.model.UiState
 import dev.warsha.remoteble.androidclient.model.sortedNamedFirst
+import dev.warsha.remoteble.androidclient.model.PairingOffer
+import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.DeviceHandle
 import com.juul.kable.DiscoveredCharacteristic
 import kotlinx.coroutines.CancellationException
@@ -48,6 +51,10 @@ class RemoteBleController(
     private data class Local(
         val agentUrl: String = UiState.DEFAULT_AGENT_URL,
         val agentToken: String = "",
+        // The pinned identity of the agent paired with, if any; only a pairing sets it.
+        val agentFingerprint: AgentFingerprint? = null,
+        // A pairing taken in by paste or link, shown for confirmation before it replaces anything.
+        val pendingPairing: AgentPairing? = null,
         val status: String = "Idle.",
         val isScanning: Boolean = false,
         val discovered: List<DiscoveredDevice> = emptyList(),
@@ -74,6 +81,8 @@ class RemoteBleController(
         UiState(
             agentUrl = local.agentUrl,
             agentToken = local.agentToken,
+            agentFingerprint = local.agentFingerprint?.toString(),
+            pendingPairing = local.pendingPairing?.let(PairingOffer::of),
             agentState = agentState,
             isScanning = local.isScanning,
             status = local.status,
@@ -87,7 +96,45 @@ class RemoteBleController(
     }.stateIn(scope, SharingStarted.Eagerly, UiState())
 
     fun updateUrl(url: String) {
-        local.update { it.copy(agentUrl = url) }
+        // The pin belongs to the agent that was paired; an address typed by hand may be another.
+        local.update { it.copy(agentUrl = url, agentFingerprint = it.agentFingerprint.takeIf { _ -> url == it.agentUrl }) }
+    }
+
+    /**
+     * Takes in a pairing link, pasted or opened from a QR code, and holds it for [confirmPairing]:
+     * a link can come from anywhere, so nothing changes until the user has seen where it points.
+     * Returns whether [text] was a pairing at all.
+     */
+    fun offerPairing(text: String): Boolean {
+        val pairing = runCatching { AgentPairing.parse(text) }.getOrElse { failure ->
+            local.update { it.copy(status = "Not a pairing link: ${failure.message}") }
+            return false
+        }
+        local.update { it.copy(pendingPairing = pairing) }
+        return true
+    }
+
+    /** Applies the offered pairing: its address, token and pin replace the current ones. */
+    fun confirmPairing() {
+        val pairing = local.value.pendingPairing ?: return
+        scanJob?.cancel()
+        scanJob = null
+        local.update {
+            it.copy(
+                agentUrl = pairing.url,
+                agentToken = pairing.token.orEmpty(),
+                agentFingerprint = pairing.fingerprint,
+                pendingPairing = null,
+                isScanning = false,
+                status = "Paired with ${pairing.host}:${pairing.port}" + if (pairing.encrypted) ", encrypted." else ", not encrypted.",
+            )
+        }
+        // The next connection is a different agent, or the same one pinned now; never reuse the old.
+        if (active.value == null) scope.launch { agent.close() }
+    }
+
+    fun dismissPairing() {
+        local.update { it.copy(pendingPairing = null) }
     }
 
     fun updateToken(token: String) {
@@ -103,7 +150,7 @@ class RemoteBleController(
         local.update { it.copy(isScanning = true, discovered = emptyList(), status = "Connecting to agent…") }
         scanJob = scope.launch {
             try {
-                val session = agent.connect(local.value.agentUrl, local.value.agentToken)
+                val session = agent.connect(local.value.agentUrl, local.value.agentToken, local.value.agentFingerprint)
                 local.update { it.copy(status = "Scanning via agent…") }
                 agent.advertisements(session).collect { adv ->
                     val sighting = DiscoveredDevice.from(adv)
@@ -141,7 +188,7 @@ class RemoteBleController(
         local.update { it.copy(isScanning = false) }
         scope.launch {
             try {
-                val session = agent.connect(local.value.agentUrl, local.value.agentToken)
+                val session = agent.connect(local.value.agentUrl, local.value.agentToken, local.value.agentFingerprint)
                 active.value?.close()
                 active.value = PeripheralSession(agent.peripheral(session, handle, name), handle, name, scope)
                 local.update { it.copy(status = "Connecting to ${name ?: handle.value}…") }

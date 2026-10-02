@@ -85,4 +85,32 @@ class ClientCredentialsTest {
         // A second peer evicts the oldest entry instead of growing the peer map.
         assertTrue(limiter.recordFailure("peer-b").allowed)
     }
+
+    @Test
+    fun onePairingPerLiveCredentialDefaultFirstAndOneWithoutForATokenFreeAgent() {
+        val fp = dev.warsha.remoteble.protocol.AgentFingerprint.ofSpkiSha256(ByteArray(32))
+        val credentials = ClientCredentials.of(
+            mapOf(ClientCredentials.DEFAULT_PRINCIPAL to "t0ken", "zed" to "z-secret", "amy" to "a-secret", "gone" to "g-secret"),
+        )
+        credentials.revoke("gone")
+
+        val pairings = credentials.pairings("10.0.0.2", 8080, fp)
+
+        kotlin.test.assertEquals(listOf(null, "amy", "zed"), pairings.map { it.first })
+        kotlin.test.assertEquals("remoteble://10.0.0.2:8080?token=t0ken&fp=$fp", pairings[0].second.toUri())
+        kotlin.test.assertEquals("a-secret", pairings[1].second.token)
+        kotlin.test.assertEquals(
+            listOf(null to "remoteble://127.0.0.1:8080"),
+            ClientCredentials.legacy(null).pairings("127.0.0.1", 8080, null).map { it.first to it.second.toUri() },
+        )
+    }
+
+    @Test
+    fun aPairingNamesTheBoundAddressOrTheLanOneForAWildcard() {
+        kotlin.test.assertEquals("192.168.1.20", pairingHost("192.168.1.20") { "10.9.9.9" })
+        for (wildcard in listOf("0.0.0.0", "::", "0:0:0:0:0:0:0:0")) {
+            kotlin.test.assertEquals("10.9.9.9", pairingHost(wildcard) { "10.9.9.9" }, wildcard)
+        }
+        kotlin.test.assertEquals(null, pairingHost("0.0.0.0") { null })
+    }
 }

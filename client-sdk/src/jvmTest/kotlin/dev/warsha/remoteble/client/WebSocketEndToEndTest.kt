@@ -460,7 +460,7 @@ class WebSocketEndToEndTest {
         ).also { it.startAndAwaitReady() }
         val port = server.resolvedPort
         try {
-            for (path in listOf("/", "/api/state", "/api/strict", "/api/log-level")) {
+            for (path in listOf("/", "/api/state", "/api/strict", "/api/log-level", "/api/pairing")) {
                 assertEquals(
                     HttpStatusCode.NotFound,
                     httpClient.get("http://localhost:$port$path").status,

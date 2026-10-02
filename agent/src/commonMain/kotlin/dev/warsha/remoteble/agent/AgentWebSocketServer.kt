@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import dev.warsha.remoteble.protocol.CLIENT_ID_HEADER
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.ClientHello
@@ -101,6 +102,8 @@ class AgentWebSocketServer(
     private val pongTimeout: Duration = DEFAULT_PONG_TIMEOUT,
     /** Serve `wss://` through this front; `null` serves cleartext `ws://` directly. */
     private val tls: TlsFront.Factory? = null,
+    /** The fingerprint [tls] presents, which the dashboard's pairing code carries. */
+    private val fingerprint: AgentFingerprint? = null,
 ) {
     private var server: EmbeddedServer<*, *>? = null
     // A flow so a request can wait for it: the front relays from the moment it binds, before
@@ -219,6 +222,9 @@ class AgentWebSocketServer(
                         registry,
                         strictMode,
                         allowRemoteDashboard,
+                        pairings = {
+                            pairingHost(host)?.let { reachable -> credentials.pairings(reachable, boundPort.value, fingerprint) }.orEmpty()
+                        },
                     )
                 } else if (statusMonitor != null) {
                     Logger.warn(LogTags.SERVER) {

@@ -305,6 +305,35 @@ class TlsPinningEndToEndTest {
         assertEquals(404, fromLan)
     }
 
+    @Test
+    fun theDashboardShowsThePinnedPairingToTheOperatorOnly() = runBlocking {
+        val server = AgentWebSocketServer(
+            port = 0,
+            authToken = "client-token",
+            operatorToken = "operator-secret",
+            monitor = AgentMonitor(),
+            tls = JsseTlsFront(identity),
+            fingerprint = identity.fingerprint,
+        ).also { servers += it }.startAndAwaitReady()
+        val basic = "Basic " + Base64.getEncoder().encodeToString("operator:operator-secret".toByteArray())
+
+        val body = httpsBody("127.0.0.1", server.resolvedPort, "/api/pairing", basic)
+
+        val expected = AgentPairing("127.0.0.1", server.resolvedPort, "client-token", identity.fingerprint).toUri()
+        assertTrue("\"uri\":\"$expected\"" in body, body)
+        assertTrue("\"encrypted\":true" in body && "<svg" in body, body)
+        assertEquals(401, httpsStatus("127.0.0.1", server.resolvedPort, "/api/pairing", "Basic " + Base64.getEncoder().encodeToString("operator:wrong".toByteArray())))
+    }
+
+    private fun httpsBody(host: String, port: Int, path: String, authorization: String): String =
+        rawTlsSocket(host, port).use { socket ->
+            socket.outputStream.write(
+                "GET $path HTTP/1.1\r\nHost: $host:$port\r\nAuthorization: $authorization\r\nConnection: close\r\n\r\n".toByteArray(),
+            )
+            socket.outputStream.flush()
+            socket.inputStream.bufferedReader().readText().substringAfter("\r\n\r\n")
+        }
+
     private fun httpsStatus(host: String, port: Int, path: String, authorization: String): Int =
         rawTlsSocket(host, port).use { socket ->
             socket.outputStream.write(

@@ -11,7 +11,11 @@ import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
+import dev.warsha.remoteble.protocol.AgentPairing
 import kotlin.io.encoding.Base64
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
@@ -31,6 +35,7 @@ internal fun Routing.dashboardRoutes(
     registry: PeripheralRegistry? = null,
     strictMode: StrictModeState? = null,
     allowRemoteDashboard: Boolean = false,
+    pairings: () -> List<Pair<String?, AgentPairing>> = { emptyList() },
 ) {
     get("/") {
         if (!call.allowedOrigin(allowRemoteDashboard)) return@get
@@ -50,12 +55,28 @@ internal fun Routing.dashboardRoutes(
         if (strictMode == null) call.respond(HttpStatusCode.NotFound)
         else call.respondText(strictMode.enabled.toString())
     }
+    // The pairing code clients scan: it carries the client token, which the operator may hand out.
+    // Fetched only when the operator asks to see it, never part of the polled state.
+    get("/api/pairing") {
+        if (!call.allowedOrigin(allowRemoteDashboard)) return@get
+        if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
+        call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+        val views = pairings().map { (principal, pairing) ->
+            PairingView(principal, pairing.toUri(), pairing.encrypted, qrSvg(pairing.toUri()))
+        }
+        call.respondText(pairingJson.encodeToString(views), ContentType.Application.Json)
+    }
     get("/api/log-level") {
         if (!call.allowedOrigin(allowRemoteDashboard)) return@get
         if (!call.requireOperator(operatorCredentials, authLimiter)) return@get
         call.respondText(Logger.level?.name?.lowercase() ?: "off")
     }
 }
+
+@Serializable
+private data class PairingView(val principal: String?, val uri: String, val encrypted: Boolean, val svg: String)
+
+private val pairingJson = Json
 
 /**
  * Whether this request may see the dashboard at all, **before** any credential is considered.
@@ -177,6 +198,14 @@ private val DASHBOARD_HTML = """
   .log .row { padding:5px 14px; border-bottom:none; }
   .log .t { color:var(--muted); }
   pre { margin:0; }
+  .pair { padding:12px 14px; font-size:13px; color:var(--muted); }
+  .pair button { background:var(--bg); color:var(--accent2); border:1px solid var(--border); border-radius:6px;
+    padding:6px 12px; font-size:13px; cursor:pointer; }
+  .codes { display:flex; flex-wrap:wrap; gap:16px; margin-top:12px; }
+  .code { max-width:300px; }
+  .code .qr { background:#fff; padding:0; border-radius:6px; }
+  .code .qr svg { display:block; width:100%; height:auto; }
+  .code .uri { font-family:var(--mono); font-size:11px; word-break:break-all; margin-top:6px; }
   @media (max-width:760px) {
     main { grid-template-columns:1fr; padding:10px; gap:10px; }
     .stats { width:100%; margin-left:0; }
@@ -202,6 +231,14 @@ private val DASHBOARD_HTML = """
   <section class="panel">
     <h2>Peripheral ownership <span class="count" id="dCount">0</span></h2>
     <div class="rows" id="devices"></div>
+  </section>
+  <section class="panel full">
+    <h2>Pair a client</h2>
+    <div class="pair">
+      <button id="pairToggle">Show pairing code</button>
+      <span>Scan it with the client phone's camera, or paste the link. It carries the client token.</span>
+      <div class="codes" id="codes" hidden></div>
+    </div>
   </section>
   <section class="panel full">
     <h2>Activity log <span class="count" id="lCount">0</span></h2>
@@ -252,6 +289,28 @@ private val DASHBOARD_HTML = """
       `<div class="row"><span class="t">${'$'}{time(l.atMs)}</span>&nbsp; ${'$'}{esc(l.message)}</div>`).join("")
       : `<div class="empty">No activity yet.</div>`;
   }
+
+  // Fetched on request only: the codes carry the client token, so they are not part of the polled state.
+  async function togglePairing() {
+    const codes = ${'$'}("codes"), toggle = ${'$'}("pairToggle");
+    if (!codes.hidden) { codes.hidden = true; codes.innerHTML = ""; toggle.textContent = "Show pairing code"; return; }
+    try {
+      const r = await fetch("/api/pairing", { cache: "no-store" });
+      const pairings = await r.json();
+      // The SVG is the agent's own rendering of the code; the other values are escaped.
+      codes.innerHTML = pairings.length ? pairings.map(p =>
+        `<div class="code"><div class="qr">${'$'}{p.svg}</div>` +
+        `<div>${'$'}{p.principal ? esc(p.principal) + " · " : ""}${'$'}{p.encrypted ? "encrypted, pinned" : "not encrypted"}</div>` +
+        `<div class="uri">${'$'}{esc(p.uri)}</div></div>`).join("")
+        : `<div>No LAN address to pair over: bind a specific address.</div>`;
+      codes.hidden = false;
+      toggle.textContent = "Hide pairing code";
+    } catch (e) {
+      codes.hidden = false;
+      codes.textContent = "Could not load the pairing code.";
+    }
+  }
+  ${'$'}("pairToggle").addEventListener("click", togglePairing);
 
   async function poll() {
     try {

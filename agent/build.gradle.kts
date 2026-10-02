@@ -73,6 +73,7 @@ kotlin {
             implementation(libs.ktor.server.cio)
             implementation(libs.ktor.server.websockets)
             implementation(libs.koin.core)
+            implementation(libs.qrcode.kotlin)
             implementation(libs.kotlinx.serialization.json)
             // Multiplatform lock/atomic primitives replacing the JVM-only
             // ConcurrentHashMap/AtomicLong/synchronized the promoted code used.

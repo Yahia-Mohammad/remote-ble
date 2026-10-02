@@ -10,6 +10,7 @@ import kotlin.io.path.ExperimentalPathApi
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -105,6 +106,20 @@ class AgentIdentityTest {
 
         assertEquals("rw-r--r--", AgentIdentityStore.looseMode(path))
         assertEquals(created.fingerprint, AgentIdentityStore.loadOrCreate(path).fingerprint)
+    }
+
+    @Test
+    fun aKeyThatDoesNotBelongToTheCertificateIsRefused() {
+        val (a, b) = dir.resolve("a.pem") to dir.resolve("b.pem")
+        AgentIdentityStore.loadOrCreate(a)
+        AgentIdentityStore.loadOrCreate(b)
+        val keyOfA = Files.readString(a).substringBefore("-----BEGIN CERTIFICATE-----")
+        val certOfB = "-----BEGIN CERTIFICATE-----" + Files.readString(b).substringAfter("-----BEGIN CERTIFICATE-----")
+        val mixed = dir.resolve("mixed.pem").also { Files.writeString(it, keyOfA + certOfB) }
+
+        val failure = assertFailsWith<IllegalStateException> { AgentIdentityStore.loadOrCreate(mixed) }
+
+        assertTrue("does not belong" in failure.message.orEmpty(), failure.message)
     }
 
     @Test

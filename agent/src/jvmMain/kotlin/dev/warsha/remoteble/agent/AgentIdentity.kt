@@ -91,10 +91,13 @@ object AgentIdentityStore {
         }
         val key = pemBlock(pem, "PRIVATE KEY") ?: error("$path has no PRIVATE KEY block")
         val cert = pemBlock(pem, "CERTIFICATE") ?: error("$path has no CERTIFICATE block")
-        return AgentTlsIdentity(
+        val identity = AgentTlsIdentity(
             KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(key)),
             parseCertificate(cert),
         )
+        // Otherwise every handshake would fail, far from the cause; the Rust agent refuses it too.
+        check(belongTogether(identity)) { "$path is unusable: the private key does not belong to the certificate" }
+        return identity
     }
 
     /** The file's permissions if group or others may access it; `null` where POSIX ones don't exist. */
@@ -105,6 +108,21 @@ object AgentIdentityStore {
     }
 
     private val OWNER_ONLY = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE)
+
+    /** Whether the certificate's key verifies a signature made with the private key. */
+    private fun belongTogether(identity: AgentTlsIdentity): Boolean {
+        val challenge = ByteArray(32).also(SecureRandom()::nextBytes)
+        val signature = Signature.getInstance("SHA256withECDSA").run {
+            initSign(identity.privateKey)
+            update(challenge)
+            sign()
+        }
+        return Signature.getInstance("SHA256withECDSA").run {
+            initVerify(identity.certificate.publicKey)
+            update(challenge)
+            verify(signature)
+        }
+    }
 
     private fun write(path: Path, identity: AgentTlsIdentity) {
         val dir = path.toAbsolutePath().parent

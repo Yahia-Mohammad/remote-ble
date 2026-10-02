@@ -296,6 +296,7 @@ Opt-in on every agent; see [proposals/agent-transport-encryption.md](proposals/a
 | Identity storage | `REMOTE_BLE_IDENTITY_FILE`, same default path | `--identity-file` / `REMOTE_BLE_IDENTITY_FILE`, same default path | Android Keystore; the key never leaves it | Keychain; the key never leaves it |
 | File format | PEM: PKCS#8 key **with** public key + certificate | Same; each reads the other's file | n/a (keystore entry) | n/a (Keychain items) |
 | File others can read | Loads with a warning naming the fix | Same | n/a | n/a |
+| Key not matching the certificate | Refused at load | Same | n/a (one keystore entry) | n/a (the Keychain pairs by key) |
 | Reset | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Same | **New identity** button, confirmed | Same as Android |
 | Key / certificate | ECDSA P-256, self-signed, SAN `agent.remoteble.invalid`, no expiry | Same (rcgen) | Same (`SelfSignedCertificate`, signed in the keystore) | Same (`SelfSignedCertificate`, signed in the Keychain) |
 | Fingerprint shown | Logged at start: `Agent identity: sha256:<hex>` | Same | On screen, selectable | Same as Android |

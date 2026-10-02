@@ -111,32 +111,13 @@ fun AgentApp(
     // to pin first (docs/proposals/agent-transport-encryption.md, phase 5).
     var encrypt by remember { mutableStateOf(false) }
     // Loaded when encryption is switched on, so the fingerprint can be read before Start.
-    var identity by remember { mutableStateOf<AgentTls?>(null) }
-    var identityFailure by remember { mutableStateOf<String?>(null) }
+    val identities = remember(tls) { AgentIdentityLoader(tls) }
     // The scheme the running agent was started with, which a later toggle must not misreport.
     var servingTls by remember { mutableStateOf(false) }
 
-    // Loading may create the key, and both block on the key store, so it runs off the UI thread
-    // inside the provider. A failure is shown rather than thrown: the agent can still run without.
-    val loadIdentity: suspend (Boolean) -> AgentTls? = { reset ->
-        val provider = tls
-        if (provider == null) {
-            null
-        } else {
-            try {
-                provider.load(reset).also { identity = it; identityFailure = null }
-            } catch (e: Exception) {
-                Logger.error(LogTags.AGENT, e) { "could not load the agent identity" }
-                identityFailure = "Could not load this agent's identity; check the local log."
-                // A reset may have deleted the old key before failing, so the identity on screen
-                // could be one that no longer exists; Start loads afresh instead.
-                if (reset) identity = null
-                null
-            }
-        }
-    }
+    val loadIdentity: suspend (Boolean) -> AgentTls? = identities::load
     LaunchedEffect(encrypt) {
-        if (encrypt && identity == null) loadIdentity(false)
+        if (encrypt && identities.identity == null) loadIdentity(false)
     }
 
     LaunchedEffect(Unit) {
@@ -178,8 +159,8 @@ fun AgentApp(
             startFailure = null
             // Never falls back to cleartext: an agent the user asked to encrypt does not start bare.
             val front = if (encrypt) {
-                (identity ?: loadIdentity(false))?.front ?: run {
-                    startFailure = identityFailure
+                (identities.identity ?: loadIdentity(false))?.front ?: run {
+                    startFailure = identities.failure
                     return@launch
                 }
             } else {
@@ -254,8 +235,8 @@ fun AgentApp(
                             running = running,
                             encrypt = encrypt,
                             onEncryptChange = { encrypt = it },
-                            fingerprint = identity?.fingerprint?.toString(),
-                            failure = identityFailure,
+                            fingerprint = identities.identity?.fingerprint?.toString(),
+                            failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
                         )
                     }
@@ -438,6 +419,32 @@ private fun AgentHeader(
     if (!running) {
         startFailure?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/**
+ * The phone agent's identity as the UI shows it: the one loaded, or why loading failed. Loading may
+ * create the key, and both block on the key store, so it runs off the UI thread inside the provider.
+ * A failure is shown rather than thrown: the agent can still run without encryption.
+ */
+internal class AgentIdentityLoader(private val provider: AgentTlsProvider?) {
+    var identity: AgentTls? by mutableStateOf(null)
+        private set
+    var failure: String? by mutableStateOf(null)
+        private set
+
+    suspend fun load(reset: Boolean): AgentTls? {
+        if (provider == null) return null
+        return try {
+            provider.load(reset).also { identity = it; failure = null }
+        } catch (e: Exception) {
+            Logger.error(LogTags.AGENT, e) { "could not load the agent identity" }
+            failure = "Could not load this agent's identity; check the local log."
+            // A reset may have deleted the old key before failing, so the identity on screen could
+            // be one that no longer exists; Start loads afresh instead.
+            if (reset) identity = null
+            null
         }
     }
 }

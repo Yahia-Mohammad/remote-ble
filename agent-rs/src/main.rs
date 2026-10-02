@@ -18,6 +18,7 @@ use protocol::op::DeviceHandle;
 use registry::peripheral_lease::{LeaseConfig, PeripheralRegistry};
 use registry::write_policy::WritePolicy;
 use transport::identity;
+use transport::pairing;
 use transport::server::{AgentServer, ScanConcurrencyMode, ServerConfig};
 
 #[derive(Parser, Debug)]
@@ -122,6 +123,12 @@ struct Args {
     /// then fails with an identity error until it re-pairs.
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_RESET_IDENTITY")]
     reset_identity: bool,
+
+    /// Print the pairing URI (`remoteble://…`) clients take in, one per credential. It carries the
+    /// token, so it goes to standard output, never the log. A flag only, with no variable, so it is
+    /// never on by accident.
+    #[arg(long, default_value_t = false)]
+    print_pairing: bool,
 }
 
 #[tokio::main]
@@ -207,7 +214,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let tls = tls_config(&args)?;
+    let (tls, fingerprint) = match tls_config(&args)? {
+        Some((config, fingerprint)) => (Some(config), Some(fingerprint)),
+        None => (None, None),
+    };
+    if args.print_pairing {
+        let host = pairing::pairing_host(args.bind, pairing::routed_ipv4).unwrap_or_else(|| {
+            tracing::warn!("No default route to name a LAN address in the pairing; pass --bind <address> for one");
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        });
+        let bare_token = args
+            .token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty());
+        for (principal, uri) in pairing::pairing_uris(
+            host,
+            args.port,
+            fingerprint.as_deref(),
+            &credentials,
+            bare_token,
+        ) {
+            match principal {
+                Some(name) => println!("Pairing ({name}): {uri}"),
+                None => println!("Pairing: {uri}"),
+            }
+        }
+    }
     let addr = SocketAddr::new(args.bind, args.port);
     let server_config = ServerConfig {
         addr,
@@ -239,7 +271,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The rustls configuration presenting the agent's identity, or `None` to serve cleartext. A reset
 /// applies whether or not TLS is on, since an operator discarding a compromised key should not
 /// have to enable anything to do it. Mirrors the Kotlin agent's `tlsFrontFor`.
-fn tls_config(args: &Args) -> Result<Option<Arc<rustls::ServerConfig>>, identity::IdentityError> {
+/// Returned with the identity's fingerprint, which a pairing carries.
+fn tls_config(
+    args: &Args,
+) -> Result<Option<(Arc<rustls::ServerConfig>, String)>, identity::IdentityError> {
     let path = args
         .identity_file
         .clone()
@@ -253,7 +288,8 @@ fn tls_config(args: &Args) -> Result<Option<Arc<rustls::ServerConfig>>, identity
     let agent_identity = identity::load_or_create(&path, args.reset_identity)?;
     // The value a client pins. Printed rather than a pairing URI, so the token stays out of logs.
     tracing::info!("Agent identity: {}", agent_identity.fingerprint);
-    Ok(Some(identity::server_config(&agent_identity)?))
+    let config = identity::server_config(&agent_identity)?;
+    Ok(Some((config, agent_identity.fingerprint)))
 }
 
 /// The operator secret must not be one of the client secrets.

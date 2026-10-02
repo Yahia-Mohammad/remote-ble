@@ -37,6 +37,7 @@ import platform.CoreFoundation.kCFNumberIntType
 import platform.CoreFoundation.kCFStringEncodingUTF8
 import platform.CoreFoundation.kCFTypeDictionaryKeyCallBacks
 import platform.CoreFoundation.kCFTypeDictionaryValueCallBacks
+import platform.Security.SecCertificateCopyData
 import platform.Security.SecCertificateCopyKey
 import platform.Security.SecCertificateCreateWithData
 import platform.Security.SecCertificateRef
@@ -78,7 +79,12 @@ import platform.Foundation.timeIntervalSince1970
  * The iOS agent's TLS identity: a Keychain identity, which Network.framework serves as is, and the
  * [fingerprint] clients pin.
  */
-class IosTlsIdentity internal constructor(internal val ref: SecIdentityRef, val fingerprint: AgentFingerprint)
+class IosTlsIdentity internal constructor(
+    internal val ref: SecIdentityRef,
+    val fingerprint: AgentFingerprint,
+    /** The certificate's own SHA-256, as a browser shows it for the dashboard. */
+    val certificateSha256: String,
+)
 
 /**
  * Keeps the iOS agent's identity in the Keychain: a P-256 key generated there, which never leaves
@@ -143,7 +149,7 @@ object IosAgentIdentityStore {
             if (status == errSecItemNotFound) return@cf null
             check(status == errSecSuccess) { "Keychain identity query failed: $status" }
             val identity: SecIdentityRef = result.value!!.reinterpret()
-            IosTlsIdentity(identity, fingerprintOf(identity))
+            IosTlsIdentity(identity, fingerprintOf(identity), certificateSha256Of(identity))
         }
     }
 
@@ -157,6 +163,22 @@ object IosAgentIdentityStore {
                 AgentFingerprint.ofSpkiSha256(sha256(spkiOf(key)))
             } finally {
                 CFRelease(key)
+            }
+        } finally {
+            CFRelease(cert)
+        }
+    }
+
+    private fun certificateSha256Of(identity: SecIdentityRef): String = memScoped {
+        val certificate = alloc<platform.Security.SecCertificateRefVar>()
+        check(SecIdentityCopyCertificate(identity, certificate.ptr) == errSecSuccess) { "identity has no certificate" }
+        val cert = certificate.value!!
+        try {
+            val der = SecCertificateCopyData(cert) ?: error("certificate has no data")
+            try {
+                certificateSha256Text(sha256(der.toByteArray()))
+            } finally {
+                CFRelease(der)
             }
         } finally {
             CFRelease(cert)

@@ -141,6 +141,17 @@ class AgentIdentityTest {
     }
 
     @Test
+    fun theCertificateSha256IsWhatBrowsersAndOpensslShow() {
+        val identity = AgentIdentityStore.generate()
+        val digest = MessageDigest.getInstance("SHA-256").digest(identity.certificate.encoded)
+
+        // `openssl x509 -fingerprint -sha256` and browsers: upper-case hex pairs joined by colons.
+        assertEquals(digest.joinToString(":") { "%02X".format(it) }, identity.certificateSha256)
+        assertEquals(32 * 3 - 1, identity.certificateSha256.length)
+        assertNotEquals(identity.fingerprint.toString().removePrefix("sha256:"), identity.certificateSha256.replace(":", "").lowercase())
+    }
+
+    @Test
     fun theSerialIsPositiveEvenWhenTheRandomBytesAreNot() {
         val keys = java.security.KeyPairGenerator.getInstance("EC").apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         fun serialOf(bytes: ByteArray): java.math.BigInteger {

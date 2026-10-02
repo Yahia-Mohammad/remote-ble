@@ -296,6 +296,6 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
 object IosKeychainTls : AgentTlsProvider {
     override suspend fun load(reset: Boolean): AgentTls = withContext(Dispatchers.Default) {
         val identity = IosAgentIdentityStore.loadOrCreate(reset)
-        AgentTls(identity.fingerprint, NetworkTlsFront(identity))
+        AgentTls(identity.fingerprint, NetworkTlsFront(identity), identity.certificateSha256)
     }
 }

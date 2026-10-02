@@ -100,6 +100,8 @@ fun main(args: Array<String>) {
     tlsFront?.first?.let { identity ->
         // The value a client pins. Printed rather than the pairing URI, so the token stays out of logs.
         Logger.info(LogTags.AGENT) { "Agent identity: ${identity.fingerprint}" }
+        // What a browser's warning shows for the https:// dashboard, to compare before accepting.
+        Logger.info(LogTags.AGENT) { "Certificate SHA-256 (as browsers show it): ${identity.certificateSha256}" }
     }
     Logger.info(LogTags.AGENT) { "Ownership grace: lease ${config.leaseGrace}, transport ${config.transportGrace}" }
     Logger.info(LogTags.AGENT) {

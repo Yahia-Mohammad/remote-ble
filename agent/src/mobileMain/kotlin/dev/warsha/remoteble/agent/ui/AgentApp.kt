@@ -246,6 +246,7 @@ fun AgentApp(
                                 scope.launch { persistEncryptPreference(choice) }
                             },
                             fingerprint = identities.identity?.fingerprint?.toString(),
+                            certificateSha256 = identities.identity?.certificateSha256,
                             failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
                         )
@@ -492,6 +493,7 @@ private fun EncryptionPanel(
     encrypt: Boolean,
     onEncryptChange: (Boolean) -> Unit,
     fingerprint: String?,
+    certificateSha256: String?,
     failure: String?,
     onReset: () -> Unit,
 ) {
@@ -519,6 +521,13 @@ private fun EncryptionPanel(
         Text("Agent fingerprint — clients pin this:", style = MaterialTheme.typography.bodySmall)
         SelectionContainer {
             Text(fingerprint, style = MaterialTheme.typography.bodySmall)
+        }
+        if (certificateSha256 != null) {
+            // Only the dashboard needs it: a browser cannot pin, and its warning names this instead.
+            Text("Certificate SHA-256, as a browser shows it for the dashboard:", style = MaterialTheme.typography.bodySmall)
+            SelectionContainer {
+                Text(certificateSha256, style = MaterialTheme.typography.bodySmall)
+            }
         }
         if (!running) {
             TextButton(onClick = { confirmReset = true }) { Text("New identity") }

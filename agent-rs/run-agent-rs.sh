@@ -17,13 +17,16 @@
 # On Linux (and other POSIX systems) there's no TCC dance: the binary is built and
 # run directly, talking to BlueZ over D-Bus.
 #
-# Usage:   agent-rs/run-agent-rs.sh [port]            (default 8080)
+# Usage:   agent-rs/run-agent-rs.sh [port] [agent args…]   (default 8080)
 #          REMOTE_BLE_TOKEN=secret agent-rs/run-agent-rs.sh 8080
+#          REMOTE_BLE_BIND=0.0.0.0 REMOTE_BLE_TOKEN=secret agent-rs/run-agent-rs.sh 8080 --tls --print-pairing
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${1:-8080}"
+# Everything after the port goes to the agent as is (--tls, --print-pairing, --reset-identity, …).
+AGENT_ARGS=("${@:2}")
 OS="$(uname -s)"
 
 log() { echo "==> $*"; }
@@ -155,7 +158,8 @@ if [ "$OS" = "Darwin" ]; then
   while IFS='=' read -r name _; do
     OPEN_ARGS+=(--env "$name=${!name}")
   done < <(env | grep '^REMOTE_BLE_[A-Z0-9_]*=' || true)
-  open "${OPEN_ARGS[@]}" --args --port "$PORT"
+  # ${a[@]+"${a[@]}"}: an empty array under `set -u` is an error in the bash 3.2 macOS ships.
+  open "${OPEN_ARGS[@]}" --args --port "$PORT" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
 
   cleanup() { echo; echo "==> Stopping agent…"; pkill -f "RemoteBleAgentRs.app/Contents/MacOS/agent-rs" 2>/dev/null || true; }
   trap cleanup INT TERM EXIT
@@ -164,5 +168,5 @@ if [ "$OS" = "Darwin" ]; then
 else
   log "Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1}…"
   export RUST_LOG="${RUST_LOG:-agent_rs=debug,info}"
-  exec "$BIN" --port "$PORT"
+  exec "$BIN" --port "$PORT" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
 fi

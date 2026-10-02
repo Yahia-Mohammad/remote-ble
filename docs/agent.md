@@ -213,7 +213,9 @@ fails inside the TLS handshake, before the bearer token is sent.
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
 
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
-each connection to CIO on an ephemeral loopback port. The front records which relay port belongs to
+each connection to CIO on an ephemeral loopback port. Its I/O blocks, so it runs on threads of its
+own, gives every handshake a 10 s deadline, and holds at most 16 connections per host and 128 in all;
+a connection over a limit is closed at once. The front records which relay port belongs to
 which real peer, and the rate limiter, the dashboard's own-device gate and the monitor all resolve the
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
 client look local. The design and the remaining phases (pairing QR codes, encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).

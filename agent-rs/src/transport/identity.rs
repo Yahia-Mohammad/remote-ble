@@ -173,6 +173,16 @@ fn read(path: &Path) -> Result<AgentIdentity, IdentityError> {
         path: path.to_path_buf(),
         source,
     })?;
+    if let Some(mode) = loose_mode(path) {
+        // A warning rather than a refusal: a container's mounted secret is often world-readable
+        // and owned by someone else, so the agent could neither fix it nor start.
+        tracing::warn!(
+            "agent identity {} is readable by other users (mode {mode:o}); anyone who can read it \
+             can impersonate this agent. Restrict it: chmod 600 {}",
+            path.display(),
+            path.display()
+        );
+    }
     let key = PrivatePkcs8KeyDer::from_pem_slice(&pem)
         .map_err(|e| invalid(format!("no PKCS#8 PRIVATE KEY block ({e})")))?;
     let certificate = CertificateDer::from_pem_slice(&pem)
@@ -193,6 +203,22 @@ fn read(path: &Path) -> Result<AgentIdentity, IdentityError> {
         certificate,
         key,
     })
+}
+
+/// The permission bits of `path` if group or others may access it. Always `None` off Unix, where
+/// the per-user directory's ACL is the protection.
+fn loose_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Publishes `pem` at `path` without ever replacing an existing file, so a concurrent creator's
@@ -375,6 +401,23 @@ mod tests {
         load_or_create(&dir.join(FILE_NAME), false).unwrap();
 
         assert_eq!(fs::read_to_string(&foreign).unwrap(), "in progress");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_others_can_read_is_reported_and_an_owner_only_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("loose");
+        let path = dir.join(FILE_NAME);
+        load_or_create(&path, false).unwrap();
+        assert_eq!(loose_mode(&path), None);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(loose_mode(&path), Some(0o644));
+        // Still loads: the warning is the whole response.
+        assert!(load_or_create(&path, false).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 

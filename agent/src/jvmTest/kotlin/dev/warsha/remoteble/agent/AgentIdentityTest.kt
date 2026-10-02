@@ -11,6 +11,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AgentIdentityTest {
@@ -91,6 +92,19 @@ class AgentIdentityTest {
             assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(path)))
         }
         assertEquals(listOf("agent-identity.pem"), Files.list(dir).map { it.fileName.toString() }.toList(), "no temp file left behind")
+    }
+
+    @Test
+    fun aFileOthersCanReadIsReportedButStillLoads() {
+        val path = dir.resolve("agent-identity.pem")
+        val created = AgentIdentityStore.loadOrCreate(path)
+        if (!path.fileSystem.supportedFileAttributeViews().contains("posix")) return
+        assertNull(AgentIdentityStore.looseMode(path))
+
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-r--r--"))
+
+        assertEquals("rw-r--r--", AgentIdentityStore.looseMode(path))
+        assertEquals(created.fingerprint, AgentIdentityStore.loadOrCreate(path).fingerprint)
     }
 
     @Test

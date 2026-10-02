@@ -8,6 +8,7 @@ import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -80,6 +81,14 @@ object AgentIdentityStore {
 
     private fun read(path: Path): AgentTlsIdentity {
         val pem = Files.readString(path)
+        looseMode(path)?.let { mode ->
+            // A warning rather than a refusal: a container's mounted secret is often world-readable
+            // and owned by someone else, so the agent could neither fix it nor start.
+            Logger.warn(LogTags.AGENT) {
+                "agent identity $path is readable by other users ($mode); anyone who can read it can " +
+                    "impersonate this agent. Restrict it: chmod 600 $path"
+            }
+        }
         val key = pemBlock(pem, "PRIVATE KEY") ?: error("$path has no PRIVATE KEY block")
         val cert = pemBlock(pem, "CERTIFICATE") ?: error("$path has no CERTIFICATE block")
         return AgentTlsIdentity(
@@ -87,6 +96,15 @@ object AgentIdentityStore {
             parseCertificate(cert),
         )
     }
+
+    /** The file's permissions if group or others may access it; `null` where POSIX ones don't exist. */
+    internal fun looseMode(path: Path): String? {
+        if (!path.fileSystem.supportedFileAttributeViews().contains("posix")) return null
+        val permissions = Files.getPosixFilePermissions(path)
+        return PosixFilePermissions.toString(permissions).takeIf { permissions.any { it !in OWNER_ONLY } }
+    }
+
+    private val OWNER_ONLY = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE)
 
     private fun write(path: Path, identity: AgentTlsIdentity) {
         val dir = path.toAbsolutePath().parent

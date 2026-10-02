@@ -209,7 +209,7 @@ fails inside the TLS handshake, before the bearer token is sent.
 | Setting | Meaning |
 |---|---|
 | `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Off by default for now. |
-| `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions. |
+| `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions; a file other users can read still loads, with a warning, since a mounted container secret often cannot be narrowed. |
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
 
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays

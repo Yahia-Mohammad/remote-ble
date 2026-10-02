@@ -55,6 +55,9 @@ class AgentMonitor : AgentObserver {
         append("client #$id disconnected" + if (dropped.isNotEmpty()) " (released ${dropped.size} device(s))" else "")
     }
 
+    /** An agent-level event for the activity log: one about the agent itself, not a client. */
+    fun agentEvent(message: String): Unit = synchronized(lock) { append(message) }
+
     // --- AgentObserver (device lifecycle, from BleAgent) ---
 
     override fun onClientLog(clientId: Long, message: String) = synchronized(lock) {

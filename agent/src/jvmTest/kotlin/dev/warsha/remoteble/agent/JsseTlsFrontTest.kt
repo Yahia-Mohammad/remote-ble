@@ -54,7 +54,7 @@ class JsseTlsFrontTest {
         maxPerHost: Int = JsseTlsFront.MAX_PER_HOST,
         maxConnections: Int = JsseTlsFront.MAX_CONNECTIONS,
     ): TlsFront = runBlocking {
-        JsseTlsFront(identity, handshakeTimeout, maxPerHost, maxConnections).start("127.0.0.1", 0, upstream.localPort)
+        JsseTlsFront(identity, handshakeTimeout, maxPerHost, maxConnections).start("127.0.0.1", 0, upstream.localPort) {}
     }.also { fronts += it }
 
     private fun connect(port: Int): Socket = Socket("127.0.0.1", port).also { sockets += it }

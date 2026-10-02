@@ -58,7 +58,8 @@ class JsseTlsFront internal constructor(
 
     constructor(identity: AgentTlsIdentity) : this(identity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
 
-    override suspend fun start(host: String, port: Int, upstreamPort: Int): TlsFront = withContext(Dispatchers.IO) {
+    // onFailure goes unused: the accept loop survives everything but a closed listener.
+    override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront = withContext(Dispatchers.IO) {
         val server = try {
             context().serverSocketFactory.createServerSocket(port, BACKLOG, InetAddress.getByName(host)) as SSLServerSocket
         } catch (failure: IOException) {

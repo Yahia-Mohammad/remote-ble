@@ -11,7 +11,10 @@ The image is a multi-stage Debian build: Cargo and compiler tooling stay in the 
 contains only the Rust agent binary, `libdbus-1`, CA certificates, and the license metadata. It runs
 as the fixed non-root `remoteble` user, defaults to `0.0.0.0:8080`, and has no baked credential.
 The agent therefore fails closed if the port is exposed without `REMOTE_BLE_TOKEN` or
-`REMOTE_BLE_TOKENS`.
+`REMOTE_BLE_TOKENS`. It serves `wss://` (`REMOTE_BLE_TLS=true`) with an identity kept on the
+`/var/lib/remoteble` volume; mount one, or every new container is a new identity its clients must
+pair with again. Cleartext on the published port takes both `REMOTE_BLE_TLS=false` and
+`REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true`, and the smoke test checks it is refused otherwise.
 
 On a supported Linux host, mount the host system D-Bus socket and supply a credential:
 
@@ -21,8 +24,12 @@ docker run --rm --name remoteble-agent -p 8080:8080 \
   -e REMOTE_BLE_POLICY_FILE=/etc/remoteble/policy.json \
   -v /srv/remoteble/policy.json:/etc/remoteble/policy.json:ro \
   -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
-  remoteble-agent-rs:local
+  -v remoteble-identity:/var/lib/remoteble \
+  remoteble-agent-rs:local --print-pairing
 ```
+
+`--print-pairing` prints the link clients pair with; its host is the container's own address, so
+behind a published port give clients the host's address with the same token and fingerprint.
 
 `REMOTE_BLE_POLICY_FILE` (or `--policy-file`) loads the strict per-principal write policy before
 the BLE backend or listener starts. Mount it read-only: an absent file is permissive for backward

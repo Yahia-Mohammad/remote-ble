@@ -21,6 +21,8 @@ android-min = "24"
 android-minCompile = "36"
 # Pinned into AGP's Unified Test Platform configurations only; see the root build.gradle.kts.
 netty = "4.1.138.Final"
+# Build tooling only (AGP, lint, KGP publishing validation); pinned in the root build script.
+bouncycastle = "1.86"
 
 # Publishing to Maven Central (Central Portal) for :protocol + :client-sdk.
 vanniktech-publish = "0.37.0"

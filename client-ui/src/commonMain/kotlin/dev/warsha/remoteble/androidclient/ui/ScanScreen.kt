@@ -48,6 +48,7 @@ fun ScanScreen(
     onStopScan: () -> Unit,
     onUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
+    onPairingOffered: (String) -> Boolean,
     onConnectDevice: (DiscoveredDevice) -> Unit,
     onHideUnnamedChanged: (Boolean) -> Unit,
 ) {
@@ -63,11 +64,13 @@ fun ScanScreen(
         AgentEndpointCard(
             url = state.agentUrl,
             token = state.agentToken,
+            fingerprint = state.agentFingerprint,
             isScanning = state.isScanning,
             onStartScan = onStartScan,
             onStopScan = onStopScan,
             onUrlChanged = onUrlChanged,
             onTokenChanged = onTokenChanged,
+            onPairingOffered = onPairingOffered,
         )
 
         Text(
@@ -131,11 +134,13 @@ private fun Header(isScanning: Boolean) {
 private fun AgentEndpointCard(
     url: String,
     token: String,
+    fingerprint: String?,
     isScanning: Boolean,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
+    onPairingOffered: (String) -> Boolean,
 ) {
     // Confirm before connecting with no token: the endpoint is unauthenticated, which only makes
     // sense against a token-free agent (e.g. the JVM CLI). The mobile agents always require one.
@@ -170,6 +175,37 @@ private fun AgentEndpointCard(
             colors = endpointFieldColors(),
             shape = RoundedCornerShape(8.dp),
         )
+
+        // What a pairing gave this connection: the app can say "encrypted" instead of warning that
+        // the network must be trusted.
+        Text(
+            text = if (fingerprint != null) "Paired · encrypted · pinned to ${fingerprint.take(19)}…" else "Not paired: unpinned",
+            color = if (fingerprint != null) AppColors.accent else AppColors.onSurfaceMuted,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // The agent's pairing link, pasted with the system's own paste. Opening one from a QR code
+        // arrives the same way, through the link the app registers.
+        var link by remember { mutableStateOf("") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = link,
+                onValueChange = { link = it },
+                enabled = !isScanning,
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                label = { Text("Pairing link (remoteble://…)") },
+                colors = endpointFieldColors(),
+                shape = RoundedCornerShape(8.dp),
+            )
+            TextButton(
+                enabled = !isScanning && link.isNotBlank(),
+                onClick = { if (onPairingOffered(link)) link = "" },
+            ) { Text("Pair") }
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 

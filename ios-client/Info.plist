@@ -18,6 +18,19 @@
     <string>0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- An agent's pairing link (remoteble://host:port?token=…&fp=…): the Camera app offers to open
+         it in this app when it reads the agent's QR code. The app confirms before using it. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>dev.warsha.remoteble.pairing</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>remoteble</string>
+            </array>
+        </dict>
+    </array>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <!-- The agent speaks ws:// (cleartext), same as android-client's network_security_config.xml.

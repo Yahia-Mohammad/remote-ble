@@ -128,6 +128,9 @@ fun AgentApp(
             } catch (e: Exception) {
                 Logger.error(LogTags.AGENT, e) { "could not load the agent identity" }
                 identityFailure = "Could not load this agent's identity; check the local log."
+                // A reset may have deleted the old key before failing, so the identity on screen
+                // could be one that no longer exists; Start loads afresh instead.
+                if (reset) identity = null
                 null
             }
         }

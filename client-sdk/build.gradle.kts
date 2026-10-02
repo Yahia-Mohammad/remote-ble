@@ -54,10 +54,15 @@ kotlin {
         commonMain.dependencies {
             api(project(":protocol"))
             api(project(":log"))
-            implementation(libs.kotlinx.coroutines.core)
+            // `api`, because the public API names their types: CoroutineScope, Flow and StateFlow
+            // throughout, and HttpClient in every client factory and the transport's constructor.
+            // As `implementation` the POM scoped them `runtime`, and a consumer calling
+            // defaultWebSocketHttpClient() failed to compile with "Cannot access class
+            // io.ktor.client.HttpClient". Coroutines only compiled by arriving through Kable.
+            api(libs.kotlinx.coroutines.core)
             // WebSocket transport. The HttpClient engine is supplied per-platform via
             // the `defaultWebSocketHttpClient()` expect/actual.
-            implementation(libs.ktor.client.core)
+            api(libs.ktor.client.core)
             implementation(libs.ktor.client.websockets)
             // Kable: RemotePeripheral implements its Peripheral interface, so the
             // types are part of this module's public API (hence `api`).

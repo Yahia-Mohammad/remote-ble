@@ -18,9 +18,9 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> Agent app changes only. The Android and iOS agent apps are built from source rather than shipped
-> as release assets, and none of the published packages change, so these need no release of their
-> own.
+> The agent app entries need no release of their own: the Android and iOS agent apps are built from
+> source rather than shipped as release assets. The `client-sdk` dependency-scope fix below changes a
+> published POM and ships with the next release.
 
 ### Added
 
@@ -37,6 +37,12 @@ protocol version: **1**.
   The app now requests it with the Bluetooth permissions, and if it is denied says so and shows no
   unreachable LAN address. Start is not gated on it, since loopback and `adb forward` still work —
   see [#33](https://github.com/Yahia-Mohammad/remote-ble/issues/33).
+- **`client-sdk` consumers on the JVM and Android compile without declaring Ktor themselves.** The
+  SDK's API names `io.ktor.client.HttpClient` (every client factory, the transport's constructor) and
+  kotlinx-coroutines types throughout, but published both with `runtime` scope. A consumer calling
+  `defaultWebSocketHttpClient()` failed with "Cannot access class 'io.ktor.client.HttpClient'"
+  unless it added `ktor-client-core` itself. Both are now `compile` dependencies. Apple consumers were
+  unaffected: Kotlin/Native resolves a library's full dependency closure at compile time.
 
 ## [0.13.0] - 2026-09-29
 

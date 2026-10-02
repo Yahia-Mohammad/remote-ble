@@ -11,6 +11,7 @@ import dev.warsha.remoteble.agent.TlsFront
 import dev.warsha.remoteble.log.LogLevel
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
@@ -109,6 +110,24 @@ class TlsPinningEndToEndTest {
         val value = peripheral.read(char)
 
         assertEquals(listOf<Byte>(0x42, 0x07), value.toList())
+    }
+
+    @Test
+    fun aPairingUriConnectsPinnedWithItsTokenAndAnotherIdentityIsRefused() = runBlocking<Unit> {
+        val server = AgentWebSocketServer(port = 0, authToken = "pairing-token", tls = JsseTlsFront(identity))
+            .also { servers += it }.startAndAwaitReady()
+        fun transportFor(pairing: AgentPairing) =
+            WebSocketAgentTransport(pairing.url, scope, pairingWebSocketHttpClient(pairing).also { clients += it }, authToken = { pairing.token })
+
+        // Through the URI, as a client that scanned or pasted it would.
+        val paired = AgentPairing.parse(AgentPairing("127.0.0.1", server.resolvedPort, "pairing-token", identity.fingerprint).toUri())
+        val transport = transportFor(paired)
+        transport.connect()
+        withTimeout(10.seconds) { transport.state.first { it == TransportState.CONNECTED } }
+
+        val impostor = AgentIdentityStore.loadOrCreate(dir.resolve("impostor.pem")).fingerprint
+        val misled = AgentPairing("127.0.0.1", server.resolvedPort, "pairing-token", impostor)
+        assertFailsWith<AgentIdentityMismatchException> { transportFor(misled).connect() }
     }
 
     @Test

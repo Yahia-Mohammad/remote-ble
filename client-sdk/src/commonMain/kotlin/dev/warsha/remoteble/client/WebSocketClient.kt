@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.client
 
 import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import io.ktor.client.HttpClient
 
 /**
@@ -28,3 +29,18 @@ expect fun defaultWebSocketHttpClient(): HttpClient
  * JVM: Ktor CIO (TLS 1.2). Android: OkHttp. iOS and macOS: Darwin (NSURLSession).
  */
 expect fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient
+
+/**
+ * The [HttpClient] for an agent reached through [pairing]: [pinnedWebSocketHttpClient] whenever the
+ * pairing carries a fingerprint, so a paired encrypted agent is only ever trusted by its pin, and
+ * [defaultWebSocketHttpClient] for a cleartext one. Connect with
+ *
+ * ```
+ * WebSocketAgentTransport(pairing.url, scope, pairingWebSocketHttpClient(pairing), authToken = { pairing.token })
+ * ```
+ *
+ * The caller owns the client and closes it, as with the other factories. On Android a cleartext
+ * pairing meets OkHttp's network security policy; see [defaultWebSocketHttpClient].
+ */
+fun pairingWebSocketHttpClient(pairing: AgentPairing): HttpClient =
+    pairing.fingerprint?.let(::pinnedWebSocketHttpClient) ?: defaultWebSocketHttpClient()

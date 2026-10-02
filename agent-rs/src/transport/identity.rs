@@ -289,13 +289,14 @@ pub fn certificate_spki(certificate: &[u8]) -> Option<&[u8]> {
     let mut rest = tbs.get(tbs_header..)?;
     for _ in 0..6 {
         let (h, len) = header(rest)?;
-        rest = rest.get(h + len..)?;
+        rest = rest.get(h.checked_add(len)?..)?;
     }
     let (h, len) = header(rest)?;
     if rest.first() != Some(&0x30) {
         return None; // an SPKI is a SEQUENCE
     }
-    rest.get(..h + len)
+    // Checked: on a 32-bit target a four-byte length plus its header can overflow usize.
+    rest.get(..h.checked_add(len)?)
 }
 
 #[cfg(test)]

@@ -15,7 +15,6 @@ import kotlinx.cinterop.toKString
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import platform.Network.nw_connection_cancel
 import platform.Network.nw_connection_copy_current_path
 import platform.Network.nw_connection_copy_endpoint
@@ -152,13 +151,9 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
             nw_listener_set_new_connection_handler(created) { connection -> accept(connection) }
             nw_listener_start(created)
             // Bounded like the plain listener's bind: a listener left waiting for a usable network
-            // would otherwise hold Start forever. Whatever ends the wait early, the listener goes.
-            boundPort = try {
-                withTimeoutOrNull(AgentWebSocketServer.BIND_TIMEOUT) { ready.await() }
-                    ?: throw AgentBindException(host, port, null)
-            } catch (failure: Throwable) {
-                nw_listener_cancel(created)
-                throw failure
+            // would otherwise hold Start forever.
+            boundPort = awaitListening(ready, AgentWebSocketServer.BIND_TIMEOUT, cancel = { nw_listener_cancel(created) }) {
+                AgentBindException(host, port, null)
             }
         }
 

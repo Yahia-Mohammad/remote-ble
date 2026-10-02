@@ -46,8 +46,10 @@ import dev.warsha.remoteble.agent.LogTags
 import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.AgentSecret
 import dev.warsha.remoteble.agent.loadPersistedToken
+import dev.warsha.remoteble.agent.lanIPv4Address
 import dev.warsha.remoteble.agent.persistToken
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.BleRadioState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -238,6 +240,26 @@ fun AgentApp(
                             fingerprint = identities.identity?.fingerprint?.toString(),
                             failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
+                        )
+                    }
+                }
+
+                if (running) {
+                    item {
+                        val host = lanIPv4Address()
+                        val runningToken = token
+                        PairingPanel(
+                            pairing = if (host != null && runningToken != null) {
+                                AgentPairing(
+                                    host = host,
+                                    port = config.port,
+                                    token = runningToken,
+                                    fingerprint = identities.identity?.fingerprint?.takeIf { servingTls },
+                                )
+                            } else {
+                                null
+                            },
+                            unavailable = if (host == null) "No Wi-Fi or LAN address to pair over." else null,
                         )
                     }
                 }

@@ -41,6 +41,11 @@ client-sdk/src/
   androidMain/…/WebSocketClient.android.kt  actual → Ktor OkHttp
   appleMain/…/WebSocketClient.apple.kt      actual → Ktor Darwin (iOS + macOS)
 
+  commonMain/…/WebSocketClient.kt          expect fun pinnedWebSocketHttpClient(fingerprint)
+  jvmMain/…/PinnedWebSocketClient.kt        actual → CIO + PinningTrustManager (jsseMain)
+  androidMain/…/PinnedWebSocketClient.android.kt  actual → OkHttp + the same trust manager
+  appleMain/…/PinnedWebSocketClient.apple.kt actual → Darwin challenge handler + certificateSpki
+
   commonMain/…/RemoteIdentifier.kt         expect fun deviceHandleToIdentifier(value)
   jvmMain/…/RemoteIdentifier.jvm.kt         actual → value.toIdentifier() (opaque PeripheralId)
   androidMain/…/RemoteIdentifier.android.kt actual → the String as-is (no MAC check)
@@ -54,7 +59,7 @@ client-sdk/src/
 ./gradlew :protocol:jvmTest          # round-trip + Rust-interop suite (41 tests)
 ./gradlew :client-sdk:jvmTest        # session / transport / kable / error-path / identifier suites
 ./gradlew conformanceTest            # named cross-agent conformance gate
-(cd agent-rs && cargo test)          # native Rust agent: 113 unit + cross-language interop tests
+(cd agent-rs && cargo test)          # native Rust agent: 208 unit, interop and TLS tests
 agent/run-agent.sh 8080                                       # run the real macOS JVM agent (NOT :agent:jvmRun)
 ./gradlew :agent:jvmRun --args="--simulate agent/simulation/sim-hrm.json" # deterministic no-radio JVM agent
 agent-rs/run-agent-rs.sh 8080                                 # run the native Rust agent on macOS (Linux/Win: cargo run --bin agent-rs)
@@ -169,27 +174,46 @@ suites execute natively on an Apple target on every push.
 
 ## The test suite
 
-**140 tests, JVM-run.** The suites below total 138; the other two are the Koin graph-verify
-tests (`AgentKoinTest`, `ClientKoinTest`). The end-to-end tests stand up a real agent via the
-test-only `:client-sdk → :agent` dependency.
+**Counts as of 2026-10-02 (0.14.0):** `:protocol` 61 (run on the JVM, the iOS simulator and
+macOS), `:log` 14, `:agent` 233 on the JVM and 189 as Android host tests (largely the same
+`commonTest`), `:client-sdk` 119 on the JVM, 6 Android host and 4 on Apple, `:client-ui` 26 Android
+host; `agent-rs` 208. The tables name the main suites; the end-to-end tests stand up a real agent
+via the test-only `:client-sdk → :agent` dependency.
 
 | Module | Suite | Tests | What it proves |
 |---|---|---|---|
-| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt) | 31 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events (`rssi`, `conn.params` with/without `hint`) |
-| `:protocol` | [`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt) | 8 | the **native Rust agent**'s exact CBOR output (definite-length, signed-byte arrays, `gattStatus`) decodes to the right Kotlin frames — cross-language wire compat |
-| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/BleAgentTest.kt) | 26 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority/conn-params/rssi dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
-| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PeripheralRegistryTest.kt) | 9 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows, unsolicited-drop propagation |
-| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/ConnectionWatcherTest.kt) | 5 | unsolicited-drop detection via `BleBackend.isConnected`/liveness probe: starts the release grace on a drop, leaves a live link alone, a throwing client can't kill the watcher |
-| `:agent` | [`HandleTranslatorTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/HandleTranslatorTest.kt) | 10 | agent-side device-handle translation into each client's `IdentifierFormat`: identity fast-paths, cross-platform rewrite + reverse-map, deterministic UUID/MAC synthesis, strict-mode + Android pass-through |
-| `:agent` | [`EngineBleBackendJvmTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/EngineBleBackendJvmTest.kt) | 4 | the JVM/`btleplug` engine advertises `descriptors` but not `rssi`/`conn.params`/`conn.priority` (degrade to `UNSUPPORTED`), and `CharNode.properties` carries real bits |
-| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/SessionEndToEndTest.kt) | 16 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority/conn-params round-trips, batched-scan flattening |
-| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt) | 12 | full op set over a real WS, restart→reconnect, subscription + conn-params replay, disconnect-not-replayed, auth accept/reject |
-| `:client-sdk` | [`BleAgentOverWebSocketTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/BleAgentOverWebSocketTest.kt) | 1 | the **production** agent handler over a real WS (stub radio) |
-| `:client-sdk` | [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt) | 5 | app code vs Kable's `Peripheral` runs unchanged remotely; observe; scan+factory; negotiated-MTU; factory threads an injected `DispatcherProvider` into the peripheral scope |
+| `:protocol` | [`ProtocolCodecTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/ProtocolCodecTest.kt) | 37 | every wire variant round-trips through the codec (structural equality) — incl. the handshake frames and the extension ops/events (`rssi`, `conn.params` with/without `hint`) |
+| `:protocol` | [`RustAgentInteropTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/RustAgentInteropTest.kt) | 11 | the **native Rust agent**'s exact CBOR output (definite-length, signed-byte arrays, `gattStatus`) decodes to the right Kotlin frames — cross-language wire compat |
+| `:agent` | [`BleAgentTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/BleAgentTest.kt) | 63 | op routing, slot cap + release, backend→`ErrorKind` mapping, scan/observe streaming, capability-handshake intersection, descriptor/pairing/conn-priority/conn-params/rssi dispatch + `UNSUPPORTED` fallback, slot events, batched scan |
+| `:agent` | [`PeripheralRegistryTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PeripheralRegistryTest.kt) | 16 | exclusive peripheral ownership: lease/resume, transport- and BLE-disconnect grace windows, unsolicited-drop propagation |
+| `:agent` | [`ConnectionWatcherTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/ConnectionWatcherTest.kt) | 6 | unsolicited-drop detection via `BleBackend.isConnected`/liveness probe: starts the release grace on a drop, leaves a live link alone, a throwing client can't kill the watcher |
+| `:agent` | [`HandleTranslatorTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/HandleTranslatorTest.kt) | 12 | agent-side device-handle translation into each client's `IdentifierFormat`: identity fast-paths, cross-platform rewrite + reverse-map, deterministic UUID/MAC synthesis, strict-mode + Android pass-through |
+| `:agent` | [`EngineBleBackendJvmTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/EngineBleBackendJvmTest.kt) | 19 | the JVM/`btleplug` engine advertises `descriptors` but not `rssi`/`conn.params`/`conn.priority` (degrade to `UNSUPPORTED`), and `CharNode.properties` carries real bits |
+| `:client-sdk` | [`SessionEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/SessionEndToEndTest.kt) | 23 | session over in-memory transport: ops resolve, observe/scan stream + tear down, timeout, drop, per-op timeouts, capability negotiation + `awaitCapabilities`/`supportsCapability` helpers, descriptor/pairing/conn-priority/conn-params round-trips, batched-scan flattening |
+| `:client-sdk` | [`WebSocketEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/WebSocketEndToEndTest.kt) | 24 | full op set over a real WS, restart→reconnect, subscription + conn-params replay, disconnect-not-replayed, auth accept/reject |
+| `:client-sdk` | [`BleAgentOverWebSocketTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/BleAgentOverWebSocketTest.kt) | 3 | the **production** agent handler over a real WS (stub radio) |
+| `:client-sdk` | [`KableAdapterTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/KableAdapterTest.kt) | 6 | app code vs Kable's `Peripheral` runs unchanged remotely; observe; scan+factory; negotiated-MTU; factory threads an injected `DispatcherProvider` into the peripheral scope |
 | `:client-sdk` | [`RetryPolicyTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/RetryPolicyTest.kt) | 5 | default retry policy per op: connect retries a transient error, writes don't; per-call override + `None`; a permanent error is never retried |
-| `:client-sdk` | [`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/ErrorPathTest.kt) | 3 | write/read rejection surfaces + session stays usable; disconnect reflected in Kable state |
+| `:client-sdk` | [`ErrorPathTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/ErrorPathTest.kt) | 5 | write/read rejection surfaces + session stays usable; disconnect reflected in Kable state |
 | `:client-sdk` | [`RemoteAdvertisementIdentifierTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/RemoteAdvertisementIdentifierTest.kt) | 1 | reading a remote advertisement's `identifier` for a UUID handle doesn't throw (the Android MAC-validation crash) |
 | `:client-sdk` | [`RemoteIdentifierJvmTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/RemoteIdentifierJvmTest.kt) | 2 | a peripheral's `identifier` round-trips a UUID handle on a macOS host; a foreign-format handle surfaces a clear exception off-macOS |
+
+### Encryption and pairing
+
+| Module | Suite | What it proves |
+|---|---|---|
+| `:protocol` | [`AgentFingerprintTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/AgentFingerprintTest.kt), [`AgentPairingTest`](../protocol/src/commonTest/kotlin/dev/warsha/remoteble/protocol/AgentPairingTest.kt) | `sha256:<hex>` parses ASCII hex only; the pairing URI parses strictly, writes back exactly, keeps the token out of `toString`, and shares one example string with the Rust agent |
+| `:agent` | [`AgentIdentityTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/AgentIdentityTest.kt) | the self-signed certificate's shape, a stable identity across loads, owner-only file, a key not matching its certificate refused, the certificate SHA-256 as browsers show it |
+| `:agent` | [`JsseTlsFrontTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/JsseTlsFrontTest.kt), [`TlsFrontFailureTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/TlsFrontFailureTest.kt), [`AwaitListeningTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/AwaitListeningTest.kt) | the JVM/Android front's handshake deadline, its own thread pool, per-host and total limits, accept-loop recovery, AEAD-only suites; a late listener failure reaching the activity log; the iOS listener's bounded start |
+| `:agent` | [`MainTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/MainTest.kt), [`ClientCredentialsTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/ClientCredentialsTest.kt), [`PairingQrTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PairingQrTest.kt) | TLS-PIN-05's cleartext gate, `--print-pairing`, one pairing per live credential, the pairing host, the QR code's shape and SVG |
+| `:agent` | [`AgentIdentityLoaderTest`](../agent/src/androidHostTest/kotlin/dev/warsha/remoteble/agent/ui/AgentIdentityLoaderTest.kt) | the phone UI never offers an identity a failed reset deleted |
+| `:client-sdk` | [`TlsPinningEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/TlsPinningEndToEndTest.kt) | `TLS-PIN-01`–`04`, `06`, `07` against the real front with the CIO client: pinned ops, a wrong pin refused before any request, restart and reset, lease resume, the real peer behind the relay (also during startup), a pairing URI connecting, the dashboard's pairing |
+| `:client-sdk` | [`OkHttpPinningTest`](../client-sdk/src/androidHostTest/kotlin/dev/warsha/remoteble/client/OkHttpPinningTest.kt), [`CertificateSpkiTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/CertificateSpkiTest.kt), [`PendingRefusalsTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/PendingRefusalsTest.kt) | the Android client's pinning; the SPKI the Apple client hashes equals the JDK's; Apple refusals keyed by origin |
+| `:client-ui` | [`PairingFlowTest`](../client-ui/src/commonTest/kotlin/dev/warsha/remoteble/androidclient/PairingFlowTest.kt) | a pairing link is held for confirmation, applied whole, dismissible, and its pin dropped when the address is edited |
+
+Hardware-only checks (the phone agents, the Apple client end to end) use
+`./gradlew :e2e-runner:pinRun`; the evidence is in
+[the decision record](proposals/agent-transport-encryption.md#10-progress).
 
 ### The test doubles
 
@@ -218,7 +242,7 @@ The fakes are first-class — they're what made hardware-free development possib
 
 ## The native Rust agent (`agent-rs`) tests
 
-Run with `cd agent-rs && cargo test` — **40 tests**, no hardware. Alongside the codec
+Run with `cd agent-rs && cargo test` — **208 tests**, no hardware. Alongside the codec
 round-trips and `PeripheralRegistry` lease/slot tests, the key suite is
 [`src/protocol/interop_tests.rs`](../agent-rs/src/protocol/interop_tests.rs): it decodes
 **byte-for-byte CBOR captured from the Kotlin codec** and asserts the reconstructed

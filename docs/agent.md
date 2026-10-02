@@ -188,12 +188,13 @@ live WebSocket generation is permitted per `(principal, stable client id)` — a
 
 Desktop/headless agents **bind loopback by default**; a non-loopback bind requires at least one
 credential (or the explicit `REMOTE_BLE_ALLOW_INSECURE_LAN` development override, which logs a
-prominent unencrypted-service warning). The supported encrypted deployment is a TLS-terminating
-reverse proxy or VPN with a local-only upstream — see
-[tls-proxy-recipe.md](tls-proxy-recipe.md) for the verified `wss://` recipe (Caddy config, CA
-handling, and the checks that prove the proxy forwards the bearer header and fails closed on an
-untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
-hook, not a framework.
+prominent warning) and serves `wss://` with the agent's own pinned identity (`--tls`, below), unless
+`REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` explicitly keeps it cleartext. Where clients must validate a
+certificate authority instead of pinning, put a TLS-terminating reverse proxy in front of a
+loopback-bound agent — see [tls-proxy-recipe.md](tls-proxy-recipe.md) for the verified recipe (Caddy
+config, CA handling, and the checks that prove the proxy forwards the bearer header and fails closed
+on an untrusted certificate). The SDK owns no user-identity system beyond these bearer credentials;
+it is a hook, not a framework.
 
 ### Built-in TLS with a pinned identity (all agents)
 
@@ -213,7 +214,7 @@ fails inside the TLS handshake, before the bearer token is sent.
 | `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` | Let a non-loopback bind serve cleartext `ws://` without `--tls` (TLS-PIN-05). Without it such a bind refuses to start, naming both ways out; with it the agent warns that the token and BLE traffic cross the network readable. `agent-rs` also takes `--allow-cleartext-lan`. |
 | `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions; a file other users can read still loads, with a warning, since a mounted container secret often cannot be narrowed. A key that does not belong to the certificate is refused. |
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
-| `--print-pairing` | Print the pairing URI a client takes in (`Pairing: remoteble://…`, [spec §3.2](agent-conformance-spec.md)), one line per credential. It carries the token, so it goes to standard output, never the log, and is a flag only, with no variable. The host is the bound address, or for `0.0.0.0` the address of the interface carrying the default route; with no route, loopback and a warning to `--bind` the LAN address. |
+| `--print-pairing` | Print the pairing URI a client takes in (`Pairing: remoteble://…`, [spec §3.2](agent-conformance-spec.md)), one line per credential. It carries the token, so it goes to standard output, never the log, and is a flag only, with no variable. Both launch scripts pass it through (`agent/run-agent.sh 8080 --tls --print-pairing`); on macOS they stream the agent's output from a file (`agent/build/macos-app/agent.log`, `agent-rs/target/macos-app/agent.log`), so the line, token included, is written there too.  The host is the bound address, or for `0.0.0.0` the address of the interface carrying the default route; with no route, loopback and a warning to `--bind` the LAN address. |
 
 Ktor's CIO server cannot serve TLS, so an in-process front (`JsseTlsFront`) terminates it and relays
 each connection to CIO on an ephemeral loopback port. Its I/O blocks, so it runs on threads of its

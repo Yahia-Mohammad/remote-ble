@@ -278,6 +278,30 @@ instead of replayed stale, and the SDK never caches it — the embedder owns tok
 lifecycle. The SDK deliberately owns no identity system beyond the shared token; richer
 auth is the embedder's concern.
 
+## Transport security: TLS with a pinned key, not a CA, not Noise
+
+The bearer token is only as private as the link it crosses, so an agent the network can reach
+serves `wss://` itself, with a long-lived self-signed certificate whose **public key the client
+pins** (`sha256:<hex>` of its SPKI). Full reasoning, including the rejected options, is in the
+[decision record](proposals/agent-transport-encryption.md); the points that shape the code:
+
+- **TLS rather than a Noise handshake inside the WebSocket**, because only TLS protects the browser
+  dashboard, and because it leaves the wire protocol untouched: a third-party client needs only a TLS
+  library with a pin hook, not a new handshake to implement.
+- **A pin rather than a certificate authority**, because agents are reached by IP addresses that
+  change, on networks with no domain or CA. Pinning the key rather than the certificate lets an
+  agent reissue its certificate without breaking pairings; only an explicit reset changes identity.
+- **The check runs in the TLS handshake**, before the upgrade request, so a token is never sent to
+  an impostor, and the failure is **terminal** (`AgentIdentityMismatchException`, `GAVE_UP`): the
+  agent is reachable, just not the one paired with, which no retry can fix.
+- **Pairing hands over everything at once** (address, token, fingerprint, as a URI or QR code),
+  because a pin typed by hand is where pinning schemes fail.
+- **The Kotlin agents terminate TLS in a front, not in Ktor**, because the CIO server has no TLS on
+  any platform. The front relays to loopback and records each relay's real peer, so rate limiting
+  and the dashboard's own-device gate still see the client, not the relay.
+- **Cleartext needs an explicit choice** wherever the network can reach an agent; loopback keeps it,
+  since a tunnel or a CA-backed proxy in front carries the encryption instead.
+
 ## CBOR by default, JSON for debugging
 
 Reads/writes/notifications carry raw `ByteArray`s, so a binary wire format is the
@@ -475,12 +499,12 @@ These are deliberate v1 cuts, each a clean extension:
 
 | | Version | Note |
 |---|---|---|
-| Kotlin | 2.4.0 | matches the Kable checkout this project builds against |
+| Kotlin | 2.4.10 | |
 | kotlinx-coroutines | 1.11.0 | |
-| kotlinx-serialization (+cbor) | 1.9.0 | wire codec |
-| Ktor | 3.5.0 | client (transport) + server (agent) |
+| kotlinx-serialization (+cbor) | 1.11.0 | wire codec |
+| Ktor | 3.5.1 | client (transport) + server (agent); its CIO server has no TLS, hence the agents' TLS fronts |
 | Gradle | 9.5.1 | |
-| AGP | 9.2.1 | matches Kable so consumed klibs line up; compileSdk 37, minSdk 24 |
+| AGP | 9.3.0 | compileSdk 37, minSdk 24; published AARs ask consumers for compileSdk 36 |
 | JDK toolchain | 17 | |
 
 Kable is a plain Maven Central dependency, `com.juul.kable:kable-core:0.43.1`; see

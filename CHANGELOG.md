@@ -66,6 +66,8 @@ protocol version: **1**.
 - **The phone agents start with Encrypt connections on**, and remember when it is switched off.
 - **The Kotlin agents show the certificate's SHA-256** as browsers display it, to check the
   `https://` dashboard's first-visit warning against.
+- **`run-agent.sh` and `run-agent-rs.sh` pass arguments after the port to the agent**, so
+  `agent/run-agent.sh 8080 --tls --print-pairing` works through the macOS app wrapper.
 
 ### Fixed
 

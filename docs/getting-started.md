@@ -69,10 +69,20 @@ REMOTE_BLE_TOKEN=client-secret REMOTE_BLE_OPERATOR_TOKEN=operator-secret agent/r
 ```
 
 The desktop agent binds `127.0.0.1` by default. For LAN use, set an explicit bind address and
-credentials (for example `REMOTE_BLE_BIND=192.168.1.20 REMOTE_BLE_TOKENS='phone=…'`); use a
-TLS-terminating reverse proxy or VPN for encrypted deployments. Direct `ws://` is only for
-trusted-network/development use. A named credential (`REMOTE_BLE_TOKENS='name=secret,…'`) maps
-the verified bearer secret to a principal; `REMOTE_BLE_TOKEN` remains the `default` alias.
+credentials, and serve it encrypted:
+
+```sh
+REMOTE_BLE_BIND=0.0.0.0 REMOTE_BLE_TOKEN=s3cr3t agent/run-agent.sh 8080 --tls --print-pairing
+# → Agent identity: sha256:…
+# → Pairing: remoteble://192.168.1.20:8080?token=s3cr3t&fp=sha256:…
+```
+
+`--tls` creates the agent's identity on first start (a long-lived key and self-signed certificate,
+kept in your user config directory) and serves `wss://`. Clients pin its fingerprint, which the
+pairing link carries along with the address and token; Part 2 connects with it. A LAN bind without
+`--tls` refuses to start unless `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` says cleartext is intended.
+A named credential (`REMOTE_BLE_TOKENS='name=secret,…'`) maps the verified bearer secret to a
+principal; `REMOTE_BLE_TOKEN` remains the `default` alias.
 
 ### Or: the native Rust agent (`agent-rs`)
 
@@ -87,31 +97,32 @@ For a lightweight, cross-platform agent (macOS / Linux) speaking the same wire c
 agent-rs/run-agent-rs.sh 8080
 ```
 
-It serves the same `ws://<host>:8080/agent` endpoint, so the client side below is
-identical. It's a v1-baseline agent (scan/connect/read/write/notify/MTU); it doesn't
-yet serve the status dashboard or the optional capability extensions. Its wire format is
-pinned to the Kotlin contract by cross-language interop tests (see
-[build-and-testing.md](build-and-testing.md#the-native-rust-agent-agent-rs-tests)).
+It serves the same endpoint, takes the same `--tls`/`--print-pairing` flags and shares the JVM
+agent's identity file, so the client side below is identical. It offers the same agent-level
+capabilities as the JVM agent (slots, identifier translation, batched scans, `agent.status`, the
+write policy, lease-holder diagnostics); backend-level ones follow what `btleplug` can do, and it has
+no status dashboard. Its wire format is pinned to the Kotlin contract by cross-language interop tests
+(see [build-and-testing.md](build-and-testing.md#the-native-rust-agent-agent-rs-tests)).
 
 ### Or: a phone as the agent
 
 `:agent` also targets Android and iOS directly — same server, same wire contract, a
 Compose Multiplatform status UI instead of a terminal. `./gradlew :android-agent:installDebug`
 (or the `ios-agent/` Xcode project on a physical iPhone) installs an app that hosts the
-agent on the phone's own radio. Grant the Bluetooth permission it requests, tap **Start**, and
-point a client at the `ws://<phone-ip>:8080/agent` the screen shows (the app resolves the LAN IP
-for you). Because the phone listens on the open Wi-Fi in cleartext, the mobile agent is **always
-token-protected**: type an auth token, then configure that value in the client through
-`WebSocketAgentTransport.authToken` (a suspend provider). The app masks the field and never
-renders the bearer value after startup. iOS can't keep the agent running
+agent on the phone's own radio. Grant the Bluetooth permission it requests, type an auth token (the
+mobile agent is **always token-protected**, since it listens on the open Wi-Fi), and tap **Start**.
+It serves `wss://` with its own identity by default (**Encrypt connections**), so pair a client with
+it: **Show pairing code** reveals a QR code, which a phone's camera opens in a client app that
+registers `remoteble://`, and **Copy pairing link** gives the same link to paste. The app masks the
+token field and shows the token only inside that hidden-by-default code. iOS can't keep the agent running
 backgrounded (no equivalent of Android's foreground service — see
 [agent.md](agent.md#android--ios-a-phone-as-the-agent)), so keep that app open.
 
-> The Android/iOS agent apps are **dev/test tools**, not shipping builds — they serve over
-> cleartext `ws://` (the iOS launcher carries a blanket App Transport Security exception) and
-> retain the configured credential in platform development storage (Android DataStore; iOS
-> `NSUserDefaults`), not a protected production credential store. Run them on a trusted network;
-> do not use the mobile launcher for production credentials.
+> The Android/iOS agent apps are **dev/test tools**, not shipping builds. Their TLS key lives in
+> Android Keystore or the iOS Keychain, but the configured bearer token is kept in platform
+> development storage (Android DataStore; iOS `NSUserDefaults`), not a protected production
+> credential store, and switching **Encrypt connections** off serves cleartext `ws://`. Do not use
+> the mobile launcher for production credentials.
 
 ### Credential rotation and revocation
 
@@ -157,6 +168,25 @@ withTimeout(10_000) { session.transportState.first { it == TransportState.CONNEC
 
 You don't *have* to wait — any `request()` made before CONNECTED simply returns
 `Err(TRANSPORT_LOST)`, and the transport keeps retrying with backoff.
+
+**An encrypted agent** (a LAN agent with `--tls`, or a phone agent) is reached through its pairing
+link instead. Only the transport line changes; the session and everything after it are the same:
+
+```kotlin
+val pairing = AgentPairing.parse("remoteble://192.168.1.20:8080?token=s3cr3t&fp=sha256:…")
+val transport = WebSocketAgentTransport(
+    url = pairing.url,                                 // wss://192.168.1.20:8080/agent
+    scope = scope,
+    httpClient = pairingWebSocketHttpClient(pairing),  // trusts exactly the paired key
+    authToken = { pairing.token },
+)
+```
+
+No certificate authority is involved: the client trusts the key whose fingerprint the link carries.
+Any other key fails inside the TLS handshake, before the token is sent, with
+`AgentIdentityMismatchException`, and the transport gives up rather than retrying. That means the
+agent changed identity (a reset, or a reinstalled phone agent), or something else is answering at
+that address; pair again from the agent's current link.
 
 ---
 
@@ -390,7 +420,7 @@ received it" — order is guaranteed, per-write *delivery* is still best-effort.
   owned peripheral fails with `PERIPHERAL_BUSY`). Shared mode is disabled for 0.9.0 pending a
   participant model.
 - The reference **agent runs on macOS/Linux (JVM), Android, and iOS**; the client builds
-  for JVM (tests), Android, and iOS. iOS can't run the agent backgrounded — see
+  for JVM, Android, iOS, and macOS. iOS can't run the agent backgrounded — see
   [agent.md](agent.md#android--ios-a-phone-as-the-agent).
 - **Diagnostics:** The SDK defaults silent. To turn on logging, set `Logger.level` and
   `Logger.sink` before creating the session (see [client-sdk.md → Logging](client-sdk.md#logging)).

@@ -33,12 +33,33 @@ xcodegen generate
 open RemoteBleAgent.xcodeproj
 
 # 3. Run on a physical iPhone (see above — the Simulator can't scan/connect real BLE hardware).
-#    Tap Start; a laptop on the same network can then point a client (or
-#    `:e2e-runner:scanRun`) at ws://<iphone-ip>:8080/agent.
+#    Type an auth token and tap Start; then pair a client with the pairing code (below), or check
+#    the agent from a laptop with `./gradlew :e2e-runner:pinRun --args "'<pairing link>'"`.
 ```
 
 If you prefer not to use XcodeGen, create an iOS App target by hand, add the files under
 `Sources/`, set `Info.plist`, and drag in `RemoteBleAgent.xcframework` (Embed & Sign).
+
+## Encryption, identity and pairing
+
+**Encrypt connections** is on by default: the agent serves `wss://` with its own identity, a P-256 key
+generated in the Keychain that never leaves it, and a self-signed certificate signed with that key.
+Clients pin the fingerprint shown under the switch. **Show pairing code** (while running) reveals a QR
+code of the pairing link, which a phone's camera opens in a client app registered for `remoteble://`,
+and **Copy pairing link** copies it; both carry the token, so they stay hidden until asked for. The
+certificate's SHA-256 is shown too, for the `https://` dashboard's first-visit browser warning.
+
+- **New identity** replaces the key after a confirmation; every paired client must pair again.
+- **Reinstalling** the app also gives it a new identity: Keychain items outlive an uninstall, so the
+  first run of an installation discards any identity left behind, as Android's Keystore does by itself.
+- **Switching encryption off** is remembered across launches and shows a warning: the agent then
+  serves cleartext `ws://`, which `:e2e-runner:scanRun` and other unpinned clients need.
+- TLS is served by `NetworkTlsFront`, an `NWListener` relaying to the agent's WebSocket server on
+  loopback; [agent.md](../docs/agent.md#built-in-tls-with-a-pinned-identity-all-agents) explains it,
+  including why its byte pump is Objective-C.
+
+The simulator shares the Mac's network, so the encrypted path, the dashboard and pairing can be
+exercised there too, against `127.0.0.1` or the Mac's LAN address; only real BLE needs the iPhone.
 
 ## The screen-lock caveat
 
@@ -90,7 +111,8 @@ mode this project does not support; it also makes discovery host-dependent, whic
 [the scan-concurrency work](../docs/proposals/scan-concurrency-modes.md) exists to remove. The
 supported answer to "my scans stopped" is that the agent must be foregrounded.
 
-Verify with `:e2e-runner:scanRun`, whose third argument sends a service filter:
+Verify with `:e2e-runner:scanRun`, whose third argument sends a service filter. It is an unpinned
+client, so switch **Encrypt connections** off for it (these measurements predate encryption):
 
 ```sh
 ./gradlew :e2e-runner:scanRun --args "ws://<iphone-ip>:8080/agent 20"                                        # unfiltered

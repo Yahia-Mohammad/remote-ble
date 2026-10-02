@@ -38,6 +38,7 @@ that matches your role; the final sections are for extending the protocol or aud
 | Document | Covers |
 |---|---|
 | [scanning.md](scanning.md) | **Discovery, for app developers** — filters and their exact semantics, holding two scanners at once, the three agent scan-concurrency modes, replay/late-join, reconnect behaviour, limits |
+| [migrate-to-0.14.0.md](migrate-to-0.14.0.md) | Upgrade to 0.14.0: agents reachable from the network serve pinned `wss://` by default, pairing links and QR codes, and the one breaking change (a LAN agent refuses cleartext without an explicit opt-in) |
 | [migrate-to-0.13.0.md](migrate-to-0.13.0.md) | Upgrade to 0.13.0; no source change required; macOS target, Android compileSdk 36, and the cleartext `ws://` failure on Android |
 | [migrate-to-0.12.0.md](migrate-to-0.12.0.md) | Upgrade to 0.12.0; no source change required unless you match on a simulation profile's literal id |
 | [migrate-to-0.11.0.md](migrate-to-0.11.0.md) | Upgrade to 0.11.0; no source change required, but two agent defaults move and three capabilities are added |
@@ -49,10 +50,10 @@ that matches your role; the final sections are for extending the protocol or aud
 
 | Document | Covers |
 |---|---|
-| [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend |
+| [agent.md](agent.md) | The agent: WebSocket server, backend abstraction, op handler, Kable engine backend, built-in TLS with a pinned identity, pairing |
 | [bringup.md](bringup.md) | **The live bring-up runbook** — run the agent + a test peripheral + `:e2e-runner` against a real radio, no discrete BLE hardware |
 | [rust-agent-container.md](rust-agent-container.md) | The local Rust-agent Docker image, smoke checks, and the supported-host boundary |
-| [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The supported `wss://` recipe** (`TLS-PROXY-01`) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
+| [tls-proxy-recipe.md](tls-proxy-recipe.md) | **The CA-backed `wss://` alternative** (`TLS-PROXY-01`) to the agents' built-in, pinned TLS, for clients that must validate a certificate chain (browsers, a domain name) — Caddy config, throwaway-CA handling that never touches a system trust store, and the five checks covering upgrade, bearer forwarding, certificate rejection, reconnect, and notification delivery |
 
 ### The wire contract & internals
 
@@ -82,7 +83,7 @@ after it ships (the **Status** column tracks whether it's landed and in which re
 | [proposals/rust-agent-container.md](proposals/rust-agent-container.md) | Multi-architecture Linux image using host BlueZ through D-Bus | **Implemented in 0.10.0** (host validation release-gated) |
 | [proposals/agent-proxy.md](proposals/agent-proxy.md) | One transparent endpoint aggregating several upstream agents | **Detailed design; deferred beyond 0.10.0** |
 | [proposals/scan-concurrency-modes.md](proposals/scan-concurrency-modes.md) | Agent-wide scan concurrency mode (`multiplexed` default), the `scan.concurrency.*` capabilities, and `SCAN_UNAVAILABLE` | **Implemented on both agents with paired conformance evidence, and [hardware-validated](scan-concurrency-validation.md) 2026-08-03** |
-| [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md) | Encrypted LAN transport: `wss://` served by every agent with a pinned self-signed identity, pairing URI, and cleartext by explicit choice only ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)) | **Accepted 2026-10-01 (TLS, option A); not started** |
+| [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md) | Encrypted LAN transport: `wss://` served by every agent with a pinned self-signed identity, pairing URI, and cleartext by explicit choice only ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)) | **Implemented, phases 1–5** (all agents, all SDK targets; ships in 0.14.0) |
 | [proposals/agent-tunable-configuration.md](proposals/agent-tunable-configuration.md) | Making agent timeouts/limits settable without a recompile: full inventory of hardcoded values, which of them should *not* become knobs (wire contract), and the delivery options per host | **Not started, bar two landed precedents** (`REMOTE_BLE_WRITE_FAIL_FAST`, `REMOTE_BLE_SCAN_CONCURRENCY`) |
 
 ### Release process & evidence
@@ -159,11 +160,11 @@ in isolation.
 
 | Module / Project | Role | Dependencies | Targets |
 |---|---|---|---|
-| [`:log`](../log) | Shared logging facade: `Logger` (global object), `LogLevel`, `LogSink`, platform sinks, `bytesPreview`, `RateLimitedLog`. Zero external deps. | Maven Central (`dev.warsha.remoteble:log`) | JVM, Android, iOS |
-| [`:protocol`](../protocol) | The wire contract + CBOR/JSON codec. Pure data, **no BLE, no network**. | kotlinx-serialization only | JVM, Android, iOS |
-| [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters. | `:protocol`, `:log`, coroutines, Ktor client, Kable | JVM (tests), Android, iOS |
-| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, + a Compose Multiplatform status UI on mobile. | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform | JVM, Android, iOS |
-| [`agent-rs`](../agent-rs) | Native cross-platform Bluetooth agent. Standalone CLI agent, same CBOR wire contract (interop-tested). Run: `run-agent-rs.sh`. | tokio, tokio-tungstenite, btleplug, serde/ciborium, tracing | macOS, Linux |
+| [`:log`](../log) | Shared logging facade: `Logger` (global object), `LogLevel`, `LogSink`, platform sinks, `bytesPreview`, `RateLimitedLog`. Zero external deps. | Maven Central (`dev.warsha.remoteble:log`) | JVM, Android, iOS, macOS |
+| [`:protocol`](../protocol) | The wire contract + CBOR/JSON codec, the agent identity (`AgentFingerprint`) and the pairing URI (`AgentPairing`). Pure data, **no BLE, no network**. | kotlinx-serialization only | JVM, Android, iOS, macOS |
+| [`:client-sdk`](../client-sdk) | Transport, session, GATT/scan ops, Kable adapters, pinned `wss://` clients. | `:protocol`, `:log`, coroutines, Ktor client, Kable | JVM, Android, iOS, macOS |
+| [`:agent`](../agent) | The remote Bluetooth agent: WebSocket server, op handler, radio engine, TLS fronts with a pinned identity, + a Compose Multiplatform status UI on mobile. | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform, `qrcode-kotlin` | JVM, Android, iOS |
+| [`agent-rs`](../agent-rs) | Native cross-platform Bluetooth agent. Standalone CLI agent, same CBOR wire contract (interop-tested), TLS through `rustls`. Run: `run-agent-rs.sh`. | tokio, tokio-tungstenite, tokio-rustls (`ring`), rcgen, btleplug, serde/ciborium, tracing | macOS, Linux |
 
 `:protocol` is the shared contract both sides compile against. `:client-sdk` and
 `:agent` never depend on each other in production — they only meet on the wire. (A
@@ -221,6 +222,20 @@ is the radio seam (real [`EngineBleBackend`](../agent/src/commonMain/kotlin/dev/
 or a fake) — all `commonMain`, shared unchanged across the agent's JVM/Android/iOS targets
 (see [agent.md](agent.md#android--ios-a-phone-as-the-agent)).
 
+### Encryption sits under the protocol
+
+An agent reachable from the network serves the same frames over `wss://`, with a long-lived
+self-signed identity the client pins by fingerprint (`sha256:<hex>` of the key's SPKI). The TLS
+handshake, and with it the identity check, completes before the WebSocket upgrade, so the bearer
+token never reaches an impostor. Nothing above the transport changes, which is why the client's
+layers below know nothing of it: only the `HttpClient` handed to `WebSocketAgentTransport` does
+(`pinnedWebSocketHttpClient`). A client gets the address, token and fingerprint together from the
+agent's **pairing URI**. The Kotlin agents terminate TLS in an in-process front that relays to the
+WebSocket server on loopback and records each relayed connection's real peer; `agent-rs` terminates
+it in-process with `rustls`. Normative in [the conformance spec §3–3.2](agent-conformance-spec.md),
+reasoned in [the decision record](proposals/agent-transport-encryption.md), traced in
+[flows.md](flows.md#encrypted-session-and-pairing).
+
 ### The two state machines (do not conflate them)
 
 A recurring theme — and the single subtlest part of the design — is that there are
@@ -249,4 +264,6 @@ BLE state it believes is live, and never fabricates a BLE-disconnect.
 | **Op** | One operation in a `Command` (connect, read, write, observe.start, descriptor r/w, pair, conn.priority, …). Mirrors the GATT surface 1:1. |
 | **Capability** | An optional feature negotiated in the `ClientHello`/`ServerHello` handshake (a `Set<String>`, e.g. `descriptors`, `pairing`, `slots`). The agent advertises `backend ∪ agent` capabilities; ops/events outside the negotiated set are `UNSUPPORTED` or not emitted. |
 | **Seam** | A narrow interface boundary inserted so a layer can be tested/replaced in isolation (`AgentTransport`, `AgentBackend`, `BleBackend`). |
+| **Fingerprint (pin)** | `sha256:<64 hex>` of an agent's TLS key (its SPKI): the identity a client trusts instead of a certificate authority. Stable across restarts until an explicit identity reset. |
+| **Pairing URI** | `remoteble://<host>:<port>?token=…&fp=sha256:…` — an agent's address, bearer token and fingerprint in one value, shown as a QR code or printed with `--print-pairing`. Agent pairing, not BLE pairing (`Op.Pair`). |
 | **Reconcile-on-reconnect** | On IP reconnect, re-issue `Connect` + `ObserveStart`/`ScanStart` for everything the session believes is live. |

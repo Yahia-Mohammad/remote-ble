@@ -36,6 +36,24 @@ open RemoteBleClient.xcodeproj
 If you prefer not to use XcodeGen, create an iOS App target by hand, add the files under
 `Sources/`, set `Info.plist`, and drag in `RemoteBleClient.xcframework` (Embed & Sign).
 
+## Pairing with an agent
+
+An agent reachable over the network serves `wss://` with its own identity, which this app pins. It
+takes the agent's pairing link (`remoteble://host:port?token=…&fp=sha256:…`) in two ways:
+
+- **Camera.** The app registers the `remoteble` URL scheme (`CFBundleURLTypes` in `Info.plist`), so
+  pointing the iPhone's Camera at an agent's pairing QR code offers to open it here. SwiftUI's
+  `onOpenURL` hands the link to the shared controller, which holds it if it arrives before the UI
+  exists (a cold launch).
+- **Paste** into the "Pairing link" field and tap **Pair**.
+
+Either way the app asks first, showing the address and whether the connection is encrypted, because
+any app or page can open a link. Pairing fills in the endpoint and token and pins the fingerprint; the
+card then reads "Paired · encrypted". Editing the endpoint by hand drops the pin. To try it on the
+Simulator, `xcrun simctl openurl booted "<pairing link>"` stands in for the Camera.
+
+A pinned `wss://` connection needs no ATS exception; the one below exists for plain `ws://` only.
+
 ## Why there's no Swift networking/UI code here
 
 A more conventional approach would consume a shared Kotlin SDK through a Swift-facing callback

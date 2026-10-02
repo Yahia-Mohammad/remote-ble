@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package dev.warsha.remoteble.client
 
@@ -8,8 +8,6 @@ import io.ktor.client.engine.darwin.Darwin
 import io.ktor.client.plugins.HttpSend
 import io.ktor.client.plugins.plugin
 import io.ktor.client.plugins.websocket.WebSockets
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.addressOf
@@ -47,7 +45,7 @@ import platform.Security.SecTrustRef
  * so that a request to some other address, failing for its own reason, is never reported as this.
  */
 actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient {
-    val refused = Refusals()
+    val refused = PendingRefusals()
     val client = HttpClient(Darwin) {
         engine {
             // The dispositions are NSInteger, which Ktor's shared Darwin metadata commonizes to a
@@ -62,7 +60,7 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
                     if (presented == fingerprint) {
                         completionHandler(NSURLSessionAuthChallengeUseCredential.convert(), NSURLCredential.credentialForTrust(trust))
                     } else {
-                        refused.record(origin(space.host, space.port), AgentIdentityMismatchException(fingerprint, presented))
+                        refused.record(PendingRefusals.origin(space.host, space.port), AgentIdentityMismatchException(fingerprint, presented))
                         completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge.convert(), null)
                     }
                 }
@@ -74,33 +72,10 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
         try {
             execute(request)
         } catch (failure: Throwable) {
-            throw refused.take(origin(request.url.host, request.url.port)) ?: failure
+            throw refused.take(PendingRefusals.origin(request.url.host, request.url.port)) ?: failure
         }
     }
     return client
-}
-
-/** NSURLProtectionSpace's host has no IPv6 brackets; normalized so either spelling matches. */
-private fun origin(host: String, port: Number): String = "${host.removePrefix("[").removeSuffix("]").lowercase()}:${port.toLong()}"
-
-/** Identity mismatches awaiting the request failure each one caused, by origin. */
-private class Refusals {
-    private val pending = AtomicReference(emptyMap<String, AgentIdentityMismatchException>())
-
-    fun record(origin: String, refusal: AgentIdentityMismatchException) {
-        while (true) {
-            val current = pending.load()
-            if (pending.compareAndSet(current, current + (origin to refusal))) return
-        }
-    }
-
-    fun take(origin: String): AgentIdentityMismatchException? {
-        while (true) {
-            val current = pending.load()
-            val refusal = current[origin] ?: return null
-            if (pending.compareAndSet(current, current - origin)) return refusal
-        }
-    }
 }
 
 /** The fingerprint of the certificate the server presented first, or `null` if it is unreadable. */

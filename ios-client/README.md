@@ -2,7 +2,7 @@
 
 The iOS launcher for [`:client-ui`](../client-ui/build.gradle.kts) — **not** a second
 implementation. `:client-ui` is a Compose Multiplatform library (`androidLibrary` +
-`iosX64/iosArm64/iosSimulatorArm64`): its `commonMain` holds the whole UI (`RemoteBleApp` —
+`iosArm64/iosSimulatorArm64`): its `commonMain` holds the whole UI (`RemoteBleApp` —
 `ScanScreen`/`DeviceScreen`) and the scan/connect/GATT orchestration (`RemoteBleController`) on top
 of [`:client-sdk`](../client-sdk), shared verbatim between [`:android-client`](../android-client)
 and this project. This directory only contains the three files every Compose Multiplatform iOS app

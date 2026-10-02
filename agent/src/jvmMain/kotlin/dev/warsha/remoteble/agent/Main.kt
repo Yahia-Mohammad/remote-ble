@@ -154,10 +154,11 @@ internal data class Cli(
 )
 
 /**
- * The agent's identity and the TLS front holding it, or `null` to serve cleartext. Opt-in for now
- * (`--tls` / `REMOTE_BLE_TLS=true`); making it the default is a later phase of
- * `docs/proposals/agent-transport-encryption.md`. A reset applies whether or not TLS is on, since
- * an operator discarding a compromised key should not have to enable anything to do it.
+ * The agent's identity and the TLS front holding it, or `null` to serve cleartext. Opt-in
+ * (`--tls` / `REMOTE_BLE_TLS=true`), because a loopback agent needs none; a LAN bind without it is
+ * refused unless cleartext is chosen explicitly ([validateCleartext]). A reset applies whether or
+ * not TLS is on, since an operator discarding a compromised key should not have to enable anything
+ * to do it.
  */
 internal fun tlsFrontFor(
     cli: Cli,

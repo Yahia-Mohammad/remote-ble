@@ -42,11 +42,12 @@ import platform.Security.SecTrustRef
  * Security needs no exception for it: a default-ATS app reached an agent's LAN address this way.
  *
  * NSURLSession reports a cancelled challenge as a generic cancellation, so the handler records the
- * mismatch and the client raises [AgentIdentityMismatchException] in its place, which the transport
- * treats as terminal.
+ * mismatch against the host and port it came from, and the next failure of a request to that origin
+ * raises [AgentIdentityMismatchException] in its place, which the transport treats as terminal. Keyed
+ * so that a request to some other address, failing for its own reason, is never reported as this.
  */
 actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient {
-    val refused = AtomicReference<AgentIdentityMismatchException?>(null)
+    val refused = Refusals()
     val client = HttpClient(Darwin) {
         engine {
             // The dispositions are NSInteger, which Ktor's shared Darwin metadata commonizes to a
@@ -61,7 +62,7 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
                     if (presented == fingerprint) {
                         completionHandler(NSURLSessionAuthChallengeUseCredential.convert(), NSURLCredential.credentialForTrust(trust))
                     } else {
-                        refused.store(AgentIdentityMismatchException(fingerprint, presented))
+                        refused.record(origin(space.host, space.port), AgentIdentityMismatchException(fingerprint, presented))
                         completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge.convert(), null)
                     }
                 }
@@ -73,10 +74,33 @@ actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient 
         try {
             execute(request)
         } catch (failure: Throwable) {
-            throw refused.exchange(null) ?: failure
+            throw refused.take(origin(request.url.host, request.url.port)) ?: failure
         }
     }
     return client
+}
+
+/** NSURLProtectionSpace's host has no IPv6 brackets; normalized so either spelling matches. */
+private fun origin(host: String, port: Number): String = "${host.removePrefix("[").removeSuffix("]").lowercase()}:${port.toLong()}"
+
+/** Identity mismatches awaiting the request failure each one caused, by origin. */
+private class Refusals {
+    private val pending = AtomicReference(emptyMap<String, AgentIdentityMismatchException>())
+
+    fun record(origin: String, refusal: AgentIdentityMismatchException) {
+        while (true) {
+            val current = pending.load()
+            if (pending.compareAndSet(current, current + (origin to refusal))) return
+        }
+    }
+
+    fun take(origin: String): AgentIdentityMismatchException? {
+        while (true) {
+            val current = pending.load()
+            val refusal = current[origin] ?: return null
+            if (pending.compareAndSet(current, current - origin)) return refusal
+        }
+    }
 }
 
 /** The fingerprint of the certificate the server presented first, or `null` if it is unreadable. */

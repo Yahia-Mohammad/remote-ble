@@ -33,16 +33,20 @@ Understanding what RemoteBLE does and does not protect helps scope reports:
   with short-lived/rotating credentials that refresh on reconnect. This is deliberately
   "a hook, not a framework" — richer identity/authorization is left to the embedding
   application.
-- **Encryption is opt-in, for now.** Every agent can serve `wss://` with a
-  long-lived self-signed identity that clients pin by fingerprint (`--tls` on the
-  desktop agents, the **Encrypt connections** switch in the phone apps); a client
-  pinning a different key fails inside the TLS handshake, before its token is sent.
-  Without it an agent serves cleartext `ws://`, and the bearer token crosses the
-  network in the clear. Making encryption the default is planned (#39).
+- **Encryption is the default wherever the network can reach an agent.** Every
+  agent serves `wss://` with a long-lived self-signed identity that clients pin by
+  fingerprint, given to them by pairing (#39); a client pinning a different key fails
+  inside the TLS handshake, before its token is sent. A desktop agent bound to a
+  non-loopback address refuses to start in cleartext unless `--tls` is on or
+  `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` says otherwise, and the phone agents start
+  with **Encrypt connections** on. Cleartext `ws://` remains for loopback, behind a
+  tunnel or the TLS proxy recipe, and wherever an operator explicitly chooses it; there
+  the bearer token crosses the network readable. The pin protects the connection, not
+  the token's secrecy on the device that shows it: a pairing QR code carries the token.
 - **The phone agents (`android-agent`, `ios-agent`) are dev/test tools, not
-  shipping builds.** They serve `ws://` in cleartext unless encryption is switched
-  on, and always require a token because they listen on open Wi-Fi. Do not treat
-  them as a hardened, internet-facing service.
+  shipping builds.** They always require a token, because they listen on open Wi-Fi,
+  and serve `wss://` unless encryption is switched off. Do not treat them as a
+  hardened, internet-facing service.
 - **`DeviceHandle` is opaque and agent-scoped** — clients never construct or
   parse it.
 

@@ -15,4 +15,8 @@ import java.security.cert.X509Certificate
 class AgentTlsIdentity(val privateKey: PrivateKey, val certificate: X509Certificate) {
     val fingerprint: AgentFingerprint =
         AgentFingerprint.ofSpkiSha256(MessageDigest.getInstance("SHA-256").digest(certificate.publicKey.encoded))
+
+    /** The certificate's own SHA-256, as a browser shows it: see [certificateSha256Text]. */
+    val certificateSha256: String =
+        certificateSha256Text(MessageDigest.getInstance("SHA-256").digest(certificate.encoded))
 }

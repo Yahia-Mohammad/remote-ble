@@ -61,3 +61,12 @@ internal suspend fun awaitListening(
         cancel()
         throw failure
     }
+
+/**
+ * A certificate's SHA-256 as browsers show it, in upper-case hex pairs joined by colons. A browser
+ * cannot pin, so the first visit to the `https://` dashboard warns about a self-signed certificate,
+ * and this is what the operator compares before accepting it. It is not the identity clients pin,
+ * which hashes the key alone, so it changes whenever the certificate is reissued.
+ */
+internal fun certificateSha256Text(digest: ByteArray): String =
+    digest.joinToString(":") { byte -> (byte.toInt() and 0xFF).toString(16).uppercase().padStart(2, '0') }

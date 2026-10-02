@@ -22,3 +22,15 @@ actual suspend fun persistToken(token: String?, secret: AgentSecret) {
     val key = keyFor(secret)
     if (token.isNullOrBlank()) defaults.removeObjectForKey(key) else defaults.setObject(token, key)
 }
+
+private const val ENCRYPT_KEY = "remote_ble_agent_encrypt"
+
+// Checked with objectForKey first: boolForKey reads an unset key as off, where it means "never chosen".
+actual suspend fun loadEncryptPreference(): Boolean? {
+    val defaults = NSUserDefaults.standardUserDefaults
+    return if (defaults.objectForKey(ENCRYPT_KEY) == null) null else defaults.boolForKey(ENCRYPT_KEY)
+}
+
+actual suspend fun persistEncryptPreference(encrypt: Boolean) {
+    NSUserDefaults.standardUserDefaults.setBool(encrypt, ENCRYPT_KEY)
+}

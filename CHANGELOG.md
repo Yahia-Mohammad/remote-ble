@@ -18,10 +18,10 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> Built-in TLS for every agent, pinned clients and pairing in the SDK (#39, phases 1–4), opt-in
-> until it becomes the default. `:protocol` and `:client-sdk` gain public API, so these ship with the
-> next release; the agent app entries alone would not need one, since the Android and iOS agent apps
-> are built from source rather than shipped as release assets.
+> Built-in TLS for every agent, pinned clients and pairing in the SDK (#39), and encryption by
+> default wherever the network can reach an agent: see
+> [migrate-to-0.14.0.md](docs/migrate-to-0.14.0.md). `:protocol` and `:client-sdk` gain public API,
+> and a LAN agent's default changes, so these ship with the next release, 0.14.0.
 
 ### Added
 
@@ -32,7 +32,7 @@ protocol version: **1**.
   **Encrypt connections (wss://)** switch, keep the key in Android Keystore or the Keychain, show the
   fingerprint, and offer a confirmed **New identity**. A reset (`--reset-identity`) breaks every
   pinned client until it pairs again, and so does reinstalling a phone agent. Every agent offers only
-  AEAD cipher suites (AES-GCM, ChaCha20-Poly1305). Off by default for now — see
+  AEAD cipher suites (AES-GCM, ChaCha20-Poly1305). See
   [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39) and
   [the design record](docs/proposals/agent-transport-encryption.md).
 - **`pinnedWebSocketHttpClient(fingerprint)` in `client-sdk`, on every target.** It trusts exactly the
@@ -54,6 +54,18 @@ protocol version: **1**.
   match on every client character for character, and a typo behind the mask surfaced only as an
   unexplained 401. The copied value is flagged sensitive on Android, so the system clipboard preview
   masks it — see [#34](https://github.com/Yahia-Mohammad/remote-ble/issues/34).
+
+### Changed
+
+- **Breaking: a desktop agent bound to a non-loopback address refuses cleartext.** Without `--tls`
+  (`REMOTE_BLE_TLS=true`), the JVM agent and `agent-rs` stop at startup naming the two ways out:
+  encrypt, or set `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` to keep `ws://` on a trusted network.
+  Loopback is unchanged. See [migrate-to-0.14.0.md](docs/migrate-to-0.14.0.md).
+- **The `agent-rs` container serves `wss://`** (`REMOTE_BLE_TLS=true`), with its identity on the
+  `/var/lib/remoteble` volume.
+- **The phone agents start with Encrypt connections on**, and remember when it is switched off.
+- **The Kotlin agents show the certificate's SHA-256** as browsers display it, to check the
+  `https://` dashboard's first-visit warning against.
 
 ### Fixed
 

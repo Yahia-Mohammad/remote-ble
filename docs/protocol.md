@@ -114,6 +114,13 @@ Three deliberate properties:
 The `Hello` exchange carries **no auth credential or ownership id** — those stay on the
 WebSocket upgrade headers (`Authorization: Bearer …` and `CLIENT_ID_HEADER`).
 
+**Encryption sits underneath, not in the protocol.** An agent reachable from the network serves
+these same frames over `wss://` with a self-signed identity the client pins by fingerprint, so the
+TLS handshake, and with it the identity check, completes before the upgrade request and its token
+are sent. Nothing above the WebSocket changes: no version bump, no new frame. A client gets the
+address, token and fingerprint together from the agent's pairing URI. The binding, the pin and the
+URI are specified in [the conformance spec §3.1–3.2](agent-conformance-spec.md).
+
 ## Operations — `Op`
 
 [`Op`](../protocol/src/commonMain/kotlin/dev/warsha/remoteble/protocol/Op.kt) is a

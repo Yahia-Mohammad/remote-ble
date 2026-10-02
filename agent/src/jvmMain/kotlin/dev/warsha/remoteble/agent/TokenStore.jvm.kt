@@ -7,3 +7,8 @@ package dev.warsha.remoteble.agent
 actual suspend fun loadPersistedToken(secret: AgentSecret): String? = null
 
 actual suspend fun persistToken(token: String?, secret: AgentSecret) = Unit
+
+/** No-op: the desktop CLI takes `--tls` fresh on every run. */
+actual suspend fun loadEncryptPreference(): Boolean? = null
+
+actual suspend fun persistEncryptPreference(encrypt: Boolean) = Unit

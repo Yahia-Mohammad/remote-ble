@@ -12,5 +12,8 @@ interface AgentTlsProvider {
     suspend fun load(reset: Boolean = false): AgentTls
 }
 
-/** A loaded identity: the [fingerprint] clients pin, and the [front] that serves it. */
-class AgentTls(val fingerprint: AgentFingerprint, val front: TlsFront.Factory)
+/**
+ * A loaded identity: the [fingerprint] clients pin, the [front] that serves it, and the
+ * [certificateSha256] a browser's warning shows for the dashboard.
+ */
+class AgentTls(val fingerprint: AgentFingerprint, val front: TlsFront.Factory, val certificateSha256: String? = null)

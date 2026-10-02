@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -47,6 +50,8 @@ import dev.warsha.remoteble.agent.di.AgentConfig
 import dev.warsha.remoteble.agent.AgentSecret
 import dev.warsha.remoteble.agent.loadPersistedToken
 import dev.warsha.remoteble.agent.lanIPv4Address
+import dev.warsha.remoteble.agent.loadEncryptPreference
+import dev.warsha.remoteble.agent.persistEncryptPreference
 import dev.warsha.remoteble.agent.persistToken
 import dev.warsha.remoteble.log.Logger
 import dev.warsha.remoteble.protocol.AgentPairing
@@ -109,9 +114,10 @@ fun AgentApp(
     var allowRemoteDashboard by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }
-    // Off by default until the phone agents switch to TLS by default, which needs every client able
-    // to pin first (docs/proposals/agent-transport-encryption.md, phase 5).
-    var encrypt by remember { mutableStateOf(false) }
+    // On by default (docs/proposals/agent-transport-encryption.md, phase 5): every client can pin,
+    // and pairing hands it the fingerprint. Turning it off is remembered, and visible on screen.
+    var encrypt by remember { mutableStateOf(tls != null) }
+    var encryptEdited by remember { mutableStateOf(false) }
     // Loaded when encryption is switched on, so the fingerprint can be read before Start.
     val identities = remember(tls) { AgentIdentityLoader(tls) }
     // The scheme the running agent was started with, which a later toggle must not misreport.
@@ -129,6 +135,7 @@ fun AgentApp(
         // in flight — only seed the field from persistence if it's still untouched and empty.
         if (!tokenEdited && token.isNullOrBlank()) token = persisted
         if (!operatorTokenEdited && operatorToken.isNullOrBlank()) operatorToken = persistedOperator
+        if (tls != null && !encryptEdited) loadEncryptPreference()?.let { encrypt = it }
     }
 
     LaunchedEffect(running) {
@@ -206,7 +213,10 @@ fun AgentApp(
             // LazyColumns inside a non-scrolling Column let an unbounded panel balloon and push
             // the others off-screen. safeDrawingPadding keeps the header below the status
             // bar/notch under edge-to-edge.
-            LazyColumn(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
                 item {
                     AgentHeader(
                         running = running,
@@ -236,8 +246,13 @@ fun AgentApp(
                         EncryptionPanel(
                             running = running,
                             encrypt = encrypt,
-                            onEncryptChange = { encrypt = it },
+                            onEncryptChange = { choice ->
+                                encryptEdited = true
+                                encrypt = choice
+                                scope.launch { persistEncryptPreference(choice) }
+                            },
                             fingerprint = identities.identity?.fingerprint?.toString(),
+                            certificateSha256 = identities.identity?.certificateSha256,
                             failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
                         )
@@ -317,130 +332,121 @@ private fun AgentHeader(
     radioNotice: String?,
     startFailure: String?,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text("RemoteBLE Agent", style = MaterialTheme.typography.titleLarge)
-        Button(
-            enabled = running || startEnabled,
-            onClick = { if (running) onStop() else onStart() },
-        ) {
-            Text(if (running) "Stop" else "Start")
-        }
-    }
-    Text(address, style = MaterialTheme.typography.bodyMedium)
-    if (running && keepScreenOnNotice != null) {
-        Text(keepScreenOnNotice, style = MaterialTheme.typography.bodySmall)
-    }
-    SecretField(
-        value = token.orEmpty(),
-        onValueChange = onTokenChange,
-        label = "Auth token (required for LAN access)",
-        enabled = !running,
-    )
-    if (running) {
-        Text(
-            if (encrypted) {
-                "LAN exposure over encrypted wss://. Clients need the bearer credential and this " +
-                    "agent's fingerprint."
-            } else {
-                "LAN exposure over unencrypted ws://. Clients need the configured bearer credential."
-            },
-            style = MaterialTheme.typography.bodySmall,
-        )
-        // Every client must present this token character for character, and retyping it is where
-        // the typos come from; pasting it removes the chance.
-        if (!token.isNullOrBlank()) CopyTokenButton(token)
-    }
-    // Optional second secret, and deliberately a separate field rather than a reuse of the one above.
-    // The dashboard exposes every client's address, every lease and the activity log — the
-    // cross-client information the op plane refuses to give a client — so sharing one token would
-    // make every client an observer of all the others. `AgentWebSocketServer.init` requires them to
-    // differ. Left blank (the default) nothing changes: no operator credential, no dashboard routes,
-    // and `/` keeps answering 404, which is the pre-0.10.0 behaviour.
-    SecretField(
-        value = operatorToken.orEmpty(),
-        onValueChange = onOperatorTokenChange,
-        label = "Operator token (optional — enables the status dashboard)",
-        enabled = !running,
-    )
-    // Shown only once an operator token is present, because the choice is meaningless without one.
-    // Default off: the dashboard is the high-privilege plane and travels unencrypted, so it answers
-    // only this device unless the operator explicitly opens it up — the same posture `Main.kt` takes
-    // for a non-loopback bind. Reach it from the phone's own browser, or tunnel over USB.
-    if (!operatorToken.isNullOrBlank()) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
+            Text("RemoteBLE Agent", style = MaterialTheme.typography.titleLarge)
+            Button(
+                enabled = running || startEnabled,
+                onClick = { if (running) onStop() else onStart() },
+            ) {
+                Text(if (running) "Stop" else "Start")
+            }
+        }
+        Text(address, style = MaterialTheme.typography.bodyMedium)
+        if (running && keepScreenOnNotice != null) {
+            Text(keepScreenOnNotice, style = MaterialTheme.typography.bodySmall)
+        }
+        SecretField(
+            value = token.orEmpty(),
+            onValueChange = onTokenChange,
+            label = "Auth token",
+            supportingText = "Required for LAN access",
+            enabled = !running,
+        )
+        if (running) {
             Text(
-                "Allow dashboard from other devices",
+                if (encrypted) {
+                    "LAN exposure over encrypted wss://. Clients need the bearer credential and this " +
+                        "agent's fingerprint."
+                } else {
+                    "LAN exposure over unencrypted ws://. Clients need the configured bearer credential."
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
-            Switch(
-                checked = allowRemoteDashboard,
-                onCheckedChange = onAllowRemoteDashboardChange,
-                enabled = !running,
+            // Every client must present this token character for character, and retyping it is where
+            // the typos come from; pasting it removes the chance.
+            if (!token.isNullOrBlank()) CopyTokenButton(token)
+        }
+        // Optional second secret, and deliberately a separate field rather than a reuse of the one above.
+        // The dashboard exposes every client's address, every lease and the activity log — the
+        // cross-client information the op plane refuses to give a client — so sharing one token would
+        // make every client an observer of all the others. `AgentWebSocketServer.init` requires them to
+        // differ. Left blank (the default) nothing changes: no operator credential, no dashboard routes,
+        // and `/` keeps answering 404, which is the pre-0.10.0 behaviour.
+        SecretField(
+            value = operatorToken.orEmpty(),
+            onValueChange = onOperatorTokenChange,
+            label = "Operator token (optional)",
+            supportingText = "Enables the status dashboard",
+            enabled = !running,
+        )
+        // Shown only once an operator token is present, because the choice is meaningless without one.
+        // Default off: the dashboard is the high-privilege plane and travels unencrypted, so it answers
+        // only this device unless the operator explicitly opens it up — the same posture `Main.kt` takes
+        // for a non-loopback bind. Reach it from the phone's own browser, or tunnel over USB.
+        if (!operatorToken.isNullOrBlank()) {
+            SwitchRow("Allow dashboard from other devices", allowRemoteDashboard, onAllowRemoteDashboardChange, enabled = !running)
+            Text(
+                when {
+                    !allowRemoteDashboard ->
+                        "Dashboard is limited to this device. Reach it from this phone's browser, or tunnel: " +
+                            "adb forward tcp:8080 tcp:8080 (Android) / iproxy (iOS)."
+                    // Browsers cannot pin, so the first visit warns about the self-signed certificate,
+                    // and accepting it is the operator's call.
+                    encrypted ->
+                        "Dashboard reachable from the network over https://. Browsers warn about this " +
+                            "agent's self-signed certificate on the first visit."
+                    else ->
+                        "Dashboard reachable from the network over unencrypted http:// — anyone on it can " +
+                            "capture the operator token and read every client, lease and log line."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (allowRemoteDashboard && !encrypted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
             )
         }
-        Text(
-            when {
-                !allowRemoteDashboard ->
-                    "Dashboard is limited to this device. Reach it from this phone's browser, or tunnel: " +
-                        "adb forward tcp:8080 tcp:8080 (Android) / iproxy (iOS)."
-                // Browsers cannot pin, so the first visit warns about the self-signed certificate,
-                // and accepting it is the operator's call.
-                encrypted ->
-                    "Dashboard reachable from the network over https://. Browsers warn about this " +
-                        "agent's self-signed certificate on the first visit."
-                else ->
-                    "Dashboard reachable from the network over unencrypted http:// — anyone on it can " +
-                        "capture the operator token and read every client, lease and log line."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = if (allowRemoteDashboard && !encrypted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-        )
-    }
-    if (!startEnabled && permissionWarning != null) {
-        Text(
-            permissionWarning,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-        if (onRequestPermissionSettings != null) {
-            OutlinedButton(onClick = onRequestPermissionSettings) {
-                Text("Open settings")
+        if (!startEnabled && permissionWarning != null) {
+            Text(
+                permissionWarning,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            if (onRequestPermissionSettings != null) {
+                OutlinedButton(onClick = onRequestPermissionSettings) {
+                    Text("Open settings")
+                }
             }
         }
-    }
-    // Shown whether or not the agent is running: the listener starts fine without this permission,
-    // so the only symptom a LAN client would otherwise see is a connect timeout.
-    if (localNetworkWarning != null) {
-        Text(
-            localNetworkWarning,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-        if (onRequestLocalNetworkSettings != null) {
-            OutlinedButton(onClick = onRequestLocalNetworkSettings) {
-                Text("Open settings")
+        // Shown whether or not the agent is running: the listener starts fine without this permission,
+        // so the only symptom a LAN client would otherwise see is a connect timeout.
+        if (localNetworkWarning != null) {
+            Text(
+                localNetworkWarning,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            if (onRequestLocalNetworkSettings != null) {
+                OutlinedButton(onClick = onRequestLocalNetworkSettings) {
+                    Text("Open settings")
+                }
             }
         }
-    }
-    // Shown whether or not the agent is running, and independently of the permission warning above:
-    // an adapter that is switched off and a permission that was never granted are different
-    // failures with different fixes, and treating them as one is what hid this on Android (Rig B
-    // case 6). A scan with the radio off succeeds and finds nothing, so without this line the UI
-    // is as silent as the wire was.
-    radioNotice?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-    }
-    // Shown only while stopped: once a later Start succeeds this is cleared, and a stale reason
-    // next to a running agent would be worse than no reason at all.
-    if (!running) {
-        startFailure?.let {
+        // Shown whether or not the agent is running, and independently of the permission warning above:
+        // an adapter that is switched off and a permission that was never granted are different
+        // failures with different fixes, and treating them as one is what hid this on Android (Rig B
+        // case 6). A scan with the radio off succeeds and finds nothing, so without this line the UI
+        // is as silent as the wire was.
+        radioNotice?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        // Shown only while stopped: once a later Start succeeds this is cleared, and a stale reason
+        // next to a running agent would be worse than no reason at all.
+        if (!running) {
+            startFailure?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 }
@@ -471,6 +477,15 @@ internal class AgentIdentityLoader(private val provider: AgentTlsProvider?) {
     }
 }
 
+/** A setting and its switch, centred on one line; the label takes the width the switch leaves. */
+@Composable
+private fun SwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(end = 12.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    }
+}
+
 /**
  * The encryption switch, this agent's fingerprint, and the control that replaces its identity.
  *
@@ -484,47 +499,59 @@ private fun EncryptionPanel(
     encrypt: Boolean,
     onEncryptChange: (Boolean) -> Unit,
     fingerprint: String?,
+    certificateSha256: String?,
     failure: String?,
     onReset: () -> Unit,
 ) {
-    var confirmReset by remember { mutableStateOf(false) }
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text("Encrypt connections (wss://)", style = MaterialTheme.typography.bodySmall)
-        Switch(checked = encrypt, onCheckedChange = onEncryptChange, enabled = !running)
-    }
-    if (!encrypt) return
-    failure?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-    }
-    if (fingerprint != null) {
-        Text("Agent fingerprint — clients pin this:", style = MaterialTheme.typography.bodySmall)
-        SelectionContainer {
-            Text(fingerprint, style = MaterialTheme.typography.bodySmall)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        var confirmReset by remember { mutableStateOf(false) }
+        SwitchRow("Encrypt connections (wss://)", encrypt, onEncryptChange, enabled = !running)
+        if (!encrypt) {
+            Text(
+                "Off: clients connect over cleartext ws://, which anyone on this network can read, token " +
+                    "included. Turn it on unless a tunnel or proxy encrypts the connection instead.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            return
         }
-        if (!running) {
-            TextButton(onClick = { confirmReset = true }) { Text("New identity") }
+        failure?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
-    }
-    if (confirmReset) {
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
-            title = { Text("Replace this agent's identity?") },
-            text = {
-                Text(
-                    "Every client paired with this agent will refuse to connect until it is given " +
-                        "the new fingerprint.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { confirmReset = false; onReset() }) { Text("Replace") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmReset = false }) { Text("Cancel") }
-            },
-        )
+        if (fingerprint != null) {
+            Text("Agent fingerprint — clients pin this:", style = MaterialTheme.typography.bodySmall)
+            SelectionContainer {
+                Text(fingerprint, style = MaterialTheme.typography.bodySmall)
+            }
+            if (certificateSha256 != null) {
+                // Only the dashboard needs it: a browser cannot pin, and its warning names this instead.
+                Text("Certificate SHA-256, as a browser shows it for the dashboard:", style = MaterialTheme.typography.bodySmall)
+                SelectionContainer {
+                    Text(certificateSha256, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (!running) {
+                TextButton(onClick = { confirmReset = true }) { Text("New identity") }
+            }
+        }
+        if (confirmReset) {
+            AlertDialog(
+                onDismissRequest = { confirmReset = false },
+                title = { Text("Replace this agent's identity?") },
+                text = {
+                    Text(
+                        "Every client paired with this agent will refuse to connect until it is given " +
+                            "the new fingerprint.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { confirmReset = false; onReset() }) { Text("Replace") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmReset = false }) { Text("Cancel") }
+                },
+            )
+        }
     }
 }
 
@@ -540,12 +567,15 @@ private fun SecretField(
     onValueChange: (String) -> Unit,
     label: String,
     enabled: Boolean,
+    supportingText: String? = null,
 ) {
     var revealed by rememberSaveable { mutableStateOf(false) }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(label) },
+        // One line: a floating label that wraps is drawn across the field above it.
+        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingText = supportingText?.let { { Text(it) } },
         visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
         // Password keyboards neither autocorrect nor learn the value, which matters more once it
         // can be shown in the clear.

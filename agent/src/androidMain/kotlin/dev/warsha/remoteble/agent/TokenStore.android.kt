@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -25,4 +26,17 @@ actual suspend fun persistToken(token: String?, secret: AgentSecret) {
     context.tokenDataStore.edit { prefs ->
         if (token.isNullOrBlank()) prefs.remove(key) else prefs[key] = token
     }
+}
+
+// Beside the tokens, in the same file: a setting, not a secret, but kept and cleared with them.
+private val encryptKey = booleanPreferencesKey("encrypt_connections")
+
+actual suspend fun loadEncryptPreference(): Boolean? {
+    val context = androidAgentContext ?: return null
+    return context.tokenDataStore.data.first()[encryptKey]
+}
+
+actual suspend fun persistEncryptPreference(encrypt: Boolean) {
+    val context = androidAgentContext ?: return
+    context.tokenDataStore.edit { prefs -> prefs[encryptKey] = encrypt }
 }

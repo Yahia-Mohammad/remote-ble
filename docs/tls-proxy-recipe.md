@@ -1,7 +1,10 @@
 # TLS-terminating reverse proxy — supported recipe (`TLS-PROXY-01`)
 
-The agent speaks plain WebSocket. To expose it over `wss://`, put a TLS-terminating reverse proxy
-in front of a loopback-bound agent. This is the recipe that
+Every agent can serve `wss://` itself, with a self-signed identity its clients pin (`--tls`; see
+[agent.md](agent.md)), and an agent reachable from the network does so by default. This recipe is the
+other way: a loopback-bound agent serving plain WebSocket, with a TLS-terminating reverse proxy in
+front of it that a real certificate authority vouches for. Use it when clients must validate a CA
+chain rather than pin, for example a browser, or a domain name on the certificate. This is the recipe that
 [`0.9.1-scenarios.md`](conformance/0.9.1-scenarios.md)'s `TLS-PROXY-01` requires, and the concrete
 procedure behind [validation-plan.md](validation-plan.md)'s Rig C.
 

@@ -71,7 +71,7 @@ swiftc "$OUT/launcher.o" "$OUT/MenuBar.o" -o "$APP/Contents/MacOS/agent-launcher
 codesign -f -s - "$APP/Contents/MacOS/agent-launcher" >/dev/null 2>&1
 codesign -f -s - "$APP" >/dev/null 2>&1
 
-echo "==> Launching agent on ws://0.0.0.0:$PORT/agent (logs: $LOG)…"
+echo "==> Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1} (logs: $LOG)…"
 : > "$LOG"
 OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
   --env "AGENT_LIBJVM=$LIBJVM" --env "AGENT_CP=$CP")

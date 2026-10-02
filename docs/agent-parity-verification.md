@@ -288,11 +288,14 @@ retry logic). The `NOT_CONNECTED` pre-check is a Kotlin-side safety gate absent 
 
 ## 11. Built-in TLS (pinned identity, #39)
 
-Opt-in on every agent; see [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
+On every agent, and the default wherever the network can reach one; see
+[proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
 
 | Feature | Kotlin (JVM) | Rust | Kotlin (Android) | Kotlin (iOS) |
 |---|---|---|---|---|
-| Enable | `--tls` / `REMOTE_BLE_TLS=true` | `--tls` / `REMOTE_BLE_TLS=true` | **Encrypt connections (wss://)** switch, per run | Same as Android |
+| Enable | `--tls` / `REMOTE_BLE_TLS=true` | `--tls` / `REMOTE_BLE_TLS=true`; the container image sets it | **Encrypt connections (wss://)** switch, on by default and remembered | Same as Android |
+| Cleartext on a LAN bind | Refused unless `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` (TLS-PIN-05) | Same; also `--allow-cleartext-lan` | The switch turned off, with an on-screen warning | Same as Android |
+| Certificate SHA-256 for browsers | Logged at start | n/a (no dashboard) | Under the fingerprint | Same as Android |
 | Identity storage | `REMOTE_BLE_IDENTITY_FILE`, same default path | `--identity-file` / `REMOTE_BLE_IDENTITY_FILE`, same default path | Android Keystore; the key never leaves it | Keychain; the key never leaves it |
 | File format | PEM: PKCS#8 key **with** public key + certificate | Same; each reads the other's file | n/a (keystore entry) | n/a (Keychain items) |
 | File others can read | Loads with a warning naming the fix | Same | n/a | n/a |

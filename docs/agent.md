@@ -195,7 +195,7 @@ handling, and the checks that prove the proxy forwards the bearer header and fai
 untrusted certificate). The SDK owns no identity system beyond these bearer credentials; it is a
 hook, not a framework.
 
-### Built-in TLS with a pinned identity (all agents, opt-in)
+### Built-in TLS with a pinned identity (all agents)
 
 `--tls` (or `REMOTE_BLE_TLS=true`) makes the JVM agent, and `agent-rs` likewise, serve `wss://`
 itself, with no proxy or CA. Both use the same identity file, so on one host they present the same
@@ -209,7 +209,8 @@ fails inside the TLS handshake, before the bearer token is sent.
 
 | Setting | Meaning |
 |---|---|
-| `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Off by default for now. |
+| `--tls` / `REMOTE_BLE_TLS=true` | Serve `wss://` (and the dashboard as `https://`). Required for a non-loopback bind unless cleartext is allowed below; a loopback bind serves `ws://` without it, for tunnels and the [TLS proxy recipe](tls-proxy-recipe.md). |
+| `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` | Let a non-loopback bind serve cleartext `ws://` without `--tls` (TLS-PIN-05). Without it such a bind refuses to start, naming both ways out; with it the agent warns that the token and BLE traffic cross the network readable. `agent-rs` also takes `--allow-cleartext-lan`. |
 | `REMOTE_BLE_IDENTITY_FILE` | Where the identity lives. Default: `~/Library/Application Support/RemoteBLE/agent-identity.pem` (macOS), `%APPDATA%\RemoteBLE\` (Windows), `$XDG_CONFIG_HOME/remoteble/` or `~/.config/remoteble/` (elsewhere). PEM, owner-only permissions; a file other users can read still loads, with a warning, since a mounted container secret often cannot be narrowed. A key that does not belong to the certificate is refused. |
 | `--reset-identity` / `REMOTE_BLE_RESET_IDENTITY=true` | Discard the identity; a new one is created on the next TLS start. Every paired client then fails with an identity error until it re-pairs. |
 | `--print-pairing` | Print the pairing URI a client takes in (`Pairing: remoteble://…`, [spec §3.2](agent-conformance-spec.md)), one line per credential. It carries the token, so it goes to standard output, never the log, and is a flag only, with no variable. The host is the bound address, or for `0.0.0.0` the address of the interface carrying the default route; with no route, loopback and a warning to `--bind` the LAN address. |
@@ -223,8 +224,9 @@ which real peer, and the rate limiter, the dashboard's own-device gate and the m
 peer through it (`ApplicationCall.peer`); reading `request.origin` behind the front would make every
 client look local. The design and the remaining phases (pairing QR codes, encrypted-by-default) are in [proposals/agent-transport-encryption.md](proposals/agent-transport-encryption.md).
 
-**Android agent.** The app's **Encrypt connections (wss://)** switch does the same, off by default
-for now and chosen per run. The key is generated in Android Keystore and never leaves it. The
+**Android agent.** The app's **Encrypt connections (wss://)** switch does the same. It is on by
+default, and switching it off is remembered, with a warning on screen that the connection is then
+readable on the network. The key is generated in Android Keystore and never leaves it. The
 keystore's own self-signed certificate cannot carry `agent.remoteble.invalid`, so the agent builds
 its certificate as the desktop agents do, signs it with the keystore key, and stores it over the
 generated one. The fingerprint shows under the switch, selectable for pasting into a client, and
@@ -798,8 +800,8 @@ Everything above — `EngineBleBackend`, `AgentWebSocketServer`, `Dashboard`, `A
     the `TokenStore` `expect`/`actual` (Android DataStore, iOS `NSUserDefaults`). If it's left
     blank, a random token is generated on Start and shown next to the address — **the mobile agent
     never runs token-free**, because unlike the CLI (typically firewalled to localhost, or given a
-    token via `REMOTE_BLE_TOKEN`) it listens on `0.0.0.0` on a shared Wi-Fi, over cleartext unless
-    the Android agent's encryption switch is on (see the built-in TLS section above).
+    token via `REMOTE_BLE_TOKEN`) it listens on `0.0.0.0` on a shared Wi-Fi, encrypted unless the user
+    switches **Encrypt connections** off (see the built-in TLS section above).
 - **Android**: [`AgentService.kt`](../agent/src/androidMain/kotlin/dev/warsha/remoteble/agent/AgentService.kt)
   is a foreground service (`connectedDevice` type) whose only job is the persistent notification
   Android requires to keep the process alive backgrounded — it owns no BLE/server logic. Rather

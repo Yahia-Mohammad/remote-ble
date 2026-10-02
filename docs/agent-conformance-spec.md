@@ -54,7 +54,11 @@ WebSocket binding that all reference-compatible implementations MUST provide.
 4. Either side MAY close the connection at any time. Closure is a transport-level event
    (§9, §10) — it is **not** in itself a BLE disconnect.
 5. The endpoint locator (URL / host:port / DNS name) is out of scope; it is supplied to the
-   client out of band.
+   client out of band, or by a pairing URI (§3.2).
+6. A listener reachable from other devices (any non-loopback bind) MUST serve the encrypted
+   binding of §3.1, unless the operator explicitly opts into cleartext; it MUST NOT fall back to
+   cleartext on its own. Loopback MAY serve cleartext, since a tunnel or a TLS proxy in front of it
+   keeps the traffic off the network.
 
 ### 3.1 Encrypted binding (`wss://` with a pinned identity)
 
@@ -86,7 +90,7 @@ identity error on any other, and MUST NOT retry that failure as if the agent wer
 | TLS-PIN-02 | A client pinning another identity | Identity error; the agent never reads the upgrade request. | `aDifferentIdentityFailsBeforeTheAgentSeesAnyRequest` | `tls_pin_02_a_different_identity_fails_before_any_request_is_read`, `tls_accept_loop_serves_pinned_clients_over_real_tcp` |
 | TLS-PIN-03 | Restart, then reset | Identity stable across the restart; a reset breaks the pin. | `theIdentitySurvivesARestartAndAResetBreaksThePin` | `identity::tests::the_identity_is_stable_across_loads_and_changes_on_reset` |
 | TLS-PIN-04 | Agent restart; transport drop inside grace | Reconnect over `wss://` restores subscriptions, and the same principal and client id resume the lease. | `aPinnedClientReconnectsAndResumesItsSubscriptionAfterARestart`, `aLeaseHeldThroughATransportDropResumesOverWss` | `tls_pin_04_a_lease_held_through_a_drop_resumes_over_tls` |
-| TLS-PIN-05 | Non-loopback cleartext bind | Refused without the explicit opt-in; loopback `ws://` keeps working. | Pending: the gate itself lands in phase 5 of the proposal. | Pending, as Kotlin. |
+| TLS-PIN-05 | Non-loopback cleartext bind | Refused without the explicit opt-in; loopback `ws://` keeps working. | `MainTest.tlsPin05ANonLoopbackBindServesCleartextOnlyWhenAllowed` | `tests::tls_pin_05_a_non_loopback_bind_serves_cleartext_only_when_allowed` |
 | TLS-PIN-06 | A TLS 1.2-only client | Connects. | Every Kotlin test above: the CIO client speaks only 1.2. | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
 | TLS-PIN-07 | Peer address behind TLS termination | Rate limiting and the dashboard gate see the real peer. | `theAgentRecordsTheRealPeerNotTheRelay`, `theDashboardStillRefusesANonLoopbackPeerBehindTheFront` | Not applicable: rustls terminates in-process, so the peer address is native. |
 

@@ -401,3 +401,16 @@ pairing URI too, and passed against the printed one.
 Not in this phase: the dashboard still shows no certificate SHA-256 for a browser's warning (§5.7);
 it belongs with phase 5, when the dashboard is `https://` by default. Client apps keep the pairing in
 memory, as they do the address and token.
+
+**Phase 5, encrypted by default (2026-10-02).** A listener the network can reach now serves `wss://`
+unless the operator says otherwise. The desktop agents refuse a non-loopback bind without `--tls`,
+naming `--tls` and `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` as the two ways out (TLS-PIN-05, now tested
+on both: `MainTest.tlsPin05…` and `tls_pin_05_…`); loopback keeps `ws://` for tunnels and the TLS proxy
+recipe. The gate is separate from the token rule, so each refusal names its own opt-in, and in
+`agent-rs` it runs before Bluetooth starts. The phone agents start with **Encrypt connections** on;
+switching it off is remembered and shown as a warning. The `agent-rs` container sets `REMOTE_BLE_TLS`
+and keeps its identity on a volume, and its smoke test checks cleartext is refused. §5.7 is done: the
+Kotlin agents show the certificate's SHA-256 as browsers display it, for the `https://` dashboard's
+first-visit warning. The conformance spec makes the encrypted binding a MUST for a non-loopback
+listener (§3, item 6), `SECURITY.md` no longer calls cleartext the design, and
+[migrate-to-0.14.0.md](../migrate-to-0.14.0.md) covers each change. It ships in 0.14.0.

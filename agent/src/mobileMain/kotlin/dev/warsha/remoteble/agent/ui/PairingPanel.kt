@@ -1,6 +1,8 @@
 package dev.warsha.remoteble.agent.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -35,26 +37,28 @@ import kotlinx.coroutines.launch
  */
 @Composable
 internal fun PairingPanel(pairing: AgentPairing?, unavailable: String?) {
-    var shown by remember { mutableStateOf(false) }
-    TextButton(onClick = { shown = !shown }) { Text(if (shown) "Hide pairing code" else "Show pairing code") }
-    if (!shown) return
-    if (pairing == null) {
-        Text(unavailable ?: "No pairing to show.", style = MaterialTheme.typography.bodySmall)
-        return
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        var shown by remember { mutableStateOf(false) }
+        TextButton(onClick = { shown = !shown }) { Text(if (shown) "Hide pairing code" else "Show pairing code") }
+        if (!shown) return@Column
+        if (pairing == null) {
+            Text(unavailable ?: "No pairing to show.", style = MaterialTheme.typography.bodySmall)
+            return@Column
+        }
+        val uri = pairing.toUri()
+        Text(
+            if (pairing.encrypted) {
+                "Scan with the client phone's camera, or copy the link into the client. It carries the token " +
+                    "and this agent's fingerprint, so show it only to someone you would give the token."
+            } else {
+                "Scan with the client phone's camera, or copy the link into the client. It carries the token, " +
+                    "and this agent is not encrypted: turn on Encrypt connections for a pinned pairing."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        QrCode(uri, Modifier.widthIn(max = 320.dp).fillMaxWidth().padding(vertical = 8.dp))
+        CopyPairingButton(uri)
     }
-    val uri = pairing.toUri()
-    Text(
-        if (pairing.encrypted) {
-            "Scan with the client phone's camera, or copy the link into the client. It carries the token " +
-                "and this agent's fingerprint, so show it only to someone you would give the token."
-        } else {
-            "Scan with the client phone's camera, or copy the link into the client. It carries the token, " +
-                "and this agent is not encrypted: turn on Encrypt connections for a pinned pairing."
-        },
-        style = MaterialTheme.typography.bodySmall,
-    )
-    QrCode(uri, Modifier.fillMaxWidth().widthIn(max = 320.dp).padding(vertical = 8.dp))
-    CopyPairingButton(uri)
 }
 
 /**

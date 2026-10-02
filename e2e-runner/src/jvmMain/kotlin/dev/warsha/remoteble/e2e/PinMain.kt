@@ -8,6 +8,7 @@ import dev.warsha.remoteble.client.TransportState
 import dev.warsha.remoteble.client.WebSocketAgentTransport
 import dev.warsha.remoteble.client.pinnedWebSocketHttpClient
 import dev.warsha.remoteble.protocol.AgentFingerprint
+import dev.warsha.remoteble.protocol.AgentPairing
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.seconds
@@ -31,12 +32,18 @@ import kotlinx.coroutines.withTimeout
  *
  *   REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:pinRun --args "wss://192.168.1.23:8080/agent sha256:<hex>"
  *
- * args: <wss-url> <fingerprint> [token] (token also read from REMOTE_BLE_TOKEN).
+ * Or with the agent's pairing URI, as a client that scanned or pasted it would (quote it: it has `&`):
+ *
+ *   ./gradlew :e2e-runner:pinRun --args "'remoteble://192.168.1.23:8080?token=…&fp=sha256:…'"
+ *
+ * args: <wss-url> <fingerprint> [token] (token also read from REMOTE_BLE_TOKEN), or <pairing-uri>.
  */
 fun main(args: Array<String>): Unit = runBlocking {
-    val url = args.getOrNull(0) ?: usage()
-    val pin = args.getOrNull(1)?.let(AgentFingerprint::parseOrNull) ?: usage()
-    val token = args.getOrNull(2)?.ifBlank { null } ?: System.getenv("REMOTE_BLE_TOKEN")
+    val pairing = args.getOrNull(0)?.takeIf { it.startsWith("${AgentPairing.SCHEME}://", ignoreCase = true) }
+        ?.let { AgentPairing.parseOrNull(it) ?: usage() }
+    val url = pairing?.url ?: args.getOrNull(0) ?: usage()
+    val pin = pairing?.let { it.fingerprint ?: usage() } ?: args.getOrNull(1)?.let(AgentFingerprint::parseOrNull) ?: usage()
+    val token = if (pairing != null) pairing.token else args.getOrNull(2)?.ifBlank { null } ?: System.getenv("REMOTE_BLE_TOKEN")
     println("== RemoteBle pinned TLS check (TLS-PIN-01, 02) ==")
     println("agent: $url  pin: $pin  token=${if (token != null) "set" else "none"}")
 
@@ -99,6 +106,6 @@ private fun otherThan(pin: AgentFingerprint): AgentFingerprint {
 }
 
 private fun usage(): Nothing {
-    System.err.println("usage: pinRun <wss-url> <sha256:fingerprint> [token]")
+    System.err.println("usage: pinRun <wss-url> <sha256:fingerprint> [token]  or  pinRun <remoteble:// pairing with fp>")
     exitProcess(2)
 }

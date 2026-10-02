@@ -109,6 +109,33 @@ read by `certificateSpki`, which `CertificateSpkiTest` checks against the JDK.
 **The Android client** pins through OkHttp: `OkHttpPinningTest`, an Android host test, runs
 `TLS-PIN-01` and `02` against the Kotlin agent's front.
 
+### 3.2 Agent pairing URI
+
+How a client takes in everything it needs to reach an agent at once: the address, the bearer token
+and the identity to pin. This is pairing a client with an agent, not BLE pairing (`Op.Pair`).
+
+```
+remoteble://<host>:<port>?token=<token>&fp=sha256:<hex>
+```
+
+1. The scheme is `remoteble`, compared case-insensitively. The authority is `host:port` with an
+   explicit port; an IPv6 host is bracketed (`[fe80::1]:8080`) and carries no zone. There is no user
+   information, path, or fragment.
+2. `token` is the bearer token, percent-encoded as RFC 3986 UTF-8, every byte outside the unreserved
+   set; `+` stands for itself. Absent for an agent that needs no token.
+3. `fp` is the fingerprint of §3.1. Present exactly when the agent serves `wss://`: the client then
+   connects to `wss://<host>:<port>/agent` and MUST pin it. Absent, the endpoint is
+   `ws://<host>:<port>/agent`, and a client SHOULD say that the connection is not encrypted.
+4. A client MUST refuse a repeated parameter and SHOULD ignore an unknown one, so a later version
+   can add parameters.
+5. The URI carries the token, so an agent shows or prints it only on request (a QR code behind a
+   control, `--print-pairing`), never in a log. A client that is opened with one MUST ask the user
+   before it replaces the agent it talks to, since any app or page can open a link.
+
+`AgentPairing` in `:protocol` implements this; `AgentPairingTest` and the Rust agent's
+`transport::pairing` tests write and read one shared example, so the two agents print the same URI
+for the same pairing.
+
 ## 4. Handshake
 
 On the WebSocket upgrade request:

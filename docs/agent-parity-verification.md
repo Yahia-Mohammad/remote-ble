@@ -303,6 +303,8 @@ Opt-in on every agent; see [proposals/agent-transport-encryption.md](proposals/a
 | TLS versions | 1.3 and 1.2 (JSSE) | 1.3 and 1.2 (rustls, `ring`) | 1.3 and 1.2 (Conscrypt) from Android 10; 1.2 below | 1.3 and 1.2 (Network.framework) |
 | Cipher suites | AEAD only: AES-GCM, ChaCha20-Poly1305 | Same (rustls offers nothing else) | Same front as the JVM | Same, set on the TLS options |
 | Reinstall | n/a | n/a | New identity: the Keystore key goes with the app | New identity: the first run of an installation discards a Keychain leftover |
+| Pairing URI | `--print-pairing`, and the dashboard's **Pair a client** QR code | `--print-pairing` (no dashboard) | **Show pairing code**: QR code and copyable link | Same as Android |
+| Pairing host | Bound address, or the default route's for `0.0.0.0` | Same | The Wi-Fi/LAN address | Same as Android |
 | Termination | In-process front relaying to CIO on loopback, real peer via registry | `tokio-rustls` before the upgrade, peer address native | Same front as the JVM | `NWListener` front, same registry; byte pump in Objective-C |
 | Handshake bound | 10 s total, however the bytes trickle in | 10 s total | Same front as the JVM | 10 s timer; the socket is released 15–20 s in |
 | Silent after the handshake | Closed at CIO's 45 s idle timeout | Closed at 10 s (upgrade request deadline) | Same as the JVM | Same as the JVM |

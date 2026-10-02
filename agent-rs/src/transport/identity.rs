@@ -209,15 +209,23 @@ fn write(path: &Path, pem: &str) -> Result<(), IdentityError> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(io_error)?;
-    let temp = dir.join(format!(".agent-identity.{}.tmp", std::process::id()));
+    // Random, not the PID: containers sharing a volume each run the agent as PID 1.
+    let mut nonce = [0u8; 8];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+        .map_err(|_| IdentityError::Generate("no system randomness".into()))?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temp = dir.join(format!(".agent-identity.{nonce}.tmp"));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // Opened before the cleanup below can run, so a failure here never removes another's file.
+    let mut file = options.open(&temp).map_err(io_error)?;
     let result = (|| {
-        let mut file = options.open(&temp)?;
         file.write_all(pem.as_bytes())?;
         file.sync_all()?;
+        // Closed before publishing: Windows refuses to rename an open file.
+        drop(file);
         match fs::hard_link(&temp, path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()), // lost the race
@@ -354,6 +362,19 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(FILE_NAME)]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn another_writers_temp_file_neither_blocks_creation_nor_is_removed() {
+        let dir = temp_dir("temp");
+        // What a second container sharing the volume, also PID 1, would have open.
+        let foreign = dir.join(format!(".agent-identity.{}.tmp", std::process::id()));
+        fs::write(&foreign, "in progress").unwrap();
+
+        load_or_create(&dir.join(FILE_NAME), false).unwrap();
+
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), "in progress");
         fs::remove_dir_all(dir).unwrap();
     }
 

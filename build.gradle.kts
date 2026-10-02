@@ -1,3 +1,15 @@
+// AGP's own Bouncy Castle, on the plugin classpath; see the pin further down for why.
+buildscript {
+    configurations.classpath {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "org.bouncycastle" && requested.name.endsWith("-jdk18on")) {
+                useVersion(libs.versions.bouncycastle.get())
+                because("Bouncy Castle below 1.85 is inside GHSA-9pwp-9qqc-pr26 and related advisories")
+            }
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlin.multiplatform) apply false
     alias(libs.plugins.kotlin.serialization) apply false
@@ -41,6 +53,22 @@ subprojects {
             }
         }
     }
+}
+
+// Bouncy Castle reaches the build twice, both times as tooling: 1.79 through AGP's sdk-common (the
+// plugin classpath and every Android module's lint) and 1.84 through KGP's publishing-validation
+// configuration. Both are inside critical advisories (GHSA-574f-3g2m-x479 below 1.80.2,
+// GHSA-9pwp-9qqc-pr26 below 1.85) and high/medium ones. Nothing ships it, but the graph GitHub scans
+// does, so raise every module of the jdk18on family together, in every configuration.
+val patchedBouncyCastle = libs.versions.bouncycastle.get()
+fun ResolutionStrategy.patchBouncyCastle(version: String) = eachDependency {
+    if (requested.group == "org.bouncycastle" && requested.name.endsWith("-jdk18on")) {
+        useVersion(version)
+        because("Bouncy Castle below 1.85 is inside GHSA-9pwp-9qqc-pr26 and related advisories")
+    }
+}
+allprojects {
+    configurations.configureEach { resolutionStrategy.patchBouncyCastle(patchedBouncyCastle) }
 }
 
 // Coordinates come from the tracked root gradle.properties (GROUP / VERSION_NAME) — the same

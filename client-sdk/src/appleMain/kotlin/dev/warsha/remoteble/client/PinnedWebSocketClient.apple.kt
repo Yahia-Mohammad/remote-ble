@@ -37,19 +37,15 @@ import platform.Security.SecTrustCopyCertificateChain
 import platform.Security.SecTrustRef
 
 /**
- * A WebSocket [HttpClient] for a `wss://` agent whose identity this client pinned at pairing.
- *
- * The agent's certificate is self-signed, so no certificate authority is consulted: the connection
- * is trusted exactly when the agent's TLS key hashes to [fingerprint]. NSURLSession hands the server
- * trust to this client's challenge handler, which accepts it only for the pinned key; host names are
- * not checked, since agents are reached by IP. A different key cancels the handshake before any
- * request, and so before the bearer token, is sent.
+ * iOS and macOS: Ktor's Darwin engine, whose NSURLSession challenge handler accepts the server trust
+ * only when the leaf certificate's SPKI hashes to the pin; host names are not checked. App Transport
+ * Security needs no exception for it: a default-ATS app reached an agent's LAN address this way.
  *
  * NSURLSession reports a cancelled challenge as a generic cancellation, so the handler records the
  * mismatch and the client raises [AgentIdentityMismatchException] in its place, which the transport
  * treats as terminal.
  */
-fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient {
+actual fun pinnedWebSocketHttpClient(fingerprint: AgentFingerprint): HttpClient {
     val refused = AtomicReference<AgentIdentityMismatchException?>(null)
     val client = HttpClient(Darwin) {
         engine {

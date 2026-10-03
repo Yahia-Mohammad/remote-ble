@@ -424,3 +424,27 @@ serving `wss://` (simulated heart-rate profile, token `capture-token-7Qz`): 1,06
 name `Warsha HRM`, the service UUID or the op name `scan`. The control, the same agent in cleartext
 with `scanRun` through the same relay, carried the token and `Authorization` to the agent and the
 device name back, so the search would have found them.
+
+**Release checks on hardware (2026-10-03).** Three things the earlier phases had only covered with
+simulators, unit tests or a single run:
+
+- **A phone's own camera.** The JVM agent served `wss://` on the LAN, and its dashboard's pairing
+  code (`/api/pairing`) was shown on the Mac's screen. The Pixel 8's Camera app (Android 17)
+  recognised it, offered the `remoteble://` link, and opened the Android client with it (the
+  activity record shows it launched from `com.google.android.GoogleCamera`); the client asked, and
+  paired. Connecting then failed silently: the client lacked API 37's `ACCESS_LOCAL_NETWORK`, which
+  the agent had gained in #36 and the emulator, reaching the host through `10.0.2.2`, never needs.
+  With that fixed (#58), the client connected from the phone's LAN address over pinned `wss://` and
+  scanned. The iPhone's camera was not tried in this round.
+- **The Rust agent's `--print-pairing`, live.** `agent-rs` on macOS (through `run-agent-rs.sh`, so
+  Bluetooth is granted) with `--tls --print-pairing` on `0.0.0.0` printed the Mac's LAN address, the
+  configured token, and the fingerprint of the identity file the JVM agent also uses. `pinRun`
+  given that URI connected pinned, scanned 67 real advertisements, and refused a wrong pin with
+  `GAVE_UP`.
+- **The TLS-PIN-02 flake.** On #55, `aDifferentIdentityFailsBeforeTheAgentSeesAnyRequest` once saw
+  `connect()` return instead of failing: the first attempt failed with something other than the
+  identity error and the transport began retrying. It never recurred: 40 runs of the class and 12
+  with the agent's suite alongside on a hosted runner, and a probe repeating the scenario with fresh
+  identities on both sides, recording the cause chain of any other outcome, 9,000 times on a hosted
+  runner and 1,500 locally, found nothing. A mutation (the probe pinning the right identity) was
+  flagged on every attempt. The test now reports the transport state and the log if it fails again.

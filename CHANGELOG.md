@@ -18,10 +18,18 @@ protocol version: **1**.
 
 ## [Unreleased]
 
-> Built-in TLS for every agent, pinned clients and pairing in the SDK (#39), and encryption by
-> default wherever the network can reach an agent: see
-> [migrate-to-0.14.0.md](docs/migrate-to-0.14.0.md). `:protocol` and `:client-sdk` gain public API,
-> and a LAN agent's default changes, so these ship with the next release, 0.14.0.
+## [0.14.0] - 2026-10-04
+
+> An encryption release: every agent can serve `wss://` behind its own self-signed identity,
+> clients pin its fingerprint, and a `remoteble://` pairing link or QR code hands a client the
+> address, token and fingerprint at once (#39). Encryption is the default wherever the network can
+> reach an agent. The wire protocol version is unchanged at **1**.
+>
+> **One breaking default:** a desktop agent bound to a non-loopback address without `--tls` now
+> refuses to start unless `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` says cleartext is intended —
+> see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md).
+>
+> This is a **minor** release: `:protocol` and `:client-sdk` gain public API.
 
 ### Added
 
@@ -854,6 +862,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.14.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.11.0

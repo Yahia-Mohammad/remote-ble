@@ -149,7 +149,7 @@ fun agentModule(config: AgentConfig): Module = module {
             lifecycleScope = get(qualifier = org.koin.core.qualifier.named("agent")),
             maxConnections = config.maxConnections,
             observer = get<AgentMonitor>(),
-            agentInfo = "RemoteBLE Agent 0.13.0 (kable/${platformName()})",
+            agentInfo = "RemoteBLE Agent 0.14.0 (kable/${platformName()})",
             strictMode = get(),
             scanCoordinator = get(),
             writePolicy = config.writePolicy,

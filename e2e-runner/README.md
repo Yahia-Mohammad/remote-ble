@@ -44,6 +44,27 @@ REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:jvmRun --args "ws://localhost:8080
 `--args "<ws-url> [token]"` — URL defaults to `ws://localhost:8080/agent`; the token is also read
 from `REMOTE_BLE_TOKEN`.
 
+`jvmRun` and `scanRun` use the platform's default client, so they reach a loopback `ws://` agent or
+a `wss://` one behind a CA-backed proxy. For an agent serving its own pinned identity, use `pinRun`.
+
+## Pinned TLS: `pinRun`
+
+Checks an agent serving `wss://` with its own identity (`TLS-PIN-01`, `02` and `06` of the
+conformance spec): the SDK's pinned client connects and runs a scan through it, then a client
+pinning a different fingerprint must be refused inside the TLS handshake and give up at once. It is
+how the phone agents and a LAN agent are checked from a laptop.
+
+```
+# With the agent's pairing link (quote it: it contains &):
+./gradlew :e2e-runner:pinRun --args "'remoteble://192.168.1.23:8080?token=…&fp=sha256:…'"
+
+# Or with the URL and fingerprint separately:
+REMOTE_BLE_TOKEN=secret ./gradlew :e2e-runner:pinRun --args "wss://192.168.1.23:8080/agent sha256:<hex>"
+```
+
+It prints `RESULT: PASS` or `RESULT: FAIL` and exits accordingly. The token is reported only as
+`set` or `none`.
+
 > **Needs hardware.** This is the live bring-up: a Mac with Bluetooth (running the agent) and a
 > phone running the test peripheral. It is not part of `./gradlew build` (it only compiles there) —
 > it's launched by hand against real devices. The automated fake-backed coverage lives in

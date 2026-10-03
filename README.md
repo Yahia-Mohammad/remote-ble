@@ -54,6 +54,19 @@ the whole point of RemoteBLE. Full walkthrough with expected output at every ste
 [getting-started.md](docs/getting-started.md); every public class in
 [client-sdk.md](docs/client-sdk.md).
 
+**Over a network, the agent is encrypted.** An agent other devices can reach serves `wss://` with
+its own self-signed identity, which the client pins. The agent hands out its address, token and
+fingerprint as one pairing link (a QR code on the phone agents and the dashboard, or
+`--print-pairing`), and only the transport line changes:
+
+```kotlin
+val pairing = AgentPairing.parse("remoteble://192.168.1.20:8080?token=…&fp=sha256:…")
+val transport = WebSocketAgentTransport(pairing.url, scope, pairingWebSocketHttpClient(pairing), authToken = { pairing.token })
+```
+
+A different key fails inside the TLS handshake, before the token is sent, with
+`AgentIdentityMismatchException`. See [agent.md](docs/agent.md#built-in-tls-with-a-pinned-identity-all-agents).
+
 > **Android and plain `ws://`.** From targetSdk 28, Android's network security policy forbids
 > cleartext traffic unless the app opts in, and `defaultWebSocketHttpClient()` runs on OkHttp, which
 > enforces it. An app with no network security config therefore cannot reach a `ws://` agent through
@@ -69,7 +82,8 @@ the whole point of RemoteBLE. Full walkthrough with expected output at every ste
 > `modules(remoteBleClientModule(config), module { single<HttpClient> { cioWebSocketHttpClient() } })`.
 > The alternatives are a network security config that permits cleartext for the agent's host (the
 > repo's `android-client` does this for the emulator's `10.0.2.2`), or reaching the agent over
-> `wss://` through a [TLS proxy](docs/tls-proxy-recipe.md).
+> `wss://`: its own pinned TLS (above), which needs no network security config, or a
+> [TLS proxy](docs/tls-proxy-recipe.md).
 
 ## System at a glance
 
@@ -158,7 +172,8 @@ dependency — see [Running the agent](#running-the-agent).
 - **Resilient by design** — reconcile-on-reconnect (auto-replays connections / subscriptions / scans), per-op-class timeouts, and WebSocket liveness pings.
 - **Transport-agnostic** — the transport seam is a plain byte pipe; WebSocket today, raw TCP or a cloud relay drop in without touching the session or BLE layers.
 - **Two agents, one wire contract** — a Kotlin/Kable and a native Rust/`btleplug` agent, both speaking the same versioned, capability-negotiated **CBOR** protocol (JSON for debugging), interop-tested.
-- **Optional bearer-token auth** at the handshake, plus an optional status dashboard protected by a separate operator credential (native Compose UI on the phone agents).
+- **Encrypted by default on the network** — every agent serves `wss://` with a long-lived self-signed identity the client pins, handed over in one pairing link or QR code; no certificate authority, proxy or trust-store change. Cleartext `ws://` stays for loopback, tunnels, and an explicit opt-in.
+- **Bearer-token auth** at the handshake (required on any LAN bind), plus an optional status dashboard protected by a separate operator credential, served as `https://` by an encrypted agent (native Compose UI on the phone agents).
 
 ## How the system works
 
@@ -189,12 +204,12 @@ architecture, [protocol](docs/protocol.md), [client SDK](docs/client-sdk.md),
 [agent](docs/agent.md), [end-to-end flows + sequence diagrams](docs/flows.md),
 [design rationale](docs/design-decisions.md), [build & testing](docs/build-and-testing.md).
 
-Release scope is tracked in [`docs/proposals/0.10.0-scope.md`](docs/proposals/0.10.0-scope.md),
-which covers radio-less CI, the Rust-agent container, deferred validation, and the consolidated
-Maven Central release; the [CHANGELOG](CHANGELOG.md) is the shipped history and
-[`docs/proposals/0.9.1-hardening-decisions.md`](docs/proposals/0.9.1-hardening-decisions.md) records
-the accepted security/lifecycle hardening. The future
-[AgentProxy design](docs/proposals/agent-proxy.md) is explicitly outside the 0.10.0 release.
+The [CHANGELOG](CHANGELOG.md) is the shipped history, and each feature's design of record is under
+[`docs/proposals/`](docs/README.md#proposals-design-records): the encrypted transport and pairing in
+[`agent-transport-encryption.md`](docs/proposals/agent-transport-encryption.md), the accepted
+security/lifecycle hardening in
+[`0.9.1-hardening-decisions.md`](docs/proposals/0.9.1-hardening-decisions.md). The
+[AgentProxy design](docs/proposals/agent-proxy.md) is a deferred future feature.
 
 ## Modules
 
@@ -205,7 +220,7 @@ the accepted security/lifecycle hardening. The future
 | `:client-sdk` | Session, transport, `RemotePeripheral`/`RemoteScanner` | `:protocol`, `:log`, coroutines, Kable. Targets: JVM (tests) + Android + iOS + macOS |
 | `:agent` | Remote Bluetooth agent (Kotlin) + live status dashboard + a Compose Multiplatform status UI (Android/iOS). Run via `agent/run-agent.sh` (JVM) or the `android-agent`/`ios-agent` apps | `:protocol`, `:log`, coroutines, Ktor server, Kable, Compose Multiplatform. Targets: JVM + Android + iOS |
 | `agent-rs` | Native cross-platform Bluetooth agent (Rust 2024). Run via the self-bootstrapping `run-agent-rs.sh` | tokio, tokio-tungstenite, btleplug, serde/ciborium. Targets: macOS + Linux |
-| `:e2e-runner` | Live E2E runner (`jvmRun`) + radio-less scan smoke test (`scanRun`) | `:client-sdk` (JVM). See [README](e2e-runner/README.md) |
+| `:e2e-runner` | Live E2E runner (`jvmRun`), radio-less scan smoke test (`scanRun`), and the pinned-TLS check against a live agent (`pinRun`) | `:client-sdk` (JVM). See [README](e2e-runner/README.md) |
 | `:client-ui` | The central demo's UI (`RemoteBleApp`: `ScanScreen`/`DeviceScreen`) + orchestration (`RemoteBleController`) — Compose Multiplatform, shared by `:android-client` and `ios-client/` | `:client-sdk`. Targets: Android (library) + iOS |
 | `:android-client` | Thin Android app shell around `:client-ui`: scans through the host agent over `ws://10.0.2.2:8080/agent` (no radio, `INTERNET` only) | `:client-ui` |
 | `ios-client/` | Thin, logic-free XcodeGen launcher shell for `:client-ui`'s iOS target (standalone Xcode project, **not** a Gradle module) | `:client-ui`'s exported `RemoteBleClient.xcframework`. See [README](ios-client/README.md) |
@@ -221,9 +236,10 @@ the accepted security/lifecycle hardening. The future
 
 | | Version |
 |---|---|
-| Kotlin | 2.4.0 |
+| Kotlin | 2.4.10 |
 | kotlinx-coroutines | 1.11.0 |
-| kotlinx-serialization (+cbor) | 1.9.0 |
+| kotlinx-serialization (+cbor) | 1.11.0 |
+| Ktor | 3.5.1 |
 | Gradle | 9.5.1 (wrapper) |
 | Android Gradle Plugin | 9.3.0 (compileSdk 37, minSdk 24; consumers need compileSdk 36+) |
 | JDK toolchain | 17 |
@@ -275,7 +291,7 @@ macOS download: build + run from source with the scripts below (they assemble an
 ### From source — macOS (`run-agent.sh`)
 
 ```sh
-agent/run-agent.sh 8080                       # ws://0.0.0.0:8080/agent, real CoreBluetooth
+agent/run-agent.sh 8080                       # ws://127.0.0.1:8080/agent, real CoreBluetooth
 
 # Require a bearer token (clients must return the same value from WebSocketAgentTransport.authToken):
 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
@@ -286,16 +302,25 @@ REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
 touches CoreBluetooth — macOS TCC only grants Bluetooth to a signed `.app` bundle that declares
 `NSBluetoothAlwaysUsageDescription` and is launched via LaunchServices. The script wraps a tiny JNI
 launcher (`agent/macos-launcher/`) in such a bundle, `open`s it, and streams the log (Ctrl-C stops
-it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows status with recent
-activity and a dashboard link.
+it). First run prompts once for Bluetooth; a menu-bar item (🟢/🟡) shows whether the agent is up,
+and with `REMOTE_BLE_OPERATOR_TOKEN` set also its clients, devices and recent activity.
 
 Both desktop agents bind to loopback by default. To expose an agent on a LAN, choose an explicit
-`REMOTE_BLE_BIND`/`--bind` address and configure credentials; an open LAN listener is refused
-unless the explicitly unsafe development override is set. `REMOTE_BLE_TOKEN` is the legacy
-`default` principal. For separate clients use `REMOTE_BLE_TOKENS='lab-a=secret-a,lab-b=secret-b'`.
-The bearer secret selects the principal; `X-RemoteBle-Client` is only a bounded reconnect key
-within that principal. Deploy LAN use behind a TLS-terminating reverse proxy or VPN; direct
-`ws://` is for trusted networks/development.
+`REMOTE_BLE_BIND`/`--bind` address, configure credentials, and serve it encrypted with `--tls`
+(`REMOTE_BLE_TLS=true`):
+
+```sh
+REMOTE_BLE_BIND=0.0.0.0 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080 --tls --print-pairing
+# → Agent identity: sha256:…
+# → Pairing: remoteble://192.168.1.20:8080?token=…&fp=sha256:…   (give this to clients)
+```
+
+A LAN listener without credentials is refused unless the explicitly unsafe development override
+is set, and one without `--tls` unless `REMOTE_BLE_ALLOW_CLEARTEXT_LAN=true` says cleartext is
+intended. `REMOTE_BLE_TOKEN` is the legacy `default` principal. For separate clients use
+`REMOTE_BLE_TOKENS='lab-a=secret-a,lab-b=secret-b'`. The bearer secret selects the principal;
+`X-RemoteBle-Client` is only a bounded reconnect key within that principal. The identity, its reset
+and pairing are in [agent.md](docs/agent.md#built-in-tls-with-a-pinned-identity-all-agents).
 
 ### Run a radio-less simulated JVM agent
 
@@ -360,8 +385,10 @@ sudo xcode-select -s /Applications/Xcode.app
 cd ios-agent && xcodegen generate && open RemoteBleAgent.xcodeproj
 ```
 
-Tap **Start** in the app; a laptop on the same network can then point a client (or
-`:e2e-runner:scanRun`) at `ws://<phone-ip>:8080/agent`, same as the macOS agent.
+Tap **Start** in the app. The phone agents encrypt by default, so a client on the same network
+pairs with them: **Show pairing code** reveals a QR code that a phone's camera opens in the client
+app, and a link to paste. `./gradlew :e2e-runner:pinRun --args "'<pairing link>'"` checks one from a
+laptop.
 
 > **Android** keeps running backgrounded via a foreground service (`AgentService`) — the
 > app requests `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT` on first launch, plus `ACCESS_LOCAL_NETWORK` on
@@ -374,10 +401,12 @@ Tap **Start** in the app; a laptop on the same network can then point a client (
 
 ### Status dashboard
 
-The agent serves a live, mobile-friendly status page at `http://<host>:8080/` (same
-port as the WebSocket endpoint) on every target, including the phone agents above. It
-shows connected RemoteBLE clients, connected hardware, and a rolling activity log,
-polling `GET /api/state` (JSON) once a second. It is read-only; configuration mutation routes are
+The Kotlin agent serves a live, mobile-friendly status page on the WebSocket port, as
+`https://<host>:8080/` when encrypted and `http://` otherwise, on every target including the phone
+agents above. It shows connected RemoteBLE clients, connected hardware, and a rolling activity log,
+polling `GET /api/state` (JSON) once a second, and a **Pair a client** QR code on request. A browser
+cannot pin, so its first visit warns about the self-signed certificate: compare the SHA-256 it shows
+with the one the agent logs or displays. It is read-only; configuration mutation routes are
 removed for 0.9.0 pending an authenticated operator plane. See `AgentMonitor` / `Dashboard.kt`.
 On Android/iOS the same data also drives a
 native Compose UI in the app itself — see [`docs/agent.md`](docs/agent.md#android--ios-a-phone-as-the-agent).

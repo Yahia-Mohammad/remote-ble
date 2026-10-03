@@ -11,12 +11,15 @@
 # MenuBar.swift) so it's visible at a glance whether the agent is running. See
 # agent/macos-launcher/launcher.c for the full rationale.
 #
-# Usage:   agent/run-agent.sh [port]            (default 8080)
+# Usage:   agent/run-agent.sh [port] [agent args…]   (default 8080)
 #          REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080
+#          REMOTE_BLE_BIND=0.0.0.0 REMOTE_BLE_TOKEN=secret agent/run-agent.sh 8080 --tls --print-pairing
 #
 set -euo pipefail
 
 PORT="${1:-8080}"
+# Everything after the port goes to the agent as is (--tls, --print-pairing, --reset-identity, …).
+AGENT_ARGS=("${@:2}")
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SRC="$HERE/macos-launcher"
@@ -83,7 +86,8 @@ OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
 while IFS='=' read -r name _; do
   OPEN_ARGS+=(--env "$name=${!name}")
 done < <(env | grep '^REMOTE_BLE_[A-Z0-9_]*=' || true)
-open "${OPEN_ARGS[@]}" --args dev/warsha/remoteble/agent/MainKt "$PORT"
+# ${a[@]+"${a[@]}"}: an empty array under `set -u` is an error in the bash 3.2 macOS ships.
+open "${OPEN_ARGS[@]}" --args dev/warsha/remoteble/agent/MainKt "$PORT" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
 
 MATCH="RemoteBleAgent.app/Contents/MacOS/agent-launcher"
 

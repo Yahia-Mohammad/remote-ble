@@ -78,6 +78,48 @@ No frames cross the wire yet — the session is request-driven.
 
 ---
 
+## Encrypted session and pairing
+
+An agent reachable from the network serves `wss://` with a self-signed identity. The client trusts it
+by pin, which it gets from the agent's pairing URI; everything after the upgrade is the session above.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant App as Client app
+    participant Transport as WebSocketAgentTransport
+    participant Agent
+    Agent-->>User: pairing QR code / link (address, token, fingerprint)
+    User->>App: scan or paste remoteble://host:port?token=…&fp=sha256:…
+    App->>App: AgentPairing.parse(uri); user confirms
+    App->>Transport: WebSocketAgentTransport(pairing.url, scope, pairingWebSocketHttpClient(pairing), { pairing.token })
+    Transport->>Agent: TCP connect, TLS ClientHello
+    Agent-->>Transport: ServerHello + self-signed certificate
+    alt SPKI hashes to the pinned fingerprint
+        Transport->>Agent: WS upgrade (Authorization: Bearer …), now encrypted
+        Agent-->>Transport: 101 Switching Protocols
+        Note over Transport: CONNECTED, as in an unencrypted session
+    else any other key
+        Note over Transport: handshake aborted inside TLS; no HTTP, no token sent
+        Note over Transport: AgentIdentityMismatchException → GAVE_UP, no retry
+    end
+```
+
+1. The agent shows its pairing URI: the phone apps behind **Show pairing code**, the JVM agent's
+   dashboard on request, both desktop agents with `--print-pairing`. A phone's camera opens the QR
+   code's `remoteble://` link in a client app that registers the scheme; the client asks the user
+   before using it, because any app or page can open a link.
+2. `AgentPairing.parse` yields `url` (`wss://…/agent` when the pairing carries a fingerprint),
+   `token` and `fingerprint`; `pairingWebSocketHttpClient` returns the client pinned to it.
+3. The pin is checked in the TLS handshake itself (a trust manager on the JVM and Android, the
+   NSURLSession challenge handler on Apple), so a wrong key fails before the upgrade request exists.
+   The transport treats `AgentIdentityMismatchException` as terminal: the agent is reachable, it is
+   just not the one paired with, and retrying cannot fix that.
+4. Behind the agent's TLS front, the WebSocket server still sees each client's real address, which
+   rate limiting, the dashboard's own-device gate and the monitor use.
+
+---
+
 ## Scan
 
 ```mermaid

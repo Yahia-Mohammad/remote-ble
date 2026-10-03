@@ -2,10 +2,11 @@
 
 Decision record for [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39). **Accepted
 2026-10-01: option A, TLS with a pinned self-signed certificate.** The phases in [§8](#8-phases) are
-the plan, and each one updates this record as it lands. **Phase 1 complete (2026-10-01)**: the identity,
-the JVM agent's TLS front with the peer registry, the Rust agent's rustls listener, and the SDK's
-pinned JVM client, all behind `--tls`, with the binding and its scenarios in the conformance spec
-([§10](#10-progress)).
+the plan, and each one updates this record as it lands. **All five phases are implemented
+(2026-10-02)** and ship in 0.14.0: every agent serves `wss://` with a pinned identity (desktop JVM,
+Android, iOS, Rust), every SDK target pins, pairing hands clients the address, token and fingerprint
+as one URI or QR code, and an agent reachable from the network encrypts unless its operator
+explicitly chooses cleartext. [§10](#10-progress) records each phase and its evidence.
 
 ## 1. The problem
 
@@ -414,3 +415,12 @@ Kotlin agents show the certificate's SHA-256 as browsers display it, for the `ht
 first-visit warning. The conformance spec makes the encrypted binding a MUST for a non-loopback
 listener (§3, item 6), `SECURITY.md` no longer calls cleartext the design, and
 [migrate-to-0.14.0.md](../migrate-to-0.14.0.md) covers each change. It ships in 0.14.0.
+
+**Acceptance: nothing readable on the wire (2026-10-02).** #39 asks that a capture of a session show
+no token, advertisement or GATT payload in the clear. A relay recording every byte between client and
+agent, which is what a packet capture of the session carries, sat between `pinRun` and the JVM agent
+serving `wss://` (simulated heart-rate profile, token `capture-token-7Qz`): 1,062 bytes to the agent and
+11,816 back, including 48 advertisements, and no occurrence of the token, `Authorization`, the device
+name `Warsha HRM`, the service UUID or the op name `scan`. The control, the same agent in cleartext
+with `scanRun` through the same relay, carried the token and `Authorization` to the agent and the
+device name back, so the search would have found them.

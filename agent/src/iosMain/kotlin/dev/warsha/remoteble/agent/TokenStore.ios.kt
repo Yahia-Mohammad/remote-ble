@@ -4,10 +4,9 @@ import platform.Foundation.NSUserDefaults
 
 /**
  * Token persistence for the iOS agent. Backed by [NSUserDefaults] (a plaintext plist), which is
- * consistent with this launcher's stated dev/test-only posture — the app already speaks cleartext
- * `ws://` and carries a blanket ATS exception (see `ios-agent/Info.plist`). A shipping build should
- * move these secrets to the Keychain (`Security.framework`); it's intentionally not done here to keep
- * the storage layer trivial and to avoid unverifiable `Security` cinterop in a dev tool.
+ * consistent with this launcher's stated dev/test-only posture. Only the secrets live here: the TLS
+ * identity is in the Keychain ([IosAgentIdentityStore]). A shipping build should move these secrets
+ * there too; it is not done here to keep the storage layer trivial.
  */
 private fun keyFor(secret: AgentSecret): String = when (secret) {
     AgentSecret.CLIENT_TOKEN -> "remote_ble_agent_token"

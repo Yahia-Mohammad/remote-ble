@@ -12,8 +12,9 @@ use Kable.
 For quickstart/build commands see [`../README.md`](../README.md).
 
 Release scope is tracked separately from this implementation reference. The current release is
-**0.13.0** — see [`migrate-to-0.13.0.md`](migrate-to-0.13.0.md) for what it carries and why, and
-[`migrate-to-0.12.0.md`](migrate-to-0.12.0.md) for the line before it;
+**0.14.0** — see [`migrate-to-0.14.0.md`](migrate-to-0.14.0.md) for what it carries and why, and
+[`migrate-to-0.13.0.md`](migrate-to-0.13.0.md) for the line before it;
+[`migrate-to-0.12.0.md`](migrate-to-0.12.0.md) covers 0.12.0;
 [`migrate-to-0.11.0.md`](migrate-to-0.11.0.md) with
 [`proposals/cli-readiness-progress.md`](proposals/cli-readiness-progress.md) covers 0.11.0. Earlier scope records are [`proposals/0.10.0-scope.md`](proposals/0.10.0-scope.md) and the
 [`0.9.1-hardening-decisions.md`](proposals/0.9.1-hardening-decisions.md) record; the

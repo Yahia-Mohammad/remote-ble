@@ -11,10 +11,11 @@ import dev.warsha.remoteble.androidclient.ui.ScanScreen
 /**
  * Picks the screen from state: a connected device shows the explorer, otherwise the scanner.
  * Shared by the Android `MainActivity` and the iOS `MainViewController` — each just wraps this in
- * its own entry point over a [RemoteBleController].
+ * its own entry point over a [RemoteBleController]. [notice] is a platform condition the shared code
+ * cannot see, such as a denied permission, shown on the scanner with [onNoticeAction] beside it.
  */
 @Composable
-fun RemoteBleApp(controller: RemoteBleController) {
+fun RemoteBleApp(controller: RemoteBleController, notice: String? = null, onNoticeAction: (() -> Unit)? = null) {
     RemoteBleTheme {
         val state by controller.uiState.collectAsState()
 
@@ -29,6 +30,8 @@ fun RemoteBleApp(controller: RemoteBleController) {
                 onPairingOffered = controller::offerPairing,
                 onConnectDevice = { adv -> controller.connectDevice(adv.handle, adv.name) },
                 onHideUnnamedChanged = controller::setHideUnnamed,
+                notice = notice,
+                onNoticeAction = onNoticeAction,
             )
         } else {
             DeviceScreen(

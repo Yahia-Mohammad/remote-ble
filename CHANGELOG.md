@@ -83,6 +83,11 @@ protocol version: **1**.
   `defaultWebSocketHttpClient()` failed with "Cannot access class 'io.ktor.client.HttpClient'"
   unless it added `ktor-client-core` itself. Both are now `compile` dependencies. Apple consumers were
   unaffected: Kotlin/Native resolves a library's full dependency closure at compile time.
+- **The Android client reaches agents on the Wi-Fi on Android 17.** API 37 gates connections to the
+  local network behind the runtime `ACCESS_LOCAL_NETWORK` permission, which the client never asked
+  for, so a paired agent on the LAN sat at "Connecting to agent…" forever. It now requests it, and
+  if it is denied says so with a shortcut to the app's settings. Apps built on the SDK need the same
+  permission; see [client-sdk.md](docs/client-sdk.md).
 - **The macOS menu-bar item turns green when the agent is up.** It polled the dashboard without the
   operator credential every dashboard route has needed since 0.9.0, so it stayed 🟡 whatever the
   agent's state. It now sends `REMOTE_BLE_OPERATOR_TOKEN` when one is set, shows the agent as

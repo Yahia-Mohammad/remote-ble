@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- The only permission needed: the radio lives on the host, reached over the network. -->
+    <!-- The radio lives on the agent, reached over the network. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- API 37+: without this runtime permission an app cannot open connections to its local
+         network, so an agent on the Wi-Fi is unreachable (the connect just times out). The
+         emulator's 10.0.2.2 and adb-forwarded loopback do not need it. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <application
         android:allowBackup="false"

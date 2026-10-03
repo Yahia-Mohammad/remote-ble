@@ -225,6 +225,14 @@ ERROR. For a plain `ws://` agent, Android also offers
 a CIO client on plain sockets the policy does not govern. Its TLS stack stops at TLS 1.2, so keep
 the default for `wss://` behind a TLS 1.3-only proxy.
 
+**Android 17 local network access.** An app targeting API 37 cannot open connections to its local
+network without the runtime permission `ACCESS_LOCAL_NETWORK` (shown to the user as "Nearby
+devices"). Without it a connection to an agent on the Wi-Fi times out and the transport keeps
+retrying, and nothing names the cause, because the SDK has no way to ask Android about the app's
+permissions. Declare it in the manifest and request it before connecting to a LAN agent, as
+[`android-client`](../android-client/src/main/kotlin/dev/warsha/remoteble/androidclient/MainActivity.kt)
+does. The emulator's `10.0.2.2` and an `adb forward`ed loopback do not need it.
+
 **Pinned agents.** An agent serving `wss://` with its own identity (built-in TLS, see
 [agent.md](agent.md)) has a self-signed certificate that no certificate authority vouches for.
 `pinnedWebSocketHttpClient(fingerprint)` trusts exactly the key whose SPKI hashes to the agent's

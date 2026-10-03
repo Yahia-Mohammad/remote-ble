@@ -51,6 +51,8 @@ fun ScanScreen(
     onPairingOffered: (String) -> Boolean,
     onConnectDevice: (DiscoveredDevice) -> Unit,
     onHideUnnamedChanged: (Boolean) -> Unit,
+    notice: String? = null,
+    onNoticeAction: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -72,6 +74,18 @@ fun ScanScreen(
             onTokenChanged = onTokenChanged,
             onPairingOffered = onPairingOffered,
         )
+
+        if (notice != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp, start = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(text = notice, color = AppColors.warning, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                if (onNoticeAction != null) {
+                    TextButton(onClick = onNoticeAction) { Text("Settings", color = AppColors.accent) }
+                }
+            }
+        }
 
         Text(
             text = state.status,

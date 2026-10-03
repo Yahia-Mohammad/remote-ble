@@ -85,7 +85,9 @@ token is sent, and the transport gives up instead of retrying: treat it as "the 
 identity, pair again", not as "unreachable". See [client-sdk.md](client-sdk.md).
 
 On Android, `wss://` needs no cleartext network security config, so the
-`CleartextTrafficNotPermittedException` of 0.13.0 goes away for an encrypted agent.
+`CleartextTrafficNotPermittedException` of 0.13.0 goes away for an encrypted agent. An app targeting
+API 37 needs the runtime `ACCESS_LOCAL_NETWORK` permission to reach an agent on the Wi-Fi at all;
+without it the connection just times out. See [client-sdk.md](client-sdk.md).
 
 ## The dashboard is `https://`
 

@@ -1,7 +1,11 @@
-# THROWAWAY XcodeGen spec — identical to project.yml except that it links the **debug**
-# XCFramework. Not the source of truth; delete it when the rig session ends. Same reasoning as
-# ios-agent/project-debug.yml: the release link OOMs unpredictably (gap 11) and debug is a valid
-# vehicle for on-device verification.
+# Debug-linking XcodeGen spec — identical to project.yml except that it links the **debug**
+# XCFramework. NOT the source of truth for what ships: project.yml is, and it points at release.
+#
+# Why it exists: the same as ios-agent/project-debug.yml. The release link's whole-program
+# devirtualization fails unpredictably for want of memory (gap 11): on 2026-10-03 it failed for the
+# simulator slice while an agent JVM and a second Gradle daemon were running, and passed on a plain
+# rerun. The debug framework links in seconds and is a valid vehicle for on-device verification.
+# Keep it until gap 11 is fixed.
 #
 #   ./gradlew :client-ui:assembleRemoteBleClientDebugXCFramework -PiosFramework
 #   cd ios-client && xcodegen generate --spec project-debug.yml

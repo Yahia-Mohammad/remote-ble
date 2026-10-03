@@ -88,6 +88,8 @@ protocol version: **1**.
   for, so a paired agent on the LAN sat at "Connecting to agent…" forever. It now requests it, and
   if it is denied says so with a shortcut to the app's settings. Apps built on the SDK need the same
   permission; see [client-sdk.md](docs/client-sdk.md).
+- **The Android and iOS clients mask the agent's token**, with a Show control, as the agent apps do.
+  A pairing link fills it in, so it no longer sits readable on screen.
 - **The macOS menu-bar item turns green when the agent is up.** It polled the dashboard without the
   operator credential every dashboard route has needed since 0.9.0, so it stayed 🟡 whatever the
   agent's state. It now sends `REMOTE_BLE_OPERATOR_TOKEN` when one is set, shows the agent as

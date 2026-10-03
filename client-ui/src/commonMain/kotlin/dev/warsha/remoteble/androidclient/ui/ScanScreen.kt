@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -30,6 +31,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -179,6 +183,9 @@ private fun AgentEndpointCard(
 
         // Bearer token for the agent upgrade. Leave blank for a token-free agent; the mobile
         // agents require it and show the value to copy here.
+        // Masked like the agent app's token: a pairing link fills it in, and the agent's credential
+        // should not sit readable on screen. Show is there because a typo behind a mask is invisible.
+        var tokenRevealed by remember { mutableStateOf(false) }
         OutlinedTextField(
             value = token,
             onValueChange = onTokenChanged,
@@ -186,6 +193,15 @@ private fun AgentEndpointCard(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             label = { Text("Auth token (blank = none)") },
+            visualTransformation = if (tokenRevealed) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+            trailingIcon = {
+                if (token.isNotEmpty()) {
+                    TextButton(onClick = { tokenRevealed = !tokenRevealed }) {
+                        Text(if (tokenRevealed) "Hide" else "Show", color = AppColors.onSurfaceMuted)
+                    }
+                }
+            },
             colors = endpointFieldColors(),
             shape = RoundedCornerShape(8.dp),
         )

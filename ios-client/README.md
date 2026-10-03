@@ -33,6 +33,11 @@ open RemoteBleClient.xcodeproj
 #    the agent over WebSocket). Update the "AGENT ENDPOINT" field to point at your agent.
 ```
 
+If the release framework link fails for want of memory (it can, intermittently, even with the
+16 GB `kotlin.native.jvmArgs`), build the debug framework instead with
+`./gradlew :client-ui:assembleRemoteBleClientDebugXCFramework -PiosFramework` and generate the project from the spec that links it:
+`xcodegen generate --spec project-debug.yml`. The app behaves the same; only what ships uses release.
+
 If you prefer not to use XcodeGen, create an iOS App target by hand, add the files under
 `Sources/`, set `Info.plist`, and drag in `RemoteBleClient.xcframework` (Embed & Sign).
 

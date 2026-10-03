@@ -37,6 +37,11 @@ open RemoteBleAgent.xcodeproj
 #    the agent from a laptop with `./gradlew :e2e-runner:pinRun --args "'<pairing link>'"`.
 ```
 
+If the release framework link fails for want of memory (it can, intermittently, even with the
+16 GB `kotlin.native.jvmArgs`), build the debug framework instead with
+`./gradlew :agent:assembleRemoteBleAgentDebugXCFramework -PiosFramework` and generate the project from the spec that links it:
+`xcodegen generate --spec project-debug.yml`. The app behaves the same; only what ships uses release.
+
 If you prefer not to use XcodeGen, create an iOS App target by hand, add the files under
 `Sources/`, set `Info.plist`, and drag in `RemoteBleAgent.xcframework` (Embed & Sign).
 

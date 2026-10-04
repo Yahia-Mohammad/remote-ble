@@ -114,8 +114,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ScanConcurrencyMode::Multiplexed, env = "REMOTE_BLE_SCAN_CONCURRENCY")]
     scan_concurrency: ScanConcurrencyMode,
 
-    /// Serve `wss://` with the agent's persistent, pinned TLS identity (#39). Off by default for
-    /// now; see docs/proposals/agent-transport-encryption.md.
+    /// Serve `wss://` with the agent's persistent, pinned TLS identity (#39). Opt-in, because a
+    /// loopback agent needs none; a non-loopback bind without it refuses to start unless
+    /// `--allow-cleartext-lan` is given. See docs/migrate-to-0.14.0.md.
     #[arg(long, default_value_t = false, env = "REMOTE_BLE_TLS")]
     tls: bool,
 

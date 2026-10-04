@@ -24,6 +24,9 @@ protocol version: **1**.
 > image published, but it never reached Maven Central: a final review found the fixes below first.
 > Everything in 0.14.0 applies; see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md). The
 > wire protocol version is unchanged at **1**.
+>
+> **One dependency change:** the JVM client artifact uses Ktor's OkHttp engine instead of CIO, whose
+> TLS client corrupts its own buffers (first entry below).
 
 ### Fixed
 

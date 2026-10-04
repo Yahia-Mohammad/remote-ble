@@ -68,6 +68,14 @@ readable on the network.
 Reinstalling an agent app now gives it a new identity, as Android always did: pair clients again
 after a reinstall.
 
+## JVM clients use OkHttp
+
+`client-sdk` on the JVM now builds its clients on Ktor's OkHttp engine and depends on
+`ktor-client-okhttp` instead of `ktor-client-cio`. Ktor CIO's TLS client corrupts its own buffers:
+about one fresh `wss://` connection in 150 failed, on Ktor 3.5.1 and 3.6.0 alike (see
+[client-sdk.md](client-sdk.md)). No code change is needed unless an app built its own CIO client for
+`wss://`; switch that one to OkHttp too. Plain `ws://` over CIO is unaffected.
+
 ## Clients: connect to an encrypted agent
 
 A `wss://` agent's certificate is self-signed, so a client trusts it by pin, not by a certificate

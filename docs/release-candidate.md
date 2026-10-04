@@ -1,14 +1,16 @@
 # Release-candidate inventory and release evidence
 
-The **currently released line is 0.13.0** (2026-09-29), with **0.14.0 prepared and awaiting its
-tag**; the inventory and checklist below were
+The **currently released line is 0.13.0** (2026-09-29), with **0.14.1 prepared and awaiting its
+tag**. `v0.14.0` was tagged, and its GitHub Release and GHCR image published, but it was withdrawn
+before Maven Central when a final review found fixes; 0.14.1 replaces it. The inventory and
+checklist below were
 written for 0.10.0 and remain the procedure of record for every release since. Every version source
 a release touches is checked by
 [`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
 tag before any release workflow dispatch:
 
 ```sh
-bash scripts/check-release-version.sh v0.14.0
+bash scripts/check-release-version.sh v0.14.1
 ```
 
 Substitute the tag being cut. The published evidence for each release is recorded under

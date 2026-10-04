@@ -113,7 +113,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.14.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.14.1")
 }
 ```
 
@@ -427,7 +427,7 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 ## Status
 
 0.10.0 shipped on 2026-08-04, 0.11.0 on 2026-08-10, 0.12.0 on 2026-08-18 and 0.13.0 on 2026-09-29,
-each with a tag, GitHub Release, GHCR image and Maven Central. **0.14.0 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
+each with a tag, GitHub Release, GHCR image and Maven Central. **0.14.1 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
 unchanged against a `RemotePeripheral` talking to an agent over WebSocket — connect, discover,
 read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
 complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
@@ -438,7 +438,8 @@ found, are in [`docs/`](docs/). One boundary is worth stating plainly rather tha
 detail: the container was validated on **one amd64 Linux host**, so arm64, AppArmor,
 SELinux-enforcing and rootless Podman are *not* covered, and the image is labelled accordingly.
 
-0.14.0 encrypts every agent the network can reach: each serves `wss://` behind its own self-signed
+0.14.1 encrypts every agent the network can reach (0.14.0 was tagged but never published to Maven
+Central; 0.14.1 is the same release with the fixes a final review found): each serves `wss://` behind its own self-signed
 identity, clients pin its fingerprint, and a pairing link or QR code hands a client the address,
 token and fingerprint at once. Phones encrypt by default, and a desktop agent on a LAN address
 refuses cleartext unless told otherwise — see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md).

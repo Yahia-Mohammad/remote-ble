@@ -1,13 +1,17 @@
-# Migrate to RemoteBLE 0.14.0
+# Migrate to RemoteBLE 0.14
 
-0.14.0 encrypts every agent reachable from the network ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)).
+> **Use 0.14.1.** 0.14.0 was tagged, and its GitHub Release and container image published, but it
+> was never published to Maven Central: a final review found fixes worth having first. Everything
+> below applies to 0.14.1 unchanged.
+
+0.14 encrypts every agent reachable from the network ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)).
 An agent serves `wss://` with a self-signed identity, clients pin its fingerprint, and a pairing
 link or QR code hands a client the address, token and fingerprint together. Update the dependency
 version:
 
 ```kotlin
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.14.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.14.1")
 }
 ```
 
@@ -46,7 +50,7 @@ fingerprint its clients pinned:
 
 ```bash
 docker run -v remoteble-identity:/var/lib/remoteble -e REMOTE_BLE_TOKEN=… -p 8080:8080 \
-  ghcr.io/yahia-mohammad/remoteble-agent-rs:0.14.0 --print-pairing
+  ghcr.io/yahia-mohammad/remoteble-agent-rs:0.14.1 --print-pairing
 ```
 
 Without a volume, every new container is a new identity and every client must pair again. To keep
@@ -63,6 +67,14 @@ readable on the network.
 
 Reinstalling an agent app now gives it a new identity, as Android always did: pair clients again
 after a reinstall.
+
+## JVM clients use OkHttp
+
+`client-sdk` on the JVM now builds its clients on Ktor's OkHttp engine and depends on
+`ktor-client-okhttp` instead of `ktor-client-cio`. Ktor CIO's TLS client corrupts its own buffers:
+about one fresh `wss://` connection in 150 failed, on Ktor 3.5.1 and 3.6.0 alike (see
+[client-sdk.md](client-sdk.md)). No code change is needed unless an app built its own CIO client for
+`wss://`; switch that one to OkHttp too. Plain `ws://` over CIO is unaffected.
 
 ## Clients: connect to an encrypted agent
 

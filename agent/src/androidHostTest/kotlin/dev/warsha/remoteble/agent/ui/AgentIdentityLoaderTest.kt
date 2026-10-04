@@ -12,8 +12,12 @@ import kotlin.test.assertSame
 import kotlinx.coroutines.runBlocking
 
 class AgentIdentityLoaderTest {
-    private val unused = TlsFront.Factory { _, _, _, _ -> error("not started in this test") }
-    private val first = AgentTls(AgentFingerprint.ofSpkiSha256(ByteArray(32) { 1 }), unused)
+    private val unused = object : TlsFront.Factory {
+        override val fingerprint = AgentFingerprint.ofSpkiSha256(ByteArray(32) { 1 })
+        override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
+            error("not started in this test")
+    }
+    private val first = AgentTls(unused)
 
     /** A key store that holds [first] until a reset, which deletes it and then fails to create one. */
     private val failingReset = object : AgentTlsProvider {

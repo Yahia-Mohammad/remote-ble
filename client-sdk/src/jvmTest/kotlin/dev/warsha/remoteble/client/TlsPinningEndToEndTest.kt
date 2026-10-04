@@ -278,11 +278,13 @@ class TlsPinningEndToEndTest {
         // between must still resolve to its real peer, not to the relay on loopback.
         val monitor = AgentMonitor()
         val listening = CompletableDeferred<Int>()
-        val slowToReturn = TlsFront.Factory { host, port, upstreamPort, onFailure ->
-            JsseTlsFront(identity).start(host, port, upstreamPort, onFailure).also {
-                listening.complete(it.port)
-                delay(1.seconds)
-            }
+        val slowToReturn = object : TlsFront.Factory {
+            override val fingerprint = identity.fingerprint
+            override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
+                JsseTlsFront(identity).start(host, port, upstreamPort, onFailure).also {
+                    listening.complete(it.port)
+                    delay(1.seconds)
+                }
         }
         val server = AgentWebSocketServer(port = 0, monitor = monitor, tls = slowToReturn).also { servers += it }
         val starting = scope.launch { server.start() }
@@ -320,8 +322,8 @@ class TlsPinningEndToEndTest {
             authToken = "client-token",
             operatorToken = "operator-secret",
             monitor = AgentMonitor(),
+            // The fingerprint comes from the front itself: no separate setting to forget.
             tls = JsseTlsFront(identity),
-            fingerprint = identity.fingerprint,
         ).also { servers += it }.startAndAwaitReady()
         val basic = "Basic " + Base64.getEncoder().encodeToString("operator:operator-secret".toByteArray())
 

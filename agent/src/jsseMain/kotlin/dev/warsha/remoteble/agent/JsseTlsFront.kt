@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -57,6 +58,8 @@ class JsseTlsFront internal constructor(
     private val maxPerHost: Int,
     private val maxConnections: Int,
 ) : TlsFront.Factory {
+    override val fingerprint: AgentFingerprint get() = identity.fingerprint
+
 
     constructor(identity: AgentTlsIdentity) : this(identity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
 

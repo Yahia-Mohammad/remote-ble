@@ -83,6 +83,6 @@ object AndroidAgentIdentityStore {
 object AndroidKeystoreTls : AgentTlsProvider {
     override suspend fun load(reset: Boolean): AgentTls = withContext(Dispatchers.IO) {
         val identity = AndroidAgentIdentityStore.loadOrCreate(reset)
-        AgentTls(identity.fingerprint, JsseTlsFront(identity), identity.certificateSha256)
+        AgentTls(JsseTlsFront(identity), identity.certificateSha256)
     }
 }

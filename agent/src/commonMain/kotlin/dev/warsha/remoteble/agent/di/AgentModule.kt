@@ -25,7 +25,6 @@ import kotlin.time.Duration.Companion.seconds
 import dev.warsha.remoteble.agent.TlsFront
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import dev.warsha.remoteble.protocol.AgentFingerprint
 import org.koin.core.module.Module
 import org.koin.dsl.module
 
@@ -80,8 +79,6 @@ data class AgentConfig(
      * serves cleartext `ws://`. See `docs/proposals/agent-transport-encryption.md`.
      */
     val tlsFront: TlsFront.Factory? = null,
-    /** The fingerprint [tlsFront] presents, which the dashboard's pairing code carries. */
-    val tlsFingerprint: AgentFingerprint? = null,
 ) {
     companion object {
         const val DEFAULT_BIND_HOST: String = "127.0.0.1"
@@ -175,7 +172,6 @@ fun agentModule(config: AgentConfig): Module = module {
             registry = get(),
             strictMode = get(),
             tls = config.tlsFront,
-            fingerprint = config.tlsFingerprint,
         )
     }
 }

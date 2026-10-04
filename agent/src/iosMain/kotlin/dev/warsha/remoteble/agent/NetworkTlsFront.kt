@@ -3,6 +3,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import dev.warsha.remoteble.agent.tlsrelay.remoteble_pump
@@ -94,6 +95,7 @@ import platform.posix.free
  *   direction ended.
  */
 class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
+    override val fingerprint: AgentFingerprint get() = identity.fingerprint
 
     override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
         Running(identity, upstreamPort, onFailure).also { it.listen(host, port) }
@@ -296,6 +298,6 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
 object IosKeychainTls : AgentTlsProvider {
     override suspend fun load(reset: Boolean): AgentTls = withContext(Dispatchers.Default) {
         val identity = IosAgentIdentityStore.loadOrCreate(reset)
-        AgentTls(identity.fingerprint, NetworkTlsFront(identity), identity.certificateSha256)
+        AgentTls(NetworkTlsFront(identity), identity.certificateSha256)
     }
 }

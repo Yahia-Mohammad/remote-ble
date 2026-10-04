@@ -75,7 +75,6 @@ fun main(args: Array<String>) {
         simulationProfile = simulationProfile,
         writePolicy = writePolicy,
         tlsFront = tlsFront?.second,
-        tlsFingerprint = tlsFront?.first?.fingerprint,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()

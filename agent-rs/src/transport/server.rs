@@ -5577,7 +5577,7 @@ mod tests {
 
     /// TLS-PIN-01 and TLS-PIN-06 (docs/proposals/agent-transport-encryption.md): a client pinning
     /// the agent's fingerprint upgrades over TLS, on 1.3 and on 1.2 alone, which is all Ktor's CIO
-    /// client (the SDK's JVM engine) speaks.
+    /// client speaks.
     #[tokio::test]
     async fn tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12() {
         let identity = tls_identity("pin01");

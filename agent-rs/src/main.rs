@@ -244,7 +244,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and with the port it actually got (`--port 0` asks for any).
     let listener = server.bind().await?;
     if let Some(credentials) = &pairing_credentials {
-        print_pairings(&args, listener.local_addr()?.port(), fingerprint.as_deref(), credentials);
+        print_pairings(
+            &args,
+            listener.local_addr()?.port(),
+            fingerprint.as_deref(),
+            credentials,
+        );
     }
 
     // Run until the accept loop fails (it no longer does on transient errors) or a shutdown
@@ -268,14 +273,17 @@ fn print_pairings(
     credentials: &HashMap<String, String>,
 ) {
     let host = pairing::pairing_host(args.bind, pairing::routed_ipv4).unwrap_or_else(|| {
-        tracing::warn!("No default route to name a LAN address in the pairing; pass --bind <address> for one");
+        tracing::warn!(
+            "No default route to name a LAN address in the pairing; pass --bind <address> for one"
+        );
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
     });
     let bare_token = args
         .token
         .as_deref()
         .is_some_and(|token| !token.trim().is_empty());
-    for (principal, uri) in pairing::pairing_uris(host, port, fingerprint, credentials, bare_token) {
+    for (principal, uri) in pairing::pairing_uris(host, port, fingerprint, credentials, bare_token)
+    {
         match principal {
             Some(name) => println!("Pairing ({name}): {uri}"),
             None => println!("Pairing: {uri}"),

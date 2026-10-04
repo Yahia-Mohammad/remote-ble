@@ -112,7 +112,8 @@ pub fn remove(path: &Path) -> Result<bool, IdentityError> {
 }
 
 /// A rustls server configuration presenting `identity`. TLS 1.3 and 1.2 are both enabled; 1.2 is
-/// not legacy tolerance, since Ktor's CIO client, the SDK's JVM engine, speaks nothing newer.
+/// not legacy tolerance, since Ktor's CIO client, which an app may hand the SDK's transport, speaks
+/// nothing newer.
 pub fn server_config(identity: &AgentIdentity) -> Result<Arc<rustls::ServerConfig>, IdentityError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)

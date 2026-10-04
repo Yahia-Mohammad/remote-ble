@@ -119,7 +119,8 @@ creating the certificate. The peer address is unaffected. TLS 1.2 and 1.3 both e
 
 - **`AgentFingerprint`**, parsed from `sha256:<hex>`, and a per-platform
   **`pinnedWebSocketHttpClient(fingerprint)`** beside `defaultWebSocketHttpClient()`:
-  - JVM: CIO with a trust manager that accepts exactly the pinned SPKI.
+  - JVM: CIO with a trust manager that accepts exactly the pinned SPKI. (Since 0.14.1, OkHttp, as on
+    Android: CIO's TLS client corrupted its own buffers on about one fresh connection in 150.)
   - Android: OkHttp with an equivalent trust manager and a host-name verifier that defers to the pin.
     Agents are reached by IP address, so the pin is the identity.
   - Apple: Darwin's `handleChallenge`, evaluating the server trust against the pin.
@@ -171,7 +172,7 @@ adapter; run against every agent:
 | `TLS-PIN-03` | The fingerprint is stable across a restart and changes after a reset. |
 | `TLS-PIN-04` | Reconnect and lease resume work over `wss://` as over `ws://`. |
 | `TLS-PIN-05` | A non-loopback cleartext bind is refused without the explicit opt-in; loopback `ws://` still works. Lands with the gate itself, in phase 5. |
-| `TLS-PIN-06` | The CIO client (TLS 1.2) connects, proving the 1.2 suite requirement. |
+| `TLS-PIN-06` | A TLS 1.2-only client connects, proving the 1.2 suite requirement (first the CIO client; since 0.14.1 a 1.2-only handshake in `JsseTlsFrontTest`). |
 | `TLS-PIN-07` | Kotlin agents: behind the front, the rate limiter and the dashboard's own-device gate see the real peer, not loopback. |
 
 Hardware acceptance, per agent on its rig: a client on the same Wi-Fi pairs by scanning or pasting,

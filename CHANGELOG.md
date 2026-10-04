@@ -27,6 +27,16 @@ protocol version: **1**.
 
 ### Fixed
 
+- **The JVM client no longer uses Ktor CIO for TLS.** CIO's TLS client corrupts its own buffers
+  under ordinary use: in a loop of fresh pinned connections about one in 150 failed its handshake
+  with `NullPointerException`s and negative array lengths inside kotlinx-io, on Ktor 3.5.1 and
+  3.6.0 alike, and corruption before encryption could as well have reached the data. With retries
+  on, it looked like a slow connect; with them off, a connection that never came up (the
+  intermittent TLS-PIN-02 failure seen on CI). `pinnedWebSocketHttpClient` and
+  `defaultWebSocketHttpClient` on the JVM now use OkHttp, sharing Android's implementation: none
+  in 7,500 fresh connections failed. The JVM artifact depends on `ktor-client-okhttp` instead of
+  `ktor-client-cio`, and negotiates TLS 1.3 where it used to stop at 1.2. Plain `ws://` over CIO
+  was never affected.
 - **A phone agent's dashboard pairs clients encrypted.** The Android and iOS agents started their TLS
   front without the separate fingerprint setting, so the dashboard's pairing code (`/api/pairing`)
   offered a `ws://` link marked unencrypted for an agent serving only `wss://`, and a client that

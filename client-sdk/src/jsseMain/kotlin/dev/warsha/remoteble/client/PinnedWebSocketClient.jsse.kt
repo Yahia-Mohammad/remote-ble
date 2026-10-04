@@ -8,7 +8,8 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLPeerUnverifiedException
 
 /**
- * Android: OkHttp with the trust manager the JVM client uses, accepting exactly the pinned key.
+ * JVM and Android: OkHttp with a trust manager that accepts exactly the pinned key. Not Ktor CIO on
+ * the JVM: its TLS client corrupts its own buffers, failing about one fresh connection in 150.
  * Agents are reached by IP addresses their certificates cannot name, so OkHttp's host-name check
  * defers to the pin too. It checks the session's certificate again rather than passing everything,
  * because a resumed session skips the trust manager, and this check is what still runs.

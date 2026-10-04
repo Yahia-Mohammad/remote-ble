@@ -37,7 +37,7 @@ kotlin {
     // the same quota reason as iosX64.
     macosArm64()
 
-    // jsseMain: the pinning trust manager, shared by the JVM (CIO) and Android (OkHttp) clients,
+    // jsseMain: the OkHttp clients and the pinning trust manager, shared by the JVM and Android,
     // which both trust through JSSE. The Android target comes from the AGP KMP library plugin,
     // which `withAndroidTarget()` does not match, so it is selected by platform type instead.
     @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
@@ -73,11 +73,14 @@ kotlin {
             // constructor injection and never reference Koin.
             api(libs.koin.core)
         }
-        jvmMain.dependencies {
-            implementation(libs.ktor.client.cio)
+        // OkHttp on the JVM too, not Ktor CIO: CIO's TLS client corrupts its buffers under ordinary
+        // use, failing about one fresh wss:// connection in 150 with NullPointerExceptions and
+        // negative array lengths inside kotlinx-io (Ktor 3.5.1 and 3.6.0 alike). Plain ws:// over
+        // CIO is unaffected, which is why cioWebSocketHttpClient() remains on Android.
+        getByName("jsseMain").dependencies {
+            implementation(libs.ktor.client.okhttp)
         }
         androidMain.dependencies {
-            implementation(libs.ktor.client.okhttp)
             // Backs cioWebSocketHttpClient(): plain sockets for `ws://` agents, outside the
             // cleartext policy OkHttp enforces.
             implementation(libs.ktor.client.cio)
@@ -95,6 +98,9 @@ kotlin {
         // (and the JVM HttpClient helper) live on the JVM target.
         jvmTest.dependencies {
             implementation(project(":agent"))
+            // CleartextRefusalTest drives a CIO client directly; the pinned-client regression
+            // test compares against it.
+            implementation(libs.ktor.client.cio)
             // A small closing WebSocket server verifies that the SDK observes Ktor's actual
             // session close reason, rather than relying on a synthetic transport state.
             implementation(libs.ktor.server.core)

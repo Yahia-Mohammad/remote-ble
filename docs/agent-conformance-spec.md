@@ -91,7 +91,7 @@ identity error on any other, and MUST NOT retry that failure as if the agent wer
 | TLS-PIN-03 | Restart, then reset | Identity stable across the restart; a reset breaks the pin. | `theIdentitySurvivesARestartAndAResetBreaksThePin` | `identity::tests::the_identity_is_stable_across_loads_and_changes_on_reset` |
 | TLS-PIN-04 | Agent restart; transport drop inside grace | Reconnect over `wss://` restores subscriptions, and the same principal and client id resume the lease. | `aPinnedClientReconnectsAndResumesItsSubscriptionAfterARestart`, `aLeaseHeldThroughATransportDropResumesOverWss` | `tls_pin_04_a_lease_held_through_a_drop_resumes_over_tls` |
 | TLS-PIN-05 | Non-loopback cleartext bind | Refused without the explicit opt-in; loopback `ws://` keeps working. | `MainTest.tlsPin05ANonLoopbackBindServesCleartextOnlyWhenAllowed` | `tests::tls_pin_05_a_non_loopback_bind_serves_cleartext_only_when_allowed` |
-| TLS-PIN-06 | A TLS 1.2-only client | Connects. | Every Kotlin test above: the CIO client speaks only 1.2. | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
+| TLS-PIN-06 | A TLS 1.2-only client | Connects. | `JsseTlsFrontTest.onlyAeadSuitesAreNegotiated` (1.2-only handshakes with each AEAD suite). | `tls_pin_01_06_a_pinned_client_upgrades_over_tls_13_and_12` |
 | TLS-PIN-07 | Peer address behind TLS termination | Rate limiting and the dashboard gate see the real peer. | `theAgentRecordsTheRealPeerNotTheRelay`, `theDashboardStillRefusesANonLoopbackPeerBehindTheFront` | Not applicable: rustls terminates in-process, so the peer address is native. |
 
 **The Android agent** runs the Kotlin adapter's server and front unchanged: `JsseTlsFront` is

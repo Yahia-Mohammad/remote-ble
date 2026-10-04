@@ -48,8 +48,8 @@ import kotlinx.coroutines.withContext
  * - One host holds at most [maxPerHost] connections, and the front at most [maxConnections]; a
  *   connection over either is closed at once.
  *
- * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, the SDK's JVM
- * engine, speaks nothing newer. Only AEAD suites are offered, as rustls and the iOS front offer: the
+ * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, which an app
+ * may hand the SDK's transport, speaks nothing newer. Only AEAD suites are offered, as rustls and the iOS front offer: the
  * platforms' 1.2 defaults still include CBC ones, whose padding checks have a history of timing
  * oracles, and every client this project knows negotiates AES-GCM.
  */

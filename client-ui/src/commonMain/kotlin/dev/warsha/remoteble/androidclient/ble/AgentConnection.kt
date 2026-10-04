@@ -23,7 +23,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -52,16 +52,39 @@ class AgentConnection(private val scope: CoroutineScope) {
 
     /**
      * Returns a session connected to [url], (re)building one if needed, and suspends until
-     * the transport reports [TransportState.CONNECTED]. Throws on timeout. With a [fingerprint] the
-     * agent is trusted by that pin alone ([pinnedWebSocketHttpClient]); a different key fails with
+     * the transport reports [TransportState.CONNECTED]. With a [fingerprint] the agent is trusted by
+     * that pin alone ([pinnedWebSocketHttpClient]); a different key fails with
      * `AgentIdentityMismatchException` before the token is sent.
+     *
+     * Throws [IllegalStateException] naming the likely cause when the transport gives up or the
+     * timeout passes: a pin that no longer matches is a re-pairing problem, not a network one, and
+     * saying "timed out" for it leaves the user nowhere to go.
      */
     suspend fun connect(url: String, token: String, fingerprint: AgentFingerprint? = null): AgentSession {
-        val session = obtain(url.trim(), token.trim(), fingerprint)
-        withTimeout(CONNECT_TIMEOUT) {
-            session.transportState.first { it == TransportState.CONNECTED }
+        val target = url.trim()
+        val session = obtain(target, token.trim(), fingerprint)
+        val reached = withTimeoutOrNull(CONNECT_TIMEOUT) {
+            session.transportState.first { it == TransportState.CONNECTED || it in TERMINAL_STATES }
         }
-        return session
+        when (reached) {
+            TransportState.CONNECTED -> return session
+            TransportState.GAVE_UP -> error(
+                if (fingerprint != null) {
+                    "the agent no longer presents the identity it was paired with. Pair again if it was reset."
+                } else {
+                    "the connection was refused, and retrying cannot change that (see the log)."
+                },
+            )
+            TransportState.INCOMPATIBLE_PROTOCOL -> error("the agent speaks an incompatible protocol version.")
+            else -> error(
+                if (fingerprint == null && target.startsWith("wss://", ignoreCase = true)) {
+                    "no answer within ${CONNECT_TIMEOUT.inWholeSeconds}s. An encrypted agent is trusted through " +
+                        "its pairing: pair with it again rather than typing its address."
+                } else {
+                    "no answer within ${CONNECT_TIMEOUT.inWholeSeconds}s."
+                },
+            )
+        }
     }
 
     /** Advertisements seen by [session]'s remote scanner; collecting starts the scan. */
@@ -88,7 +111,7 @@ class AgentConnection(private val scope: CoroutineScope) {
         val current = session.value
         if (current != null && this.url == url && this.token == token && this.fingerprint == fingerprint &&
             current.transportState.value != TransportState.DISCONNECTED &&
-            current.transportState.value != TransportState.INCOMPATIBLE_PROTOCOL
+            current.transportState.value !in TERMINAL_STATES
         ) {
             return current
         }
@@ -111,5 +134,8 @@ class AgentConnection(private val scope: CoroutineScope) {
 
     private companion object {
         val CONNECT_TIMEOUT: Duration = 15.seconds
+
+        /** States a transport does not leave on its own: a session in one is never reused. */
+        val TERMINAL_STATES = setOf(TransportState.GAVE_UP, TransportState.INCOMPATIBLE_PROTOCOL)
     }
 }

@@ -223,28 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some((config, fingerprint)) => (Some(config), Some(fingerprint)),
         None => (None, None),
     };
-    if args.print_pairing {
-        let host = pairing::pairing_host(args.bind, pairing::routed_ipv4).unwrap_or_else(|| {
-            tracing::warn!("No default route to name a LAN address in the pairing; pass --bind <address> for one");
-            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-        });
-        let bare_token = args
-            .token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty());
-        for (principal, uri) in pairing::pairing_uris(
-            host,
-            args.port,
-            fingerprint.as_deref(),
-            &credentials,
-            bare_token,
-        ) {
-            match principal {
-                Some(name) => println!("Pairing ({name}): {uri}"),
-                None => println!("Pairing: {uri}"),
-            }
-        }
-    }
+    // Kept for --print-pairing, which runs once the listener is bound; the server takes the original.
+    let pairing_credentials = args.print_pairing.then(|| credentials.clone());
     let addr = SocketAddr::new(args.bind, args.port);
     let server_config = ServerConfig {
         addr,
@@ -259,11 +239,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let backend_for_shutdown = ble_backend.clone();
     let server = AgentServer::new(server_config, ble_backend, registry);
+    // Bound here rather than inside run(), so a pairing is printed only for a listener that exists,
+    // and with the port it actually got (`--port 0` asks for any).
+    let listener = server.bind().await?;
+    if let Some(credentials) = &pairing_credentials {
+        print_pairings(&args, listener.local_addr()?.port(), fingerprint.as_deref(), credentials);
+    }
 
     // Run until the accept loop fails (it no longer does on transient errors) or a shutdown
     // signal arrives. On signal, disconnect tracked peripherals so a restart starts clean.
     tokio::select! {
-        res = server.run() => res?,
+        res = server.run_on(listener) => res?,
         _ = shutdown_signal() => {
             tracing::info!("Shutdown signal received; disconnecting peripherals and exiting");
             backend_for_shutdown.disconnect_all().await;
@@ -271,6 +257,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Prints one pairing URI per credential to standard output, never the log: it carries the token.
+fn print_pairings(
+    args: &Args,
+    port: u16,
+    fingerprint: Option<&str>,
+    credentials: &HashMap<String, String>,
+) {
+    let host = pairing::pairing_host(args.bind, pairing::routed_ipv4).unwrap_or_else(|| {
+        tracing::warn!("No default route to name a LAN address in the pairing; pass --bind <address> for one");
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    });
+    let bare_token = args
+        .token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    for (principal, uri) in pairing::pairing_uris(host, port, fingerprint, credentials, bare_token) {
+        match principal {
+            Some(name) => println!("Pairing ({name}): {uri}"),
+            None => println!("Pairing: {uri}"),
+        }
+    }
 }
 
 /// The rustls configuration presenting the agent's identity, or `None` to serve cleartext. A reset

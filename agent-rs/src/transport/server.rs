@@ -702,13 +702,14 @@ impl AgentServer {
         self.revoked_principals.lock().contains(principal)
     }
 
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(self.config.addr).await?;
-        self.run_on(listener).await
+    /// Binds the configured address. Separate from [Self::run_on] so the caller learns the bound
+    /// port before serving (the pairing printed for `--port 0` needs it), and a test can bind port
+    /// 0 itself.
+    pub async fn bind(&self) -> std::io::Result<TcpListener> {
+        TcpListener::bind(self.config.addr).await
     }
 
-    /// [Self::run] on an already bound listener, so a test can bind port 0, learn the port, and
-    /// drive the real accept loop.
+    /// Serves on a bound listener until the accept loop fails.
     pub async fn run_on(&self, listener: TcpListener) -> Result<(), Box<dyn std::error::Error>> {
         let acceptor = self.config.tls.clone().map(tokio_rustls::TlsAcceptor::from);
         tracing::info!(

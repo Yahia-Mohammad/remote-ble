@@ -92,10 +92,33 @@ class AgentPairingTest {
             "remoteble://10.0.0.2:8080?token=%C3",
             "remoteble://10.0.0.2:8080?fp=sha256:00",
             "remoteble://10.0.0.2:8080?fp=md5:" + "0".repeat(64),
+            "remoteble://[:]:8080",
+            "remoteble://[1:]:8080",
+            "remoteble://[1::2::3]:8080",
+            "remoteble://[1:2:3:4:5:6:7]:8080",
+            "remoteble://[1:2:3:4:5:6:7:8:9]:8080",
+            "remoteble://[12345::1]:8080",
+            "remoteble://[::1.2.3]:8080",
+            "remoteble://[::300.0.0.1]:8080",
         ).forEach { uri ->
             assertFailsWith<IllegalArgumentException>(uri) { AgentPairing.parse(uri) }
             assertNull(AgentPairing.parseOrNull(uri), uri)
         }
+    }
+
+    @Test
+    fun ipv6AddressesInEveryValidFormAreAccepted() {
+        listOf("::", "::1", "fe80::1", "1::", "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7::", "::ffff:192.168.1.20", "FE80::A")
+            .forEach { host -> assertEquals(host, AgentPairing.parse("remoteble://[$host]:8080").host) }
+    }
+
+    @Test
+    fun anUnescapedCharacterOutsideTheBmpSurvivesParsing() {
+        // toUri always escapes, but a link typed by hand, or decoded by whatever handed it over,
+        // may carry the raw character: a surrogate pair, which must not be split apart.
+        val pairing = AgentPairing.parse("remoteble://10.0.0.2:8080?token=key\uD83D\uDD11%20one")
+
+        assertEquals("key\uD83D\uDD11 one", pairing.token)
     }
 
     @Test

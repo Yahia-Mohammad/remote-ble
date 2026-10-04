@@ -96,12 +96,36 @@ class AgentPairing(
 
         private fun isValidHost(host: String): Boolean = when {
             host.isEmpty() -> false
-            ':' in host -> host.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }
+            ':' in host -> isIpv6(host)
             else -> host.split('.').all { label ->
                 label.isNotEmpty() && label.length <= 63 && label.first() != '-' && label.last() != '-' &&
                     label.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '-' }
             }
         }
+
+        /**
+         * RFC 4291 text form: up to eight groups of one to four hex digits, at most one `::` standing
+         * for one or more zero groups, and optionally a dotted IPv4 address as the last 32 bits.
+         * No zone index: a pairing names an address another device can reach.
+         */
+        private fun isIpv6(host: String): Boolean {
+            val halves = host.split("::")
+            if (halves.size > 2) return false
+            val groups = halves.map { half -> if (half.isEmpty()) emptyList() else half.split(':') }.flatten()
+            val ipv4 = groups.lastOrNull()?.takeIf { '.' in it }
+            if (ipv4 != null && !isIpv4(ipv4)) return false
+            val hexGroups = if (ipv4 != null) groups.dropLast(1) else groups
+            if (!hexGroups.all { it.length in 1..4 && it.all(::isHex) }) return false
+            val width = hexGroups.size + if (ipv4 != null) 2 else 0
+            return if (halves.size == 2) width <= 7 else width == 8
+        }
+
+        private fun isIpv4(text: String): Boolean {
+            val parts = text.split('.')
+            return parts.size == 4 && parts.all { it.length in 1..3 && it.all { c -> c in '0'..'9' } && it.toInt() <= 255 }
+        }
+
+        private fun isHex(c: Char): Boolean = c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
 
         private const val UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
         private const val HEX = "0123456789ABCDEF"
@@ -130,8 +154,11 @@ class AgentPairing(
                     bytes += ((hi shl 4) or lo).toByte()
                     i += 3
                 } else {
-                    c.toString().encodeToByteArray().forEach { bytes += it }
-                    i++
+                    // The whole run up to the next escape at once: one character at a time would
+                    // split a surrogate pair, and each half alone encodes as a replacement character.
+                    val end = value.indexOf('%', i).let { if (it < 0) value.length else it }
+                    value.substring(i, end).encodeToByteArray().forEach { bytes += it }
+                    i = end
                 }
             }
             return try {

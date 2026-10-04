@@ -18,6 +18,13 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-04
+
+> **The 0.14 release on Maven Central.** 0.14.0 was tagged, and its GitHub Release and container
+> image published, but it never reached Maven Central: a final review found the fixes below first.
+> Everything in 0.14.0 applies; see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md). The
+> wire protocol version is unchanged at **1**.
+
 ### Fixed
 
 - **A phone agent's dashboard pairs clients encrypted.** The Android and iOS agents started their TLS
@@ -42,6 +49,8 @@ protocol version: **1**.
 
 ## [0.14.0] - 2026-10-04
 
+> **Not published to Maven Central; use 0.14.1.** The tag, GitHub Release and GHCR image exist.
+>
 > An encryption release: every agent can serve `wss://` behind its own self-signed identity,
 > clients pin its fingerprint, and a `remoteble://` pairing link or QR code hands a client the
 > address, token and fingerprint at once (#39). Encryption is the default wherever the network can
@@ -884,6 +893,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.14.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.1
 [0.14.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.12.0

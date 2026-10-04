@@ -22,6 +22,7 @@ import javax.net.ssl.X509ExtendedKeyManager
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -172,6 +173,13 @@ class JsseTlsFront internal constructor(
             } catch (failure: IOException) {
                 // Most often a client that rejected this identity, which is the pinning working.
                 Logger.debug(LogTags.SERVER) { "TLS connection from $peer ended: ${failure.message}" }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Exception) {
+                // Anything else (a provider's runtime exception in the handshake, say) is this one
+                // connection's failure. Escaping, it would reach the thread's uncaught-exception
+                // handler, which on Android ends the whole agent for one bad connection.
+                Logger.warn(LogTags.SERVER) { "TLS connection from $peer failed: $failure" }
             } finally {
                 upstream?.let { peers.remove(it.localPort); live -= it; it.closeQuietly() }
                 live -= client

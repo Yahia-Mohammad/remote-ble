@@ -3,6 +3,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import dev.warsha.remoteble.agent.tlsrelay.remoteble_pump
@@ -78,8 +79,8 @@ import platform.posix.free
  * serial queue, so a connection's relay state needs no locking; only the peer registry, which Ktor
  * reads from its own threads, does.
  *
- * TLS 1.2 is the floor, not legacy tolerance: Ktor's CIO client, the SDK's JVM engine, speaks
- * nothing newer. Network.framework offers 1.3 above it. Only AEAD suites are offered, as on the other
+ * TLS 1.2 is the floor, not legacy tolerance: Ktor's CIO client, which an app may hand the SDK's
+ * transport, speaks nothing newer. Network.framework offers 1.3 above it. Only AEAD suites are offered, as on the other
  * agents: the platform's 1.2 defaults include CBC ones.
  *
  * Two Kotlin/Native interop traps shape this file:
@@ -94,6 +95,7 @@ import platform.posix.free
  *   direction ended.
  */
 class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
+    override val fingerprint: AgentFingerprint get() = identity.fingerprint
 
     override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
         Running(identity, upstreamPort, onFailure).also { it.listen(host, port) }
@@ -296,6 +298,6 @@ class NetworkTlsFront(private val identity: IosTlsIdentity) : TlsFront.Factory {
 object IosKeychainTls : AgentTlsProvider {
     override suspend fun load(reset: Boolean): AgentTls = withContext(Dispatchers.Default) {
         val identity = IosAgentIdentityStore.loadOrCreate(reset)
-        AgentTls(identity.fingerprint, NetworkTlsFront(identity), identity.certificateSha256)
+        AgentTls(NetworkTlsFront(identity), identity.certificateSha256)
     }
 }

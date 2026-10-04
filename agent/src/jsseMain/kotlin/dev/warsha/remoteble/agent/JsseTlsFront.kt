@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.log.Logger
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -21,6 +22,7 @@ import javax.net.ssl.X509ExtendedKeyManager
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -46,8 +48,8 @@ import kotlinx.coroutines.withContext
  * - One host holds at most [maxPerHost] connections, and the front at most [maxConnections]; a
  *   connection over either is closed at once.
  *
- * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, the SDK's JVM
- * engine, speaks nothing newer. Only AEAD suites are offered, as rustls and the iOS front offer: the
+ * TLS 1.3 and 1.2 are both enabled. 1.2 is not legacy tolerance: Ktor's CIO client, which an app
+ * may hand the SDK's transport, speaks nothing newer. Only AEAD suites are offered, as rustls and the iOS front offer: the
  * platforms' 1.2 defaults still include CBC ones, whose padding checks have a history of timing
  * oracles, and every client this project knows negotiates AES-GCM.
  */
@@ -57,6 +59,8 @@ class JsseTlsFront internal constructor(
     private val maxPerHost: Int,
     private val maxConnections: Int,
 ) : TlsFront.Factory {
+    override val fingerprint: AgentFingerprint get() = identity.fingerprint
+
 
     constructor(identity: AgentTlsIdentity) : this(identity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
 
@@ -169,6 +173,13 @@ class JsseTlsFront internal constructor(
             } catch (failure: IOException) {
                 // Most often a client that rejected this identity, which is the pinning working.
                 Logger.debug(LogTags.SERVER) { "TLS connection from $peer ended: ${failure.message}" }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Exception) {
+                // Anything else (a provider's runtime exception in the handshake, say) is this one
+                // connection's failure. Escaping, it would reach the thread's uncaught-exception
+                // handler, which on Android ends the whole agent for one bad connection.
+                Logger.warn(LogTags.SERVER) { "TLS connection from $peer failed: $failure" }
             } finally {
                 upstream?.let { peers.remove(it.localPort); live -= it; it.closeQuietly() }
                 live -= client

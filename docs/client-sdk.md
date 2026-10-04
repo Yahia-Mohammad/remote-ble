@@ -210,20 +210,27 @@ expect fun defaultWebSocketHttpClient(): HttpClient   // commonMain
 
 | Target | Engine | File |
 |---|---|---|
-| JVM | CIO | [`WebSocketClient.jvm.kt`](../client-sdk/src/jvmMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.jvm.kt) |
+| JVM | OkHttp (CIO before 0.14.1) | [`WebSocketClient.jvm.kt`](../client-sdk/src/jvmMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.jvm.kt) |
 | Android | OkHttp | [`WebSocketClient.android.kt`](../client-sdk/src/androidMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.android.kt) |
 | iOS, macOS | Darwin (NSURLSession) | [`WebSocketClient.apple.kt`](../client-sdk/src/appleMain/kotlin/dev/warsha/remoteble/client/WebSocketClient.apple.kt) |
 
 This is a convenience only — the transport accepts any `HttpClient { install(WebSockets) }`,
 so an app needing proxy/TLS-pinning/timeout config builds its own and hands it in.
 
+**Avoid Ktor CIO for `wss://`.** CIO's TLS client corrupts its own buffers under ordinary use: in
+a loop of fresh connections to an agent about one in 150 failed its handshake with
+`NullPointerException`s and negative array lengths inside kotlinx-io, on Ktor 3.5.1 and 3.6.0
+alike, and corruption before encryption could just as well reach the data. Plain `ws://` over CIO
+showed none. That is why the JVM moved to OkHttp in 0.14.1; an app building its own client for TLS
+should not choose CIO.
+
 **Android cleartext.** OkHttp enforces the app's network security policy, which forbids `ws://`
 by default from targetSdk 28. The refusal is not retried: `connect()` throws
 `CleartextTrafficNotPermittedException`, the transport goes `GAVE_UP`, and the reason is logged at
 ERROR. For a plain `ws://` agent, Android also offers
 [`cioWebSocketHttpClient()`](../client-sdk/src/androidMain/kotlin/dev/warsha/remoteble/client/CioWebSocketClient.kt),
-a CIO client on plain sockets the policy does not govern. Its TLS stack stops at TLS 1.2, so keep
-the default for `wss://` behind a TLS 1.3-only proxy.
+a CIO client on plain sockets the policy does not govern. Use it for `ws://` only, and keep the
+default for any `wss://` agent (see above).
 
 **Android 17 local network access.** An app targeting API 37 cannot open connections to its local
 network without the runtime permission `ACCESS_LOCAL_NETWORK` (shown to the user as "Nearby
@@ -241,8 +248,7 @@ TLS handshake, before the bearer token is sent; the transport goes `GAVE_UP` wit
 
 | Target | Engine | Host name |
 |---|---|---|
-| JVM | CIO, with a pinning trust manager | Presents `agent.remoteble.invalid`, which every agent certificate carries |
-| Android | OkHttp, with the same trust manager | OkHttp's host-name check defers to the pin, since agents are reached by IP |
+| JVM, Android | OkHttp, with a pinning trust manager (one shared implementation) | OkHttp's host-name check defers to the pin, since agents are reached by IP |
 | iOS, macOS | Darwin (NSURLSession), whose challenge handler accepts the server trust only for the pinned key | Not checked: the handler decides trust, since agents are reached by IP |
 
 ```kotlin

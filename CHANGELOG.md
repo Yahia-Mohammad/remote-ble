@@ -18,6 +18,38 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The JVM client no longer uses Ktor CIO for TLS.** CIO's TLS client corrupts its own buffers
+  under ordinary use: in a loop of fresh pinned connections about one in 150 failed its handshake
+  with `NullPointerException`s and negative array lengths inside kotlinx-io, on Ktor 3.5.1 and
+  3.6.0 alike, and corruption before encryption could as well have reached the data. With retries
+  on, it looked like a slow connect; with them off, a connection that never came up (the
+  intermittent TLS-PIN-02 failure seen on CI). `pinnedWebSocketHttpClient` and
+  `defaultWebSocketHttpClient` on the JVM now use OkHttp, sharing Android's implementation: none
+  in 7,500 fresh connections failed. The JVM artifact depends on `ktor-client-okhttp` instead of
+  `ktor-client-cio`, and negotiates TLS 1.3 where it used to stop at 1.2. Plain `ws://` over CIO
+  was never affected.
+- **A phone agent's dashboard pairs clients encrypted.** The Android and iOS agents started their TLS
+  front without the separate fingerprint setting, so the dashboard's pairing code (`/api/pairing`)
+  offered a `ws://` link marked unencrypted for an agent serving only `wss://`, and a client that
+  scanned it could not connect. The front now carries its own fingerprint, so the two cannot be
+  configured apart. The in-app pairing code was unaffected.
+- **The client says why it could not connect.** A pinned client whose agent changed identity waited
+  out a 15 s timeout and reported only that; it now stops at once and says to pair again. A `wss://`
+  address typed by hand, which no pin covers, gets the same advice, and a session that gave up is no
+  longer reused by the next scan.
+- **One failed TLS connection no longer risks the whole agent.** The JVM and Android TLS front let any
+  failure other than an I/O error escape, which on Android ends the process; it now drops that
+  connection.
+- **`AgentPairing.parse` is stricter about what it accepts.** An unescaped character outside the
+  Basic Multilingual Plane is no longer split into two replacement characters, and only well-formed
+  IPv6 addresses are accepted as hosts.
+- **`agent-rs --print-pairing` prints the port it bound**, after binding: `--port 0` printed port 0.
+- **A refused start leaves the identity alone.** The JVM agent reset or created its identity before
+  checking the bind, so `--reset-identity` on a start that was then refused still broke every paired
+  client. The Rust agent already checked first.
+
 ## [0.14.0] - 2026-10-04
 
 > An encryption release: every agent can serve `wss://` behind its own self-signed identity,

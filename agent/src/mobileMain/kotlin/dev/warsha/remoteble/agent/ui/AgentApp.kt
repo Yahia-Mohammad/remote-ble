@@ -109,8 +109,9 @@ fun AgentApp(
     var tokenEdited by remember { mutableStateOf(false) }
     var operatorToken by remember { mutableStateOf<String?>(null) }
     var operatorTokenEdited by remember { mutableStateOf(false) }
-    // Off by default, and deliberately not persisted: opening a cleartext high-privilege plane to the
-    // network should be a decision made per run, not one inherited silently from a previous session.
+    // Off by default, and deliberately not persisted: opening the high-privilege plane to the network
+    // (in cleartext, when encryption is off) should be a decision made per run, not one inherited
+    // silently from a previous session.
     var allowRemoteDashboard by remember { mutableStateOf(false) }
     // Why the last Start attempt failed, or null if it did not. Survives until the next attempt.
     var startFailure by remember { mutableStateOf<String?>(null) }

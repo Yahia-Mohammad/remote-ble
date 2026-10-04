@@ -37,13 +37,12 @@ that skips Android's MAC validation, see [client-sdk.md](client-sdk.md)):
 ```
 client-sdk/src/
   commonMain/…/WebSocketClient.kt          expect fun defaultWebSocketHttpClient()
-  jvmMain/…/WebSocketClient.jvm.kt          actual → Ktor CIO
+  jvmMain/…/WebSocketClient.jvm.kt          actual → Ktor OkHttp (CIO's TLS client is unreliable)
   androidMain/…/WebSocketClient.android.kt  actual → Ktor OkHttp
   appleMain/…/WebSocketClient.apple.kt      actual → Ktor Darwin (iOS + macOS)
 
   commonMain/…/WebSocketClient.kt          expect fun pinnedWebSocketHttpClient(fingerprint)
-  jvmMain/…/PinnedWebSocketClient.kt        actual → CIO + PinningTrustManager (jsseMain)
-  androidMain/…/PinnedWebSocketClient.android.kt  actual → OkHttp + the same trust manager
+  jsseMain/…/PinnedWebSocketClient.jsse.kt  actual → OkHttp + PinningTrustManager (JVM + Android)
   appleMain/…/PinnedWebSocketClient.apple.kt actual → Darwin challenge handler + certificateSpki
 
   commonMain/…/RemoteIdentifier.kt         expect fun deviceHandleToIdentifier(value)
@@ -207,7 +206,7 @@ via the test-only `:client-sdk → :agent` dependency.
 | `:agent` | [`JsseTlsFrontTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/JsseTlsFrontTest.kt), [`TlsFrontFailureTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/TlsFrontFailureTest.kt), [`AwaitListeningTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/AwaitListeningTest.kt) | the JVM/Android front's handshake deadline, its own thread pool, per-host and total limits, accept-loop recovery, AEAD-only suites; a late listener failure reaching the activity log; the iOS listener's bounded start |
 | `:agent` | [`MainTest`](../agent/src/jvmTest/kotlin/dev/warsha/remoteble/agent/MainTest.kt), [`ClientCredentialsTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/ClientCredentialsTest.kt), [`PairingQrTest`](../agent/src/commonTest/kotlin/dev/warsha/remoteble/agent/PairingQrTest.kt) | TLS-PIN-05's cleartext gate, `--print-pairing`, one pairing per live credential, the pairing host, the QR code's shape and SVG |
 | `:agent` | [`AgentIdentityLoaderTest`](../agent/src/androidHostTest/kotlin/dev/warsha/remoteble/agent/ui/AgentIdentityLoaderTest.kt) | the phone UI never offers an identity a failed reset deleted |
-| `:client-sdk` | [`TlsPinningEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/TlsPinningEndToEndTest.kt) | `TLS-PIN-01`–`04`, `06`, `07` against the real front with the CIO client: pinned ops, a wrong pin refused before any request, restart and reset, lease resume, the real peer behind the relay (also during startup), a pairing URI connecting, the dashboard's pairing |
+| `:client-sdk` | [`TlsPinningEndToEndTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/TlsPinningEndToEndTest.kt) | `TLS-PIN-01`–`04`, `07` against the real front with the SDK's OkHttp client, and fresh connections that must all connect on the first attempt (Ktor CIO's TLS client failed about one in 150): pinned ops, a wrong pin refused before any request, restart and reset, lease resume, the real peer behind the relay (also during startup), a pairing URI connecting, the dashboard's pairing |
 | `:client-sdk` | [`OkHttpPinningTest`](../client-sdk/src/androidHostTest/kotlin/dev/warsha/remoteble/client/OkHttpPinningTest.kt), [`CertificateSpkiTest`](../client-sdk/src/jvmTest/kotlin/dev/warsha/remoteble/client/CertificateSpkiTest.kt), [`PendingRefusalsTest`](../client-sdk/src/commonTest/kotlin/dev/warsha/remoteble/client/PendingRefusalsTest.kt) | the Android client's pinning; the SPKI the Apple client hashes equals the JDK's; Apple refusals keyed by origin |
 | `:client-ui` | [`PairingFlowTest`](../client-ui/src/commonTest/kotlin/dev/warsha/remoteble/androidclient/PairingFlowTest.kt) | a pairing link is held for confirmation, applied whole, dismissible, and its pin dropped when the address is edited |
 

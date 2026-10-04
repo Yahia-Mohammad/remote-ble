@@ -39,7 +39,7 @@ pub fn pairing_uri(
 /// The pairings `--print-pairing` prints, each with the principal it is for: one per credential,
 /// the bare `REMOTE_BLE_TOKEN` (principal `None`, stored as "default") first when `bare_token` says
 /// it was given, then the named ones in order; or one without a token for an agent that needs none.
-/// Matches the Kotlin agent's `pairingUris`.
+/// Matches the Kotlin agent's `ClientCredentials.pairings`.
 pub fn pairing_uris(
     host: IpAddr,
     port: u16,

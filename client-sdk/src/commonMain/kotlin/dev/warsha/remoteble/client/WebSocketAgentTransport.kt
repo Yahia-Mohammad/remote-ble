@@ -177,7 +177,7 @@ class WebSocketAgentTransport(
             }
         } catch (e: Throwable) {
             _state.value = TransportState.DISCONNECTED
-            Logger.debug(LogTags.TRANSPORT) { "openSession failed: ${e.message}" }
+            Logger.debug(LogTags.TRANSPORT, e) { "openSession failed: ${e.message}" }
             throw e
         }
         session = s

@@ -39,13 +39,14 @@ fun main(args: Array<String>) {
         namedCredentials.keys + setOfNotNull(token?.let { ClientCredentials.DEFAULT_PRINCIPAL })
     }
     val writePolicy = loadWritePolicy(System.getenv("REMOTE_BLE_POLICY_FILE"), knownPrincipals)
-    val tlsFront = tlsFrontFor(cli)
     val bindHost = validateBind(
         requested = cli.bindHost ?: System.getenv("REMOTE_BLE_BIND") ?: AgentConfig.DEFAULT_BIND_HOST,
         hasCredential = token != null || namedCredentials.isNotEmpty(),
         allowInsecureLan = System.getenv("REMOTE_BLE_ALLOW_INSECURE_LAN")?.toBooleanStrictOrNull() == true,
     )
-    validateCleartext(bindHost, tls = tlsFront != null, allowCleartextLan = strictFlag(System::getenv, "REMOTE_BLE_ALLOW_CLEARTEXT_LAN"))
+    validateCleartext(bindHost, tls = tlsRequested(cli), allowCleartextLan = strictFlag(System::getenv, "REMOTE_BLE_ALLOW_CLEARTEXT_LAN"))
+    // Only once both refusals have passed: a refused start must not have reset or created the identity.
+    val tlsFront = tlsFrontFor(cli)
     val config = AgentConfig(
         bindHost = bindHost,
         port = cli.port,
@@ -75,7 +76,6 @@ fun main(args: Array<String>) {
         simulationProfile = simulationProfile,
         writePolicy = writePolicy,
         tlsFront = tlsFront?.second,
-        tlsFingerprint = tlsFront?.first?.fingerprint,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -164,7 +164,7 @@ internal fun tlsFrontFor(
     cli: Cli,
     env: (String) -> String? = System::getenv,
 ): Pair<AgentTlsIdentity, TlsFront.Factory>? {
-    val tls = cli.tls || strictFlag(env, "REMOTE_BLE_TLS")
+    val tls = tlsRequested(cli, env)
     val reset = cli.resetIdentity || strictFlag(env, "REMOTE_BLE_RESET_IDENTITY")
     val path = env("REMOTE_BLE_IDENTITY_FILE")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: AgentIdentityStore.defaultPath()
@@ -175,6 +175,10 @@ internal fun tlsFrontFor(
     val identity = AgentIdentityStore.loadOrCreate(path, reset)
     return identity to JsseTlsFront(identity)
 }
+
+/** Whether this run serves `wss://`: `--tls` or `REMOTE_BLE_TLS=true`. */
+internal fun tlsRequested(cli: Cli, env: (String) -> String? = System::getenv): Boolean =
+    cli.tls || strictFlag(env, "REMOTE_BLE_TLS")
 
 /** Strict, like REMOTE_BLE_WRITE_FAIL_FAST: a typo fails startup instead of silently meaning false. */
 private fun strictFlag(env: (String) -> String?, name: String): Boolean =

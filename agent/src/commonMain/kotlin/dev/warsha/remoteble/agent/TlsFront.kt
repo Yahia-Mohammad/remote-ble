@@ -1,5 +1,7 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.AgentFingerprint
+
 import kotlin.time.Duration
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -29,7 +31,13 @@ interface TlsFront {
 
     fun stop()
 
-    fun interface Factory {
+    interface Factory {
+        /**
+         * The identity this front presents: what clients pin, and what a pairing for this agent
+         * carries. Part of the front so the two cannot be configured apart.
+         */
+        val fingerprint: AgentFingerprint
+
         /**
          * Binds [host]:[port] (0 for an ephemeral port) and relays to `127.0.0.1:[upstreamPort]`.
          * Throws [AgentBindException] if the public port cannot be bound. [onFailure] hears of a

@@ -1,5 +1,6 @@
 package dev.warsha.remoteble.agent
 
+import dev.warsha.remoteble.protocol.AgentFingerprint
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -14,12 +15,15 @@ class TlsFrontFailureTest {
     @Test
     fun aListenerFailingAfterStartReachesTheActivityLog() = runBlocking {
         var fail: ((String) -> Unit)? = null
-        val front = TlsFront.Factory { _, _, _, onFailure ->
-            fail = onFailure
-            object : TlsFront {
-                override val port = 1
-                override fun peerOf(relayPort: Int): PeerAddress? = null
-                override fun stop() = Unit
+        val front = object : TlsFront.Factory {
+            override val fingerprint = AgentFingerprint.ofSpkiSha256(ByteArray(32))
+            override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront {
+                fail = onFailure
+                return object : TlsFront {
+                    override val port = 1
+                    override fun peerOf(relayPort: Int): PeerAddress? = null
+                    override fun stop() = Unit
+                }
             }
         }
         val monitor = AgentMonitor()

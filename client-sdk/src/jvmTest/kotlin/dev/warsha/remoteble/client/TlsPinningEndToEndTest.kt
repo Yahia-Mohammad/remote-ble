@@ -53,12 +53,13 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assume
 
 /**
  * The Kotlin half of the `TLS-PIN-*` scenarios in `docs/proposals/agent-transport-encryption.md`:
- * a real agent behind its JSSE TLS front, and the SDK's pinned CIO client, which only speaks
- * TLS 1.2, so every passing connection here is also `TLS-PIN-06`.
+ * a real agent behind its JSSE TLS front, and the SDK's pinned OkHttp client. `TLS-PIN-06`, a TLS
+ * 1.2-only client, is `JsseTlsFrontTest.onlyAeadSuitesAreNegotiated`.
  */
 class TlsPinningEndToEndTest {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -278,11 +279,13 @@ class TlsPinningEndToEndTest {
         // between must still resolve to its real peer, not to the relay on loopback.
         val monitor = AgentMonitor()
         val listening = CompletableDeferred<Int>()
-        val slowToReturn = TlsFront.Factory { host, port, upstreamPort, onFailure ->
-            JsseTlsFront(identity).start(host, port, upstreamPort, onFailure).also {
-                listening.complete(it.port)
-                delay(1.seconds)
-            }
+        val slowToReturn = object : TlsFront.Factory {
+            override val fingerprint = identity.fingerprint
+            override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (reason: String) -> Unit): TlsFront =
+                JsseTlsFront(identity).start(host, port, upstreamPort, onFailure).also {
+                    listening.complete(it.port)
+                    delay(1.seconds)
+                }
         }
         val server = AgentWebSocketServer(port = 0, monitor = monitor, tls = slowToReturn).also { servers += it }
         val starting = scope.launch { server.start() }
@@ -320,8 +323,8 @@ class TlsPinningEndToEndTest {
             authToken = "client-token",
             operatorToken = "operator-secret",
             monitor = AgentMonitor(),
+            // The fingerprint comes from the front itself: no separate setting to forget.
             tls = JsseTlsFront(identity),
-            fingerprint = identity.fingerprint,
         ).also { servers += it }.startAndAwaitReady()
         val basic = "Basic " + Base64.getEncoder().encodeToString("operator:operator-secret".toByteArray())
 
@@ -331,6 +334,43 @@ class TlsPinningEndToEndTest {
         assertTrue("\"uri\":\"$expected\"" in body, body)
         assertTrue("\"encrypted\":true" in body && "<svg" in body, body)
         assertEquals(401, httpsStatus("127.0.0.1", server.resolvedPort, "/api/pairing", "Basic " + Base64.getEncoder().encodeToString("operator:wrong".toByteArray())))
+    }
+
+
+    /**
+     * Fresh pinned connections, each opened as another closes, all connect on the first attempt.
+     * Over Ktor CIO's TLS client about one in 150 did not: its buffers were corrupted mid-handshake
+     * (NullPointerExceptions and negative array lengths inside kotlinx-io), and with no retry the
+     * connection simply never came up. 200 rounds catch that about three times in four.
+     */
+    @Test
+    fun freshPinnedConnectionsConnectOnTheFirstAttempt() = runBlocking {
+        Logger.configure(level = LogLevel.DEBUG) { _, _, message, failure ->
+            logged.add(message + (failure?.let { " ($it)" } ?: ""))
+        }
+        val server = tlsServer()
+        fun session(clientId: String) = DefaultAgentSession(
+            WebSocketAgentTransport(
+                "wss://127.0.0.1:${server.resolvedPort}/agent",
+                scope,
+                pinnedWebSocketHttpClient(identity.fingerprint).also { clients += it },
+                reconnect = ReconnectPolicy.None,
+                clientId = clientId,
+            ),
+            CborProtocolCodec(),
+            scope,
+        )
+        val failures = mutableListOf<String>()
+        repeat(200) { round ->
+            for (which in listOf("a", "b")) {
+                logged.clear()
+                val session = session("$which-$round")
+                val up = withTimeoutOrNull(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+                if (up == null) failures += "round $round/$which: ${session.transportState.value} ${logged.filter { "openSession" in it }}"
+                session.close()
+            }
+        }
+        assertTrue(failures.isEmpty(), failures.joinToString("\n"))
     }
 
     private fun httpsBody(host: String, port: Int, path: String, authorization: String): String =

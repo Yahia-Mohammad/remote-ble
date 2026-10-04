@@ -13,7 +13,9 @@ interface AgentTlsProvider {
 }
 
 /**
- * A loaded identity: the [fingerprint] clients pin, the [front] that serves it, and the
- * [certificateSha256] a browser's warning shows for the dashboard.
+ * A loaded identity: the [front] that serves it, the [fingerprint] clients pin (the front's own),
+ * and the [certificateSha256] a browser's warning shows for the dashboard.
  */
-class AgentTls(val fingerprint: AgentFingerprint, val front: TlsFront.Factory, val certificateSha256: String? = null)
+class AgentTls(val front: TlsFront.Factory, val certificateSha256: String? = null) {
+    val fingerprint: AgentFingerprint get() = front.fingerprint
+}

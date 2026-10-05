@@ -76,6 +76,9 @@ codesign -f -s - "$APP" >/dev/null 2>&1
 
 echo "==> Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1} (logs: $LOG)…"
 : > "$LOG"
+source "$ROOT/scripts/pairing-output.sh"
+trap cleanup_pairing_output EXIT
+prepare_pairing_output ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
 OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
   --env "AGENT_LIBJVM=$LIBJVM" --env "AGENT_CP=$CP")
 # `open` starts the app through LaunchServices, which does NOT inherit this shell's environment —
@@ -114,7 +117,7 @@ on_signal() {
   pkill -f "$MATCH" 2>/dev/null || true
 }
 trap on_signal INT TERM
-trap 'kill "$TAIL_PID" 2>/dev/null || true; pkill -f "$MATCH" 2>/dev/null || true' EXIT
+trap 'cleanup_pairing_output; kill "$TAIL_PID" 2>/dev/null || true; pkill -f "$MATCH" 2>/dev/null || true' EXIT
 
 echo "==> Streaming logs (Ctrl-C to stop the agent, or choose Quit Agent from the menu bar)…"
 while kill -0 "$LAUNCHER_PID" 2>/dev/null; do sleep 0.5; done

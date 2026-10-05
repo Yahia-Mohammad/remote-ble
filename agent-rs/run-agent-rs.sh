@@ -151,6 +151,9 @@ if [ "$OS" = "Darwin" ]; then
 
   log "Launching agent on port $PORT, bound to ${REMOTE_BLE_BIND:-127.0.0.1} (logs: $LOG)…"
   : > "$LOG"
+  source "$HERE/../scripts/pairing-output.sh"
+  trap cleanup_pairing_output EXIT
+  prepare_pairing_output ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
   OPEN_ARGS=(-n "$APP" --stdout "$LOG" --stderr "$LOG"
     --env "RUST_LOG=${RUST_LOG:-agent_rs=debug,info}")
   # Every REMOTE_BLE_* variable, as run-agent.sh forwards them: `open` passes on only what --env
@@ -161,7 +164,7 @@ if [ "$OS" = "Darwin" ]; then
   # ${a[@]+"${a[@]}"}: an empty array under `set -u` is an error in the bash 3.2 macOS ships.
   open "${OPEN_ARGS[@]}" --args --port "$PORT" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}
 
-  cleanup() { echo; echo "==> Stopping agent…"; pkill -f "RemoteBleAgentRs.app/Contents/MacOS/agent-rs" 2>/dev/null || true; }
+  cleanup() { cleanup_pairing_output; echo; echo "==> Stopping agent…"; pkill -f "RemoteBleAgentRs.app/Contents/MacOS/agent-rs" 2>/dev/null || true; }
   trap cleanup INT TERM EXIT
   log "Streaming logs (Ctrl-C to stop the agent)…"
   tail -f "$LOG"

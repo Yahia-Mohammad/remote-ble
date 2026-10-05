@@ -152,6 +152,70 @@ class MainTest {
     }
 
     @Test
+    fun realCliPairingOutputBypassesTheStdoutLog() {
+        val dir = Files.createTempDirectory("remoteble-pairing-regression")
+        val pairingFile = Files.createFile(dir.resolve("pairing-output"))
+        val logFile = dir.resolve("agent.log")
+        val identityFile = dir.resolve("identity.pem")
+        val simulation = dir.resolve("simulation.json")
+        Files.writeString(simulation, """{"schemaVersion":1,"peripherals":[{"id":"test","advertisement":{},"services":[{"uuid":"180f","characteristics":[{"uuid":"2a19","properties":["read"],"read":{"static":"64"}}]}]}]}""")
+        val port = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val process = ProcessBuilder(
+            "${System.getProperty("java.home")}/bin/java", "-cp", System.getProperty("remoteble.agent.testClasspath"),
+            "dev.warsha.remoteble.agent.MainKt", "--bind", "127.0.0.1", "--port", port.toString(),
+            "--tls", "--print-pairing", "--simulate", simulation.toString(),
+        ).apply {
+            environment().keys.removeIf { it.startsWith("REMOTE_BLE_") }
+            environment()["REMOTE_BLE_IDENTITY_FILE"] = identityFile.toString()
+            environment()["REMOTE_BLE_TOKEN"] = "pairing-only-secret"
+            environment()["REMOTE_BLE_PAIRING_OUTPUT"] = pairingFile.toString()
+            redirectErrorStream(true)
+            redirectOutput(logFile.toFile())
+        }.start()
+        try {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(15_000) {
+                    while (!Files.exists(pairingFile) || Files.readString(pairingFile).isBlank()) {
+                        assertTrue(process.isAlive, logFile.toFile().readText())
+                        kotlinx.coroutines.delay(25)
+                    }
+                }
+            }
+            val uri = Files.readString(pairingFile).trim().removePrefix("Pairing: ")
+            val pairing = dev.warsha.remoteble.protocol.AgentPairing.parse(uri)
+            assertEquals("pairing-only-secret", pairing.token)
+            assertEquals(port, pairing.port)
+            assertEquals(AgentIdentityStore.loadOrCreate(identityFile).fingerprint, pairing.fingerprint)
+            val log = Files.readString(logFile)
+            assertTrue(log.contains("RemoteBLE agent listening on wss://"), log)
+            assertFalse(log.contains("remoteble://"), "pairing URI leaked into agent.log")
+            assertFalse(log.contains("pairing-only-secret"), "bearer token leaked into agent.log")
+        } finally {
+            process.destroy()
+            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly().waitFor()
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun wrapperPairingOutputBypassesTheConfiguredLogger() {
+        val path = Files.createTempFile("remoteble-pairing-output", ".txt")
+        Logger.configure(level = LogLevel.INFO, sink = LogSink { _, _, message, _ -> logMessages += message })
+        try {
+            printPairings(listOf("Pairing: remoteble://127.0.0.1:8080?token=private"), path.toString())
+            assertTrue(Files.readString(path).contains("token=private"))
+            assertTrue(logMessages.isEmpty())
+            Files.delete(path)
+            assertFailsWith<java.nio.file.NoSuchFileException> {
+                printPairings(listOf("Pairing: remoteble://127.0.0.1:8080?token=private"), path.toString())
+            }
+            assertFalse(Files.exists(path), "a removed FIFO must never be recreated as a regular secret file")
+        } finally {
+            Files.deleteIfExists(path)
+        }
+    }
+
+    @Test
     fun simulationFlagAndProfileLoaderFailBeforeServerStartup() {
         assertEquals(
             Cli(bindHost = "127.0.0.1", port = 9000, simulationPath = "sim.json"),

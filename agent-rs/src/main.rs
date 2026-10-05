@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             listener.local_addr()?.port(),
             fingerprint.as_deref(),
             credentials,
-        );
+        )?;
     }
 
     // Run until the accept loop fails (it no longer does on transient errors) or a shutdown
@@ -264,13 +264,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Prints one pairing URI per credential to standard output, never the log: it carries the token.
+/// Prints pairings to stdout, or the macOS wrapper's private FIFO, never to the log.
 fn print_pairings(
     args: &Args,
     port: u16,
     fingerprint: Option<&str>,
     credentials: &HashMap<String, String>,
-) {
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut output: Box<dyn Write> = match std::env::var_os("REMOTE_BLE_PAIRING_OUTPUT") {
+        Some(path) => Box::new(std::fs::OpenOptions::new().write(true).open(path)?),
+        None => Box::new(std::io::stdout()),
+    };
+    write_pairings(&mut output, args, port, fingerprint, credentials)
+}
+
+fn write_pairings(
+    output: &mut dyn std::io::Write,
+    args: &Args,
+    port: u16,
+    fingerprint: Option<&str>,
+    credentials: &HashMap<String, String>,
+) -> std::io::Result<()> {
     let host = pairing::pairing_host(args.bind, pairing::routed_ipv4).unwrap_or_else(|| {
         tracing::warn!(
             "No default route to name a LAN address in the pairing; pass --bind <address> for one"
@@ -284,10 +299,11 @@ fn print_pairings(
     for (principal, uri) in pairing::pairing_uris(host, port, fingerprint, credentials, bare_token)
     {
         match principal {
-            Some(name) => println!("Pairing ({name}): {uri}"),
-            None => println!("Pairing: {uri}"),
+            Some(name) => writeln!(output, "Pairing ({name}): {uri}")?,
+            None => writeln!(output, "Pairing: {uri}")?,
         }
     }
+    output.flush()
 }
 
 /// Keep the bound listener through TLS preparation; a probe-and-close would race other processes.
@@ -545,6 +561,37 @@ mod tests {
         assert!(tls.is_none());
         assert!(!path.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pairing_output_uses_the_dedicated_writer_for_every_credential() {
+        let mut args = Args::parse_from(["agent-rs"]);
+        args.bind = "127.0.0.1".parse().unwrap();
+        args.token = Some("pairing-only-secret".into());
+        let credentials = HashMap::from([
+            ("default".to_string(), "pairing-only-secret".to_string()),
+            ("lab".to_string(), "lab-secret".to_string()),
+        ]);
+        let mut output = Vec::new();
+        write_pairings(
+            &mut output,
+            &args,
+            8443,
+            Some(&format!("sha256:{}", "ab".repeat(32))),
+            &credentials,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.lines().count(), 2);
+        assert!(
+            output.contains(
+                "Pairing: remoteble://127.0.0.1:8443?token=pairing-only-secret&fp=sha256:"
+            )
+        );
+        assert!(
+            output
+                .contains("Pairing (lab): remoteble://127.0.0.1:8443?token=lab-secret&fp=sha256:")
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ import dev.warsha.remoteble.log.PrintlnSink
 import dev.warsha.remoteble.protocol.DeviceHandle
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import kotlin.time.Duration.Companion.milliseconds
@@ -126,13 +127,21 @@ fun main(args: Array<String>) {
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
     Logger.info(LogTags.AGENT) { "Status dashboard: ${if (tlsFront.front != null) "https" else "http"}://localhost:${server.resolvedPort}/" }
     if (cli.printPairing) {
-        // Standard output, not the logger: the URI carries the token, so it goes only where the
-        // operator who asked for it is looking, never into a log sink.
+        // The URI carries a token: the wrappers use a private output pipe to bypass their log.
         val host = pairingHost(config.bindHost) ?: "127.0.0.1".also {
             Logger.warn(LogTags.AGENT) { "No default route to name a LAN address in the pairing; pass --bind <address> for one" }
         }
-        app.koin.get<ClientCredentials>().pairings(host, server.resolvedPort, tlsFront.front?.fingerprint)
-            .forEach { (principal, pairing) -> println("Pairing${principal?.let { " ($it)" }.orEmpty()}: ${pairing.toUri()}") }
+        try {
+            printPairings(
+                app.koin.get<ClientCredentials>().pairings(host, server.resolvedPort, tlsFront.front?.fingerprint)
+                    .map { (principal, pairing) -> "Pairing${principal?.let { " ($it)" }.orEmpty()}: ${pairing.toUri()}" },
+            )
+        } catch (failure: java.io.IOException) {
+            server.stop()
+            app.close()
+            Logger.error(LogTags.AGENT) { "Cannot print pairing to the requested output: ${failure.message}" }
+            exitProcess(1)
+        }
     }
 
     Runtime.getRuntime().addShutdownHook(
@@ -314,3 +323,11 @@ private fun parseLogLevel(raw: String?): LogLevel? = when (raw?.lowercase()) {
     else -> LogLevel.INFO
 }
 
+/** The macOS wrappers supply a private FIFO so bearer URIs bypass their stdout log. */
+internal fun printPairings(lines: List<String>, output: String? = System.getenv("REMOTE_BLE_PAIRING_OUTPUT")) {
+    if (output == null) lines.forEach(::println)
+    // Never CREATE: if the wrapper has retired its FIFO, do not leave a regular secret file.
+    else Files.newBufferedWriter(Path.of(output), StandardOpenOption.WRITE).use { writer ->
+        lines.forEach { writer.write(it); writer.newLine() }
+    }
+}

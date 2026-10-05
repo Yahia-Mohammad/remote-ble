@@ -1182,6 +1182,16 @@ impl AgentServer {
             // shed rather than block the radio when the client can't keep up. `false` means the
             // frame channel is gone and this pump is finished.
             let deliver = |event: AgentEvent| -> bool {
+                // A v1 decoder rejects the whole frame over an unknown key, so the `scan.fields`
+                // fields reach only a client that negotiated them. Every event leaves through here.
+                let event = if batch_capabilities
+                    .lock()
+                    .contains(capabilities::SCAN_FIELDS)
+                {
+                    event
+                } else {
+                    event.without_scan_fields()
+                };
                 let event = translator_event.to_client_event(event);
                 match frame_tx_event.try_send(Outbound::Frame(Frame::Event { event })) {
                     Ok(()) => true,
@@ -2586,6 +2596,10 @@ mod tests {
             rssi,
             service_uuids: service.into_iter().map(str::to_string).collect(),
             manufacturer_data: Default::default(),
+            service_data: Default::default(),
+            tx_power: None,
+            is_connectable: None,
+            peripheral_name: None,
         }
     }
 
@@ -3306,6 +3320,64 @@ mod tests {
         .await;
         assert!(batch.is_err(), "unexpected batch: {batch:?}");
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn scan_fields_reach_only_a_client_that_negotiated_them() {
+        let harness = ScanWsHarness::new(ScanConcurrencyMode::Multiplexed, Duration::from_secs(1));
+        harness
+            .fake
+            .backend_capabilities
+            .lock()
+            .push(capabilities::SCAN_FIELDS.to_string());
+        let mut service_data = std::collections::BTreeMap::new();
+        service_data.insert(
+            "0000feaa-0000-1000-8000-00805f9b34fb".to_string(),
+            vec![0x10, 0xf4],
+        );
+        let advertisement = crate::protocol::events::AdvertisementDto {
+            service_data,
+            tx_power: Some(-8),
+            is_connectable: Some(false),
+            peripheral_name: Some("Cached".into()),
+            ..test_advertisement("beacon", None, Some("Beacon"), -60)
+        };
+
+        // The v1 baseline: a client that did not ask gets the advertisement without them, since
+        // its decoder rejects the whole frame over an unknown key.
+        let mut plain = harness.client("scan-a", &[], &[]).await;
+        let mut gated = harness
+            .client(
+                "scan-b",
+                &[capabilities::SCAN_FIELDS],
+                &[capabilities::SCAN_FIELDS],
+            )
+            .await;
+        for (id, client) in [(1, &mut plain), (2, &mut gated)] {
+            send_command(
+                &mut client.ws,
+                id,
+                Op::ScanStart {
+                    scan_id: 1,
+                    filters: vec![],
+                },
+            )
+            .await;
+            assert!(matches!(
+                recv_reply(&mut client.ws).await,
+                OpResult::Ok { .. }
+            ));
+        }
+        harness.wait_for_scan_start(1).await;
+
+        harness.fake.emit_scan(advertisement.clone()).await;
+        assert_eq!(
+            recv_scan_result(&mut plain.ws, 1).await,
+            advertisement.clone().without_scan_fields()
+        );
+        assert_eq!(recv_scan_result(&mut gated.ws, 1).await, advertisement);
+        plain.close().await;
+        gated.close().await;
     }
 
     #[tokio::test]
@@ -4245,6 +4317,8 @@ mod tests {
         /// dispatched op from one the catch-all `Unsupported` arm swallowed.
         descriptor_reads: Mutex<Vec<DescRef>>,
         descriptor_writes: Mutex<Vec<(DescRef, Vec<u8>)>>,
+        /// The backend-level capabilities to report; none unless a test sets them.
+        backend_capabilities: Mutex<Vec<String>>,
     }
 
     /// Holds the reader pending forever while every writer attempt fails. This models a socket
@@ -4285,7 +4359,7 @@ mod tests {
     #[async_trait]
     impl BleBackend for FakeBackend {
         fn capabilities(&self) -> Vec<String> {
-            vec![]
+            self.backend_capabilities.lock().clone()
         }
         async fn start_scan(
             &self,

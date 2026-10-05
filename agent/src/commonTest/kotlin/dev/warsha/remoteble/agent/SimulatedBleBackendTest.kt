@@ -1,6 +1,7 @@
 package dev.warsha.remoteble.agent
 
 import dev.warsha.remoteble.protocol.AgentException
+import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CharRef
 import dev.warsha.remoteble.protocol.DeviceHandle
 import dev.warsha.remoteble.protocol.ErrorKind
@@ -71,8 +72,33 @@ class SimulatedBleBackendTest {
     }
 
     @Test
+    fun scanFieldsComeFromTheProfile() = runTest {
+        val backend = SimulatedBleBackend(SimulationProfile.decode(HRM_PROFILE.replace(ADVERTISED, SCAN_FIELDS)))
+        assertTrue(Capabilities.SCAN_FIELDS in backend.capabilities)
+
+        val advertisement = backend.scan(emptyList()).first()
+        assertContentEquals(byteArrayOf(0x10, -0x0c), advertisement.serviceData["0000feaa-0000-1000-8000-00805f9b34fb"])
+        assertContentEquals(byteArrayOf(0x02, 0x15), advertisement.manufacturerData[76])
+        assertEquals(-8, advertisement.txPower)
+        assertEquals(false, advertisement.isConnectable)
+
+        val refused = assertFailsWith<AgentException> { backend.connect(DeviceHandle("hrm-1")) }
+        assertEquals(ErrorKind.CONNECTION_FAILED, refused.error.kind, "a non-connectable advertiser refuses a connection")
+    }
+
+    @Test
+    fun aDefaultProfileAdvertisesAConnectablePeripheral() = runTest {
+        assertEquals(true, SimulatedBleBackend(SimulationProfile.decode(HRM_PROFILE)).scan(emptyList()).first().isConnectable)
+    }
+
+    @Test
     fun malformedProfilesFailBeforeAnyAgentStarts() {
         val invalid = listOf(
+            HRM_PROFILE.replace(ADVERTISED, ADVERTISED + ", \"serviceData\": { \"feaa\": \"0g\" }"),
+            HRM_PROFILE.replace(ADVERTISED, ADVERTISED + ", \"serviceData\": { \"not-a-uuid\": \"00\" }"),
+            HRM_PROFILE.replace(ADVERTISED, ADVERTISED + ", \"serviceData\": { \"feaa\": \"00\", \"0000feaa-0000-1000-8000-00805f9b34fb\": \"01\" }"),
+            HRM_PROFILE.replace(ADVERTISED, ADVERTISED + ", \"manufacturerData\": { \"70000\": \"00\" }"),
+            HRM_PROFILE.replace(ADVERTISED, ADVERTISED + ", \"txPower\": 200"),
             "{}",
             HRM_PROFILE.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2"),
             HRM_PROFILE.replace("\"id\": \"hrm-1\"", "\"id\": \"bad id with spaces\""),
@@ -84,6 +110,11 @@ class SimulatedBleBackendTest {
     }
 
     private companion object {
+        /** Only the advertisement lists service UUIDs, so new advertisement fields go in after them. */
+        const val ADVERTISED = "\"serviceUuids\": [\"180d\"]"
+        const val SCAN_FIELDS = ADVERTISED + ", \"serviceData\": { \"feaa\": \"10f4\" }, " +
+            "\"manufacturerData\": { \"76\": \"0215\" }, \"txPower\": -8, \"connectable\": false"
+
         val HRM_PROFILE = """
             {
               "schemaVersion": 1,

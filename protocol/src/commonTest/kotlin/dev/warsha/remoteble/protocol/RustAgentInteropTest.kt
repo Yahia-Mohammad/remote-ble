@@ -171,6 +171,29 @@ class RustAgentInteropTest {
     )
 
     /**
+     * The `scan.fields` fields as `agent-rs` emits them: string-keyed service data with a high
+     * (signed) byte, a negative Tx power, a `false` connectable flag and a platform name. Rust also
+     * writes the v1 baseline's empty `serviceUuids` and `manufacturerData`, which decode as defaults.
+     */
+    @Test
+    fun scanResultCarriesTheScanFields() = assertDecodes(
+        "82656576656e74a1656576656e74826b7363616e2e726573756c74a2667363616e4964076d6164766572746973656d656e74a866646576696365a16576616c75657141413a42423a43433a44443a45453a46466472737369383b6c73657276696365557569647380706d616e75666163747572657244617461a06b7365727669636544617461a1782430303030666561612d303030302d313030302d383030302d30303830356639623334666282102b677478506f776572276d6973436f6e6e65637461626c65f46e7065726970686572616c4e616d6566436163686564",
+        Event(
+            AgentEvent.ScanResult(
+                scanId = 7,
+                advertisement = AdvertisementDto(
+                    device = dev,
+                    rssi = -60,
+                    serviceData = mapOf("0000feaa-0000-1000-8000-00805f9b34fb" to byteArrayOf(0x10, -0x0c)),
+                    txPower = -8,
+                    isConnectable = false,
+                    peripheralName = "Cached",
+                ),
+            ),
+        ),
+    )
+
+    /**
      * The `lease.holder` field as `agent-rs` actually emits it.
      *
      * Worth pinning because the two agents spell the field differently in source — Rust's

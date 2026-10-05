@@ -458,6 +458,20 @@ impl BtleplugBackend {
                                         .map(|u| u.to_string())
                                         .collect(),
                                     manufacturer_data: mfg_data,
+                                    // `scan.fields`: btleplug reports service data and Tx power, but
+                                    // has neither a connectable flag nor a name apart from the local
+                                    // name, so those two stay absent.
+                                    service_data: props
+                                        .service_data
+                                        .iter()
+                                        .map(|(uuid, data)| (uuid.to_string(), data.clone()))
+                                        .collect(),
+                                    tx_power: props
+                                        .tx_power_level
+                                        .map(i32::from)
+                                        .filter(|level| TX_POWER_RANGE.contains(level)),
+                                    is_connectable: None,
+                                    peripheral_name: None,
                                 };
                                 let mut legacy_coalesced = None;
 
@@ -482,13 +496,9 @@ impl BtleplugBackend {
                                                     raw.service_uuids.clone(),
                                                 );
                                                 AdvertisementDto {
-                                                    device: raw.device.clone(),
                                                     name,
-                                                    rssi: raw.rssi,
                                                     service_uuids,
-                                                    manufacturer_data: raw
-                                                        .manufacturer_data
-                                                        .clone(),
+                                                    ..raw.clone()
                                                 }
                                             })
                                             .clone()
@@ -778,7 +788,12 @@ impl BleBackend for BtleplugBackend {
         // unavailable in btleplug rather than merely unbuilt: `pairing`, `conn.priority`,
         // `conn.params`, and `rssi` (btleplug reports the cached advertisement value, not a
         // connected read, so advertising it would be a lie about what the number means).
-        vec![capabilities::DESCRIPTORS.to_string()]
+        // `scan.fields`: btleplug reports service data and Tx power; the connectable flag and a
+        // separate platform name stay absent, which the capability allows.
+        vec![
+            capabilities::DESCRIPTORS.to_string(),
+            capabilities::SCAN_FIELDS.to_string(),
+        ]
     }
 
     async fn start_scan(
@@ -1201,6 +1216,9 @@ fn coalesce_identity(
 /// Applies the protocol's per-subscriber scan semantics after adapter fan-out. Filters are ORed;
 /// populated fields within an individual filter are ANDed. An empty filter list (or empty filter)
 /// matches every advertisement.
+/// Tx power levels an advertisement can carry, in dBm (Core Specification Supplement, Part A, §1.5).
+const TX_POWER_RANGE: std::ops::RangeInclusive<i32> = -127..=127;
+
 fn scan_matches(filters: &[ScanFilter], advertisement: &AdvertisementDto) -> bool {
     filters.is_empty()
         || filters.iter().any(|filter| {
@@ -1467,6 +1485,10 @@ mod tests {
             rssi: -55,
             service_uuids: vec!["180D".into()],
             manufacturer_data: BTreeMap::new(),
+            service_data: Default::default(),
+            tx_power: None,
+            is_connectable: None,
+            peripheral_name: None,
         };
 
         assert!(scan_matches(&[], &advertisement));

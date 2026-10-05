@@ -261,8 +261,8 @@ points the same command at a different agent.
 - **Backend-level** capabilities describe what a host's radio can actually do, so they legitimately
   differ between an Android phone and a Linux box. But two agents on the **same host** MUST
   advertise the same backend-level set: a divergence there is a defect in one of them, not a
-  platform difference. `descriptors`, `rssi`, `conn.priority`, `conn.params`, and `pairing` are
-  backend-level.
+  platform difference. `descriptors`, `rssi`, `conn.priority`, `conn.params`, `pairing`, and
+  `scan.fields` (§5.6) are backend-level.
 
 Both rules are subordinate to rule 3 above: an agent that cannot honour an agent-level capability
 MUST NOT advertise it, and MUST be treated as non-conforming until it can. Advertising a capability
@@ -336,6 +336,33 @@ terminal, a log, a coding agent's context. An agent MUST therefore length-bound 
 control characters, including the bidirectional overrides and line separators an `isISOControl`-style
 check misses, in the structured field exactly as in the message. A machine-readable field is *more*
 likely to be logged or forwarded verbatim, so it is not the place to relax this.
+
+### 5.6 Scan fields (capability `scan.fields`)
+
+`AdvertisementDto` carries four fields beyond the v1 baseline: `serviceData` (a map from the full
+128-bit service UUID, written as `serviceUuids` writes it, to the bytes), `txPower` (dBm, in
+-127..127), `isConnectable`, and `peripheralName` (the name the agent's platform remembers, which can
+differ from the advertised `name`). An agent whose backend reads any of them from its radio SHOULD
+advertise `scan.fields` and fill each field it can.
+
+An agent MUST NOT send any of the four to a client that did not negotiate `scan.fields`, in a
+`scan.result` or a `scan.batch`, and MUST leave each off the wire when it has nothing for it rather
+than sending an empty map or a null: advertisement frames are decoded strictly, so a v1 client fails
+the whole frame over an unknown key, even an empty one. The fallback is the v1 advertisement itself.
+
+Even when negotiated, each field says only what the platform reports, and a client MUST read an
+absent field as "not reported", never as "false" or "none". Coverage today:
+
+| Agent backend | `serviceData` | `txPower` | `isConnectable` | `peripheralName` |
+|---|---|---|---|---|
+| Kotlin, Android | every entry (from the raw record) | ✅ | ✅ | ✅ |
+| Kotlin, iOS and JVM | entries for advertised service UUIDs only | ✅ | iOS ✅, JVM absent | ✅ |
+| Rust (btleplug) | every entry | ✅ | absent | absent |
+| Simulation | as the profile declares | as declared | as declared | absent |
+
+Kable exposes service data on Apple and through btleplug only as a lookup by UUID, so the Kotlin
+agent cannot list entries for UUIDs it was not told about; the Rust agent reads btleplug's map
+directly. Manufacturer data is part of the v1 baseline and is not gated.
 
 ## 6. Identifiers
 

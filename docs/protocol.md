@@ -81,6 +81,7 @@ object Capabilities {
     const val AGENT_STATUS     = "agent.status"  // Op.AgentStatus caller-scoped snapshot (agent-level)
     const val WRITE_POLICY     = "write.policy"  // per-principal allowlist + ErrorKind.POLICY_DENIED (agent-level)
     const val LEASE_HOLDER     = "lease.holder"  // AgentError.holder on PERIPHERAL_BUSY (agent-level)
+    const val SCAN_FIELDS      = "scan.fields"   // AdvertisementDto service data, Tx power, connectable, platform name (backend-level)
 }
 ```
 
@@ -302,11 +303,18 @@ The advertisement DTO carried by scan results:
     val rssi: Int,
     val serviceUuids: List<String> = emptyList(),
     val manufacturerData: Map<Int, ByteArray> = emptyMap(),
+    // Capability: scan.fields. Sent only to a client that negotiated it, and left off the wire when empty.
+    val serviceData: Map<String, ByteArray> = emptyMap(), // full 128-bit service UUID -> bytes
+    val txPower: Int? = null,                       // dBm
+    val isConnectable: Boolean? = null,
+    val peripheralName: String? = null,             // the platform's remembered name
 )
 ```
 
 The client wraps this in a Kable `Advertisement` (`RemoteAdvertisement`) and pulls
-`device` out as the handle for connecting.
+`device` out as the handle for connecting. The four `scan.fields` fields say only what the agent's
+platform reports, so an absent one means "not reported"; which backend reports what is in the
+[conformance spec, §5.6](agent-conformance-spec.md#56-scan-fields-capability-scanfields).
 
 ## Errors — `AgentError` / `ErrorKind`
 

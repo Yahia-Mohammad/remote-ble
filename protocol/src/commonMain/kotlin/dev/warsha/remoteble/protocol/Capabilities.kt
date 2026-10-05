@@ -126,6 +126,18 @@ object Capabilities {
      */
     const val LEASE_HOLDER: String = "lease.holder"
 
+    /**
+     * The scan fields beyond the v1 baseline on [AdvertisementDto]: [AdvertisementDto.serviceData],
+     * [AdvertisementDto.txPower], [AdvertisementDto.isConnectable] and
+     * [AdvertisementDto.peripheralName]. Backend-level: only a backend that reads them from its
+     * radio advertises it, and each field still says only what that platform reports.
+     *
+     * Gated for the reason [LEASE_HOLDER] is: `Cbor.Default` rejects unknown keys, so a v1 client
+     * handed any of these fields would fail to decode the whole scan event. A client without this
+     * capability keeps the pre-0.15.0 advertisement and sees the fields as absent.
+     */
+    const val SCAN_FIELDS: String = "scan.fields"
+
     /** The agent multiplexes all logical scans through one physical scan. */
     const val SCAN_CONCURRENCY_MULTIPLEXED: String = "scan.concurrency.multiplexed"
 

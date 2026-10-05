@@ -36,7 +36,10 @@ The top-level shape is:
 - `id` is the stable remote device handle (`[A-Za-z0-9._-]`, up to 128 characters). It is a
   simulation identity, not a platform one — see [Handles and `.identifier`](#handles-and-identifier).
 - `advertisement` accepts `name`, `serviceUuids`, `rssi`, optional `rssiJitter`, and `intervalMs`
-  (50–60,000 ms). Short 16-/32-bit Bluetooth UUIDs expand to their standard base UUID.
+  (50–60,000 ms). Short 16-/32-bit Bluetooth UUIDs expand to their standard base UUID. It also
+  accepts `serviceData` (service UUID to hex), `manufacturerData` (16-bit company identifier to
+  hex, without the identifier), `txPower` (-127..127 dBm) and `connectable` (default `true`). A
+  peripheral whose advertisement is not connectable also refuses a connection.
 - `connect` accepts `latencyMs`, `failFirst`, and optional `dropAfterMs`. The latter produces one
   unsolicited simulated disconnect after a successful connection.
 - Each service has `uuid` and non-empty `characteristics`; characteristics declare matching
@@ -76,8 +79,8 @@ find a simulated peripheral, exactly as you would against a real radio.
 
 ## Capabilities
 
-**Backend-level**, the simulator models exactly one capability beyond the v1 baseline: connected
-RSSI. Descriptor, pairing, and connection-parameter operations remain unsupported, so those surfaces
+**Backend-level**, the simulator models two capabilities beyond the v1 baseline: connected RSSI,
+and `scan.fields`, whose fields come from the profile's advertisement. Descriptor, pairing, and connection-parameter operations remain unsupported, so those surfaces
 cannot be validated this way.
 
 **Agent-level capabilities are a different matter, and they are all present.** They are

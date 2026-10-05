@@ -94,7 +94,7 @@ keys. So the intuition that "adding a value is backward compatible" is false her
 directions, and the rule is the same either way: an addition reaches only clients that negotiated
 the capability naming it.
 
-It has now been applied four times, and the fourth is the one that shows why the rule is worth
+It has now been applied five times, and the fourth is the one that shows why the rule is worth
 stating rather than rediscovering:
 
 | Addition | Gate | Un-negotiated client sees |
@@ -103,6 +103,7 @@ stating rather than rediscovering:
 | `SCAN_UNAVAILABLE` | `scan.concurrency.single` | `AGENT_BUSY` |
 | `POLICY_DENIED` | `write.policy` | `INVALID_REQUEST` |
 | `AgentError.holder` | `lease.holder` | the holder in `message`, as prose |
+| `AdvertisementDto` service data, Tx power, connectability, platform name | `scan.fields` | the v1 advertisement, without them |
 
 The first three are enum names, where the failure mode is at least legible — a decoder meets a
 constant it doesn't know. The fourth is a *field*, which looks like the safest possible addition and

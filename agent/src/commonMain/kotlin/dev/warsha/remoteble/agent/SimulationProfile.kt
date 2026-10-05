@@ -62,6 +62,20 @@ data class SimulationProfile(
             require(advertisedServices.toSet().size == advertisedServices.size) {
                 "peripheral '${peripheral.id}' repeats an advertisement service UUID"
             }
+            val serviceDataKeys = peripheral.advertisement.serviceData.map { (uuid, hex) ->
+                hex.decodeHex("service data for '$uuid' on '${peripheral.id}'")
+                uuid.canonicalUuid("service data")
+            }
+            require(serviceDataKeys.toSet().size == serviceDataKeys.size) {
+                "peripheral '${peripheral.id}' repeats a service data UUID"
+            }
+            peripheral.advertisement.manufacturerData.forEach { (company, hex) ->
+                require(company in 0..0xFFFF) { "manufacturer data company $company on '${peripheral.id}' is not 16-bit" }
+                hex.decodeHex("manufacturer data for company $company on '${peripheral.id}'")
+            }
+            peripheral.advertisement.txPower?.let { txPower ->
+                require(txPower in -127..127) { "advertisement Tx power for '${peripheral.id}' must be -127..127 dBm" }
+            }
             require(peripheral.connect.latencyMs in 0..MAX_DELAY_MS) {
                 "connect latency for '${peripheral.id}' must be 0..${MAX_DELAY_MS}ms"
             }
@@ -111,6 +125,14 @@ data class SimulationAdvertisement(
     val rssi: Int = -50,
     val rssiJitter: Int = 0,
     val intervalMs: Long = 100,
+    /** Service data by service UUID, short or full, as hex. Reaches clients that negotiated `scan.fields`. */
+    val serviceData: Map<String, String> = emptyMap(),
+    /** Manufacturer data by company identifier, as hex, without the identifier. */
+    val manufacturerData: Map<Int, String> = emptyMap(),
+    /** The advertised Tx power level, in dBm. Reaches clients that negotiated `scan.fields`. */
+    val txPower: Int? = null,
+    /** False for an advertisement that invites no connection; the simulator then refuses one too. */
+    val connectable: Boolean = true,
 )
 
 @Serializable

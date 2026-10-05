@@ -116,13 +116,7 @@ internal class HandleTranslator(
     }
 
     private suspend fun translateAd(ad: AdvertisementDto): AdvertisementDto =
-        AdvertisementDto(
-            device = DeviceHandle(toClient(ad.device.value)),
-            name = ad.name,
-            rssi = ad.rssi,
-            serviceUuids = ad.serviceUuids,
-            manufacturerData = ad.manufacturerData,
-        )
+        ad.copy(device = DeviceHandle(toClient(ad.device.value)))
 
     companion object {
         /** Reverse-map cap. Bounds memory for a client scanning a crowded area; eldest evicted. */

@@ -11,6 +11,10 @@ import kotlin.uuid.Uuid
 /**
  * Adapts a remote [AdvertisementDto] to Kable's [Advertisement]. Carries the
  * agent-scoped [handle] so it can be fed into [RemotePeripheral].
+ *
+ * [serviceData], [txPower], [isConnectable] and a [peripheralName] of its own arrive only from an
+ * agent that negotiated `scan.fields`, and then only where its platform reports them; otherwise they
+ * read as absent, and [peripheralName] as the advertised [name].
  */
 @OptIn(ExperimentalUuidApi::class)
 public class RemoteAdvertisement internal constructor(
@@ -21,21 +25,27 @@ public class RemoteAdvertisement internal constructor(
     public val handle: DeviceHandle get() = dto.device
 
     override val name: String? get() = dto.name
-    override val peripheralName: String? get() = dto.name
+    override val peripheralName: String? get() = dto.peripheralName ?: dto.name
     // Use the agent handle directly (see deviceHandleToIdentifier): Kable's Android
     // toIdentifier() would reject the agent's UUID handle as a malformed MAC.
     override val identifier: Identifier by lazy { deviceHandleToIdentifier(dto.device.value) }
-    override val isConnectable: Boolean? get() = null
+    override val isConnectable: Boolean? get() = dto.isConnectable
     override val rssi: Int get() = dto.rssi
-    override val txPower: Int? get() = null
+    override val txPower: Int? get() = dto.txPower
     override val uuids: List<Uuid> = dto.serviceUuids.map(::parseBleUuid)
 
-    override fun serviceData(uuid: Uuid): ByteArray? = null
+    // Keyed by parsed UUID, so a lookup matches however the agent spelled it (case, short form).
+    private val serviceDataByUuid: Map<Uuid, ByteArray> by lazy {
+        dto.serviceData.entries.mapNotNull { (key, value) -> runCatching { parseBleUuid(key) }.getOrNull()?.let { it to value } }.toMap()
+    }
+
+    override fun serviceData(uuid: Uuid): ByteArray? = serviceDataByUuid[uuid]
 
     override fun manufacturerData(companyIdentifierCode: Int): ByteArray? =
         dto.manufacturerData[companyIdentifierCode]
 
-    // The aggregate single-company view isn't modeled on the wire; per-code lookup
-    // is available via manufacturerData(code) above.
-    override val manufacturerData: ManufacturerData? get() = null
+    // Kable's single-company view: the first entry, in the order the agent sent them. Every entry
+    // stays available through manufacturerData(code) above.
+    override val manufacturerData: ManufacturerData?
+        get() = dto.manufacturerData.entries.firstOrNull()?.let { (code, data) -> ManufacturerData(code, data) }
 }

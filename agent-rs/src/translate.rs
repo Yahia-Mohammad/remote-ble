@@ -354,6 +354,10 @@ mod tests {
                 rssi: -50,
                 service_uuids: vec![],
                 manufacturer_data: Default::default(),
+                service_data: Default::default(),
+                tx_power: None,
+                is_connectable: None,
+                peripheral_name: None,
             },
         }
     }

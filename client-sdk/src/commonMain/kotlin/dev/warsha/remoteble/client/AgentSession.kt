@@ -269,6 +269,9 @@ private val ALWAYS_OFFERED_CAPABILITIES: Set<String> = setOf(
     // told the agent does not support it — indistinguishable, to the caller, from an agent too old
     // to have it at all.
     Capabilities.AGENT_STATUS,
+    // Decodable by every SDK that knows the fields, so there is nothing to opt into. An agent whose
+    // backend cannot read them simply does not advertise it, and RemoteAdvertisement reads as before.
+    Capabilities.SCAN_FIELDS,
 )
 
 @OptIn(ExperimentalAtomicApi::class)

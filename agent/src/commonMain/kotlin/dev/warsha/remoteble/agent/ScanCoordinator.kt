@@ -264,12 +264,9 @@ class ScanCoordinator(
 
     private fun mergeIdentityLocked(advertisement: AdvertisementDto): AdvertisementDto {
         val previous = cache[advertisement.device.value]?.advertisement
-        return AdvertisementDto(
-            device = advertisement.device,
+        return advertisement.copy(
             name = advertisement.name ?: previous?.name,
-            rssi = advertisement.rssi,
             serviceUuids = advertisement.serviceUuids.ifEmpty { previous?.serviceUuids.orEmpty() },
-            manufacturerData = advertisement.manufacturerData,
         )
     }
 

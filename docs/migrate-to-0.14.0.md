@@ -1,8 +1,8 @@
 # Migrate to RemoteBLE 0.14
 
-> **Use 0.14.1.** 0.14.0 was tagged, and its GitHub Release and container image published, but it
-> was never published to Maven Central: a final review found fixes worth having first. Everything
-> below applies to 0.14.1 unchanged.
+> **Use 0.14.2.** 0.14.0 and 0.14.1 were tagged, and their GitHub Releases and container images
+> published, but neither was published to Maven Central: final reviews found fixes worth having
+> first. Everything below applies to 0.14.2 unchanged.
 
 0.14 encrypts every agent reachable from the network ([#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39)).
 An agent serves `wss://` with a self-signed identity, clients pin its fingerprint, and a pairing
@@ -11,7 +11,7 @@ version:
 
 ```kotlin
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.14.1")
+    implementation("dev.warsha.remoteble:client-sdk:0.14.2")
 }
 ```
 
@@ -50,7 +50,7 @@ fingerprint its clients pinned:
 
 ```bash
 docker run -v remoteble-identity:/var/lib/remoteble -e REMOTE_BLE_TOKEN=… -p 8080:8080 \
-  ghcr.io/yahia-mohammad/remoteble-agent-rs:0.14.1 --print-pairing
+  ghcr.io/yahia-mohammad/remoteble-agent-rs:0.14.2 --print-pairing
 ```
 
 Without a volume, every new container is a new identity and every client must pair again. To keep

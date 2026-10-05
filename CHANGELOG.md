@@ -18,6 +18,14 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-05
+
+> **The 0.14 release on Maven Central.** 0.14.0 and 0.14.1 were tagged, and their GitHub Releases
+> and container images published, but neither reached Maven Central: final reviews found fixes
+> first. Everything in 0.14.0 and 0.14.1 applies, including 0.14.1's switch of the JVM client to
+> Ktor's OkHttp engine; see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md). The wire
+> protocol version is unchanged at **1**.
+
 ### Fixed
 
 - Desktop agents reserve their actual listening socket before creating or resetting a TLS identity;
@@ -38,10 +46,8 @@ protocol version: **1**.
 
 ## [0.14.1] - 2026-10-04
 
-> **The 0.14 release on Maven Central.** 0.14.0 was tagged, and its GitHub Release and container
-> image published, but it never reached Maven Central: a final review found the fixes below first.
-> Everything in 0.14.0 applies; see [`docs/migrate-to-0.14.0.md`](docs/migrate-to-0.14.0.md). The
-> wire protocol version is unchanged at **1**.
+> Tagged, with a GitHub Release and container image, but **not published to Maven Central**: a
+> second review found the 0.14.2 fixes first. Use 0.14.2, which carries everything below.
 >
 > **One dependency change:** the JVM client artifact uses Ktor's OkHttp engine instead of CIO, whose
 > TLS client corrupts its own buffers (first entry below).
@@ -924,6 +930,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.14.2]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.2
 [0.14.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.1
 [0.14.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.13.0

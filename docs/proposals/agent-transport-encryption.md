@@ -3,7 +3,7 @@
 Decision record for [#39](https://github.com/Yahia-Mohammad/remote-ble/issues/39). **Accepted
 2026-10-01: option A, TLS with a pinned self-signed certificate.** The phases in [§8](#8-phases) are
 the plan, and each one updates this record as it lands. **All five phases are implemented
-(2026-10-02)** and ship in 0.14.1 (0.14.0 was tagged but never published to Maven Central): every agent serves `wss://` with a pinned identity (desktop JVM,
+(2026-10-02)** and ship in 0.14.2 (0.14.0 and 0.14.1 were tagged but never published to Maven Central): every agent serves `wss://` with a pinned identity (desktop JVM,
 Android, iOS, Rust), every SDK target pins, pairing hands clients the address, token and fingerprint
 as one URI or QR code, and an agent reachable from the network encrypts unless its operator
 explicitly chooses cleartext. [§10](#10-progress) records each phase and its evidence.

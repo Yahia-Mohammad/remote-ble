@@ -1,6 +1,6 @@
 [package]
 name = "agent-rs"
-version = "0.14.1"
+version = "0.14.2"
 edition = "2024"
 authors = ["Warsha BLE Team"]
 description = "Native cross-platform RemoteBLE agent written in Rust"

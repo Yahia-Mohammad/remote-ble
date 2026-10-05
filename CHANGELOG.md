@@ -31,6 +31,8 @@ protocol version: **1**.
 - Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.
 - Cancelling client connection replacement cannot interrupt old-session retirement or leave its
   SDK child scope running; transport-close failures also finish session cleanup.
+- Client pairing credentials retain their exact contents, including leading and trailing spaces,
+  when passed to the transport and compared for session reuse.
 
 ## [0.14.1] - 2026-10-04
 

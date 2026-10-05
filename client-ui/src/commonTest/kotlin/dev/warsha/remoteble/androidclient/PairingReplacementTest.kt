@@ -76,6 +76,68 @@ class PairingReplacementTest {
     }
 
     @Test
+    fun tokenWhitespaceChangesTheSessionReuseKey() = runBlocking<Unit> {
+        withTimeout(5_000) {
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val tokens = mutableListOf<String>()
+            val connection = AgentConnection(scope) { _, token, _ ->
+                tokens += token
+                Session().apply { allowClose.complete(Unit) }
+            }
+            try {
+                val first = connection.connect("ws://host:8080/agent", " secret ")
+                assertSame(first, connection.connect("ws://host:8080/agent", " secret "))
+                assertNotSame(first, connection.connect("ws://host:8080/agent", "secret"))
+                assertEquals(listOf(" secret ", "secret"), tokens)
+            } finally {
+                connection.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun pairingPreservesOpaqueTokenAndReusesOnlyTheExactCredential() = runBlocking<Unit> {
+        withTimeout(5_000) {
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val sessions = mutableListOf<Session>()
+            val credentials = mutableListOf<String>()
+            val controller = RemoteBleController(scope) { owner ->
+                AgentConnection(owner) { _, token, _ ->
+                    credentials += token
+                    Session().apply { allowClose.complete(Unit); sessions += this }
+                }
+            }
+            try {
+                val secret = " leading secret + % trailing "
+                val pairing = AgentPairing("192.0.2.20", 8080, secret, null)
+                controller.offerPairing(pairing.toUri())
+                controller.confirmPairing()
+                assertEquals(secret, controller.uiState.value.agentToken)
+                controller.startScan()
+                sessions.single().scanStarted.await()
+                assertEquals(listOf(secret), credentials)
+
+                // Connecting another device reuses the session with the same opaque token.
+                controller.connectDevice(DeviceHandle("AA:BB:CC:DD:EE:FF"), "device")
+                controller.uiState.first { it.device?.isConnected == true }
+                assertEquals(1, sessions.size)
+
+                // A whitespace-only difference is a different credential and must replace it.
+                controller.offerPairing(AgentPairing(pairing.host, pairing.port, secret.trim(), pairing.fingerprint).toUri())
+                controller.confirmPairing()
+                controller.startScan()
+                while (sessions.size < 2) yield()
+                sessions.last().scanStarted.await()
+                assertEquals(listOf(secret, secret.trim()), credentials)
+            } finally {
+                controller.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
     fun replacementDisconnectsOldDeviceClearsDiscoveriesAndWaitsBeforeScanning() = runBlocking<Unit> {
         withTimeout(5_000) {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)

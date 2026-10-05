@@ -76,7 +76,7 @@ class AgentConnection(private val scope: CoroutineScope) {
      */
     suspend fun connect(url: String, token: String, fingerprint: AgentFingerprint? = null): AgentSession {
         val target = url.trim()
-        val session = obtain(target, token.trim(), fingerprint)
+        val session = obtain(target, token, fingerprint)
         val reached = withTimeoutOrNull(CONNECT_TIMEOUT) {
             session.transportState.first { it == TransportState.CONNECTED || it in TERMINAL_STATES }
         }

@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.uuid.ExperimentalUuidApi
 
 /**
@@ -146,9 +147,9 @@ class RemoteBleController(
         }
     }
 
-    private fun retireAgent(beforeClose: suspend () -> Unit = {}) {
+    private fun retireAgent(job: Job? = null, beforeClose: suspend () -> Unit = {}) {
         val previous = retirement
-        retirement = scope.launch {
+        retirement = scope.launch(job ?: EmptyCoroutineContext) {
             previous?.join()
             try {
                 beforeClose()
@@ -259,12 +260,16 @@ class RemoteBleController(
         active.value?.toggleSubscription(characteristic)
     }
 
-    /** Releases the socket and peripheral. Callers cancel [parentScope] (and thus [scope]) separately. */
+    /**
+     * Releases the socket and peripheral. Callers cancel [parentScope] (and thus [scope]) separately,
+     * possibly first: AndroidX closes `viewModelScope` before `onCleared` runs, and a coroutine
+     * launched into a cancelled scope never starts. The retirement runs on its own job instead.
+     */
     fun close() {
         scanJob?.cancel()
         connectJob?.cancel()
         active.value?.close()
         active.value = null
-        retireAgent()
+        retireAgent(Job())
     }
 }

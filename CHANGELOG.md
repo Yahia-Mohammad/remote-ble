@@ -33,6 +33,8 @@ protocol version: **1**.
   SDK child scope running; transport-close failures also finish session cleanup.
 - Client pairing credentials retain their exact contents, including leading and trailing spaces,
   when passed to the transport and compared for session reuse.
+- Leaving the Android client closes its agent session. AndroidX cancels `viewModelScope` before
+  `onCleared`, so the teardown the client launched there never ran.
 
 ## [0.14.1] - 2026-10-04
 

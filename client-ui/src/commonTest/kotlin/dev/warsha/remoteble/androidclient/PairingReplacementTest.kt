@@ -210,6 +210,22 @@ class PairingReplacementTest {
     }
 
     @Test
+    fun closeAfterTheOwnerCancelledItsScopeStillRetiresTheAgentSession() = runBlocking<Unit> {
+        withTimeout(5_000) {
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val session = Session().apply { allowClose.complete(Unit) }
+            val controller = RemoteBleController(scope) { owner -> AgentConnection(owner) { _, _, _ -> session } }
+            controller.startScan()
+            session.scanStarted.await()
+            // AndroidX closes viewModelScope before onCleared() calls close().
+            scope.cancel()
+            controller.close()
+            session.closeEntered.await()
+            assertEquals(1, session.closeCalls)
+        }
+    }
+
+    @Test
     fun concurrentCloseCannotRetireANewlyCreatedAgentSession() = runBlocking<Unit> {
         withTimeout(5_000) {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)

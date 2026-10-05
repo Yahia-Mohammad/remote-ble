@@ -72,6 +72,9 @@ class RemoteBleController(
     private val local = MutableStateFlow(Local())
     private val active = MutableStateFlow<PeripheralSession?>(null)
     private var scanJob: Job? = null
+    private var connectJob: Job? = null
+    // A replacement/idle close must complete before the next agent operation can start.
+    private var retirement: Job? = null
 
     val uiState: StateFlow<UiState> = combine(
         local,
@@ -117,10 +120,16 @@ class RemoteBleController(
     /** Applies the offered pairing: its address, token and pin replace the current ones. */
     fun confirmPairing() {
         val pairing = local.value.pendingPairing ?: return
-        scanJob?.cancel()
+        val oldScan = scanJob.also { it?.cancel() }
         scanJob = null
+        val oldConnect = connectJob.also { it?.cancel() }
+        connectJob = null
+        val oldDevice = active.value
+        active.value = null
+        oldDevice?.close()
         local.update {
             it.copy(
+                discovered = emptyList(),
                 agentUrl = pairing.url,
                 agentToken = pairing.token.orEmpty(),
                 agentFingerprint = pairing.fingerprint,
@@ -130,7 +139,23 @@ class RemoteBleController(
             )
         }
         // The next connection is a different agent, or the same one pinned now; never reuse the old.
-        if (active.value == null) scope.launch { agent.close() }
+        retireAgent {
+            oldScan?.join()
+            oldConnect?.join()
+            oldDevice?.disconnect()
+        }
+    }
+
+    private fun retireAgent(beforeClose: suspend () -> Unit = {}) {
+        val previous = retirement
+        retirement = scope.launch {
+            previous?.join()
+            try {
+                beforeClose()
+            } finally {
+                agent.close()
+            }
+        }
     }
 
     fun dismissPairing() {
@@ -148,8 +173,10 @@ class RemoteBleController(
     fun startScan() {
         scanJob?.cancel()
         local.update { it.copy(isScanning = true, discovered = emptyList(), status = "Connecting to agent…") }
+        val retiring = retirement
         scanJob = scope.launch {
             try {
+                retiring?.join()
                 val session = agent.connect(local.value.agentUrl, local.value.agentToken, local.value.agentFingerprint)
                 local.update { it.copy(status = "Scanning via agent…") }
                 agent.advertisements(session).collect { adv ->
@@ -179,15 +206,18 @@ class RemoteBleController(
         scanJob = null
         local.update { it.copy(isScanning = false, status = "Scan stopped.") }
         // Release the socket when fully idle; keep it alive while a device is connected.
-        if (active.value == null) scope.launch { agent.close() }
+        if (active.value == null) retireAgent()
     }
 
     fun connectDevice(handle: DeviceHandle, name: String?) {
         scanJob?.cancel()
         scanJob = null
         local.update { it.copy(isScanning = false) }
-        scope.launch {
+        connectJob?.cancel()
+        val retiring = retirement
+        connectJob = scope.launch {
             try {
+                retiring?.join()
                 val session = agent.connect(local.value.agentUrl, local.value.agentToken, local.value.agentFingerprint)
                 active.value?.close()
                 active.value = PeripheralSession(agent.peripheral(session, handle, name), handle, name, scope)
@@ -231,7 +261,10 @@ class RemoteBleController(
 
     /** Releases the socket and peripheral. Callers cancel [parentScope] (and thus [scope]) separately. */
     fun close() {
+        scanJob?.cancel()
+        connectJob?.cancel()
         active.value?.close()
-        scope.launch { agent.close() }
+        active.value = null
+        retireAgent()
     }
 }

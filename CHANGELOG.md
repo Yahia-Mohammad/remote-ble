@@ -24,6 +24,8 @@ protocol version: **1**.
   refused startup preserves existing client pins, including cleartext resets.
 - The mobile agent's pairing and encryption display use the retained running configuration after
   Activity recreation, including the active port, bearer token, and TLS fingerprint.
+- Accepting a replacement pairing disconnects the old peripheral, clears discoveries, cancels pending
+  connections, and finishes old-session teardown before connecting to the replacement agent.
 - The macOS agent wrappers send `--print-pairing` output through a private pipe to the caller,
   keeping credential-bearing pairing URIs out of `agent.log`.
 - Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.

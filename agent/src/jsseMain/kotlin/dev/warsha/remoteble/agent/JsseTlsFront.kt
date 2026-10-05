@@ -53,14 +53,20 @@ import kotlinx.coroutines.withContext
  * platforms' 1.2 defaults still include CBC ones, whose padding checks have a history of timing
  * oracles, and every client this project knows negotiates AES-GCM.
  */
-class JsseTlsFront internal constructor(
-    private val identity: AgentTlsIdentity,
+class JsseTlsFront private constructor(
+    private val loadIdentity: () -> AgentTlsIdentity,
     private val handshakeTimeout: Duration,
     private val maxPerHost: Int,
     private val maxConnections: Int,
 ) : TlsFront.Factory {
-    override val fingerprint: AgentFingerprint get() = identity.fingerprint
+    internal var identity: AgentTlsIdentity? = null
+        private set
+    override val fingerprint: AgentFingerprint get() = checkNotNull(identity) { "TLS identity is not loaded yet" }.fingerprint
 
+    internal constructor(identity: AgentTlsIdentity, handshakeTimeout: Duration, maxPerHost: Int, maxConnections: Int) :
+        this({ identity }, handshakeTimeout, maxPerHost, maxConnections) {
+        this.identity = identity
+    }
 
     constructor(identity: AgentTlsIdentity) : this(identity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
 
@@ -71,27 +77,35 @@ class JsseTlsFront internal constructor(
         } catch (failure: IOException) {
             throw AgentBindException(host, port, failure)
         }
-        server.enabledProtocols = PROTOCOLS.filter { it in server.supportedProtocols }.toTypedArray()
-        server.enabledCipherSuites = server.supportedCipherSuites.filter(::isAead).toTypedArray()
-        Running(server, upstreamPort).also { it.acceptLoop() }
+        try {
+            server.enabledProtocols = PROTOCOLS.filter { it in server.supportedProtocols }.toTypedArray()
+            server.enabledCipherSuites = server.supportedCipherSuites.filter(::isAead).toTypedArray()
+            // Hold the actual listening socket before a desktop loader can reset a persisted key.
+            // No handshakes are accepted until the key manager has its identity.
+            identity = loadIdentity()
+            Running(server, upstreamPort).also { it.acceptLoop() }
+        } catch (failure: Throwable) {
+            server.closeQuietly()
+            throw failure
+        }
     }
 
     private fun context(): SSLContext =
-        SSLContext.getInstance("TLS").apply { init(arrayOf(IdentityKeyManager(identity)), null, null) }
+        SSLContext.getInstance("TLS").apply { init(arrayOf(IdentityKeyManager { checkNotNull(identity) }), null, null) }
 
     /**
      * Offers the one identity for every EC server handshake. A key manager rather than a keystore,
      * because a keystore would have to hold the key: an Android Keystore key has no encoding to put
      * in one, and is only usable through the provider that owns it, which this hands it to as is.
      */
-    private class IdentityKeyManager(private val identity: AgentTlsIdentity) : X509ExtendedKeyManager() {
+    private class IdentityKeyManager(private val identity: () -> AgentTlsIdentity) : X509ExtendedKeyManager() {
         private fun aliasFor(keyType: String?): String? = ALIAS.takeIf { keyType.equals(KEY_TYPE, ignoreCase = true) }
 
         override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) = aliasFor(keyType)
         override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) = aliasFor(keyType)
         override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = aliasFor(keyType)?.let { arrayOf(it) }
-        override fun getCertificateChain(alias: String?) = if (alias == ALIAS) arrayOf(identity.certificate) else null
-        override fun getPrivateKey(alias: String?) = if (alias == ALIAS) identity.privateKey else null
+        override fun getCertificateChain(alias: String?) = if (alias == ALIAS) arrayOf(identity().certificate) else null
+        override fun getPrivateKey(alias: String?) = if (alias == ALIAS) identity().privateKey else null
 
         // A server only; no client certificate is ever offered.
         override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String? = null
@@ -237,6 +251,10 @@ class JsseTlsFront internal constructor(
     }
 
     internal companion object {
+        /** Desktop startup only: identity persistence runs after the public socket binds. */
+        fun withIdentityAfterBind(loadIdentity: () -> AgentTlsIdentity): JsseTlsFront =
+            JsseTlsFront(loadIdentity, HANDSHAKE_TIMEOUT, MAX_PER_HOST, MAX_CONNECTIONS)
+
         val HANDSHAKE_TIMEOUT = 10.seconds
         // Agents serve a handful of clients, and one host is usually one client; a test rig or a
         // conformance run opens a few more. Each connection holds a thread while it handshakes and

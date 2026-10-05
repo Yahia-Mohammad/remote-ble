@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.test.assertNull
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
@@ -88,6 +89,30 @@ class JsseTlsFrontTest {
             socket.startHandshake()
             socket.session.cipherSuite
         }
+    }
+
+    @Test
+    fun deferredIdentityIsLoadedWithTheListenerHeldAndServesRealTls() = runBlocking<Unit> {
+        var boundPort = 0
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { reserved -> boundPort = reserved.localPort }
+        val factory = JsseTlsFront.withIdentityAfterBind {
+            assertFailsWith<java.net.BindException> { ServerSocket(boundPort, 50, InetAddress.getByName("127.0.0.1")) }
+            identity
+        }
+        assertNull(factory.identity)
+        val running = factory.start("127.0.0.1", boundPort, upstream.localPort) {}.also { fronts += it }
+        assertEquals(identity.fingerprint, factory.fingerprint)
+        assertEquals("TLS_AES_128_GCM_SHA256", honestHandshake(running.port, "TLSv1.3", listOf("TLS_AES_128_GCM_SHA256")))
+    }
+
+    @Test
+    fun failedIdentityLoadReleasesTheBoundListener() = runBlocking<Unit> {
+        var boundPort = 0
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { reserved -> boundPort = reserved.localPort }
+        val factory = JsseTlsFront.withIdentityAfterBind { error("key store unavailable") }
+        assertFailsWith<IllegalStateException> { factory.start("127.0.0.1", boundPort, upstream.localPort) {} }
+        ServerSocket(boundPort, 50, InetAddress.getByName("127.0.0.1")).use { assertEquals(boundPort, it.localPort) }
+        assertNull(factory.identity)
     }
 
     @Test

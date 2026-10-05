@@ -192,3 +192,9 @@ tasks.register<Jar>("jvmFatJar") {
     // Merged dependency jars carry conflicting signatures / module descriptors.
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "module-info.class")
 }
+
+// The desktop refusal regression runs the real CLI in a child JVM. Gradle's worker classloader
+// is isolated, so java.class.path alone does not include the agent or its runtime dependencies.
+tasks.named<org.gradle.api.tasks.testing.Test>("jvmTest") {
+    doFirst { systemProperty("remoteble.agent.testClasspath", classpath.asPath) }
+}

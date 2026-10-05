@@ -379,7 +379,6 @@ impl StreamReservations {
 }
 
 pub struct ServerConfig {
-    pub addr: SocketAddr,
     /// Principal names mapped to bearer secrets. Names remain server-side and scope ownership.
     pub credentials: Arc<HashMap<String, String>>,
     /// Agent-wide identifier strict-mode switch (capability `identifier.translate`). Shared across
@@ -700,13 +699,6 @@ impl AgentServer {
     #[allow(dead_code)]
     pub fn is_principal_revoked(&self, principal: &str) -> bool {
         self.revoked_principals.lock().contains(principal)
-    }
-
-    /// Binds the configured address. Separate from [Self::run_on] so the caller learns the bound
-    /// port before serving (the pairing printed for `--port 0` needs it), and a test can bind port
-    /// 0 itself.
-    pub async fn bind(&self) -> std::io::Result<TcpListener> {
-        TcpListener::bind(self.config.addr).await
     }
 
     /// Serves on a bound listener until the accept loop fails.
@@ -4125,7 +4117,6 @@ mod tests {
         )]));
         let server = AgentServer::new(
             ServerConfig {
-                addr: "127.0.0.1:0".parse().unwrap(),
                 credentials,
                 strict_identifiers: Arc::new(AtomicBool::new(false)),
                 scan_concurrency: ScanConcurrencyMode::Multiplexed,
@@ -5657,7 +5648,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = Arc::new(AgentServer::new(
             ServerConfig {
-                addr,
                 credentials: Arc::new(HashMap::from([(
                     "alpha".to_string(),
                     "secret-a".to_string(),
@@ -5727,7 +5717,6 @@ mod tests {
                 let addr = listener.local_addr().unwrap();
                 let server = Arc::new(AgentServer::new(
                     ServerConfig {
-                        addr,
                         credentials: Arc::new(HashMap::from([(
                             "alpha".to_string(),
                             "secret-a".to_string(),

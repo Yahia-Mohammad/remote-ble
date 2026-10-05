@@ -220,15 +220,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let (tls, fingerprint) = match tls_config(&args)? {
+    // Reserve and retain the public socket before creating or resetting a persisted identity.
+    let (listener, prepared_tls) = bind_with_tls(&args).await?;
+    let (tls, fingerprint) = match prepared_tls {
         Some((config, fingerprint)) => (Some(config), Some(fingerprint)),
         None => (None, None),
     };
     // Kept for --print-pairing, which runs once the listener is bound; the server takes the original.
     let pairing_credentials = args.print_pairing.then(|| credentials.clone());
-    let addr = SocketAddr::new(args.bind, args.port);
     let server_config = ServerConfig {
-        addr,
         credentials: Arc::new(credentials),
         strict_identifiers: Arc::new(std::sync::atomic::AtomicBool::new(args.strict_identifiers)),
         scan_concurrency: args.scan_concurrency,
@@ -242,7 +242,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = AgentServer::new(server_config, ble_backend, registry);
     // Bound here rather than inside run(), so a pairing is printed only for a listener that exists,
     // and with the port it actually got (`--port 0` asks for any).
-    let listener = server.bind().await?;
     if let Some(credentials) = &pairing_credentials {
         print_pairings(
             &args,
@@ -289,6 +288,21 @@ fn print_pairings(
             None => println!("Pairing: {uri}"),
         }
     }
+}
+
+/// Keep the bound listener through TLS preparation; a probe-and-close would race other processes.
+async fn bind_with_tls(
+    args: &Args,
+) -> Result<
+    (
+        tokio::net::TcpListener,
+        Option<(Arc<rustls::ServerConfig>, String)>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.bind, args.port)).await?;
+    let tls = tls_config(args)?;
+    Ok((listener, tls))
 }
 
 /// The rustls configuration presenting the agent's identity, or `None` to serve cleartext. A reset
@@ -491,6 +505,47 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[tokio::test]
+    async fn refused_bind_neither_creates_nor_resets_the_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "remoteble-startup-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.pem");
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut args = Args::parse_from(["agent-rs", "--tls", "--reset-identity"]);
+        args.bind = "127.0.0.1".parse().unwrap();
+        args.port = occupied.local_addr().unwrap().port();
+        args.identity_file = Some(path.clone());
+        assert!(bind_with_tls(&args).await.is_err());
+        assert!(!path.exists());
+        let first = identity::load_or_create(&path, false).unwrap().fingerprint;
+        let original = std::fs::read(&path).unwrap();
+        for tls in [true, false] {
+            args.tls = tls;
+            assert!(bind_with_tls(&args).await.is_err());
+            assert_eq!(original, std::fs::read(&path).unwrap());
+        }
+        args.tls = true;
+        args.port = 0;
+        let (listener, tls) = bind_with_tls(&args).await.unwrap();
+        assert_ne!(first, tls.unwrap().1);
+        // The reservation is the listener actually passed into run_on, never closed and rebound.
+        assert!(
+            tokio::net::TcpListener::bind(listener.local_addr().unwrap())
+                .await
+                .is_err()
+        );
+        drop(listener);
+        args.tls = false;
+        let (_, tls) = bind_with_tls(&args).await.unwrap();
+        assert!(tls.is_none());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn bind_policy_allows_loopback_and_authenticated_lan() {

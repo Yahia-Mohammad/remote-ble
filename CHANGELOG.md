@@ -20,6 +20,8 @@ protocol version: **1**.
 
 ### Fixed
 
+- The mobile agent's pairing and encryption display use the retained running configuration after
+  Activity recreation, including the active port, bearer token, and TLS fingerprint.
 - Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.
 - Cancelling client connection replacement cannot interrupt old-session retirement or leave its
   SDK child scope running; transport-close failures also finish session cleanup.

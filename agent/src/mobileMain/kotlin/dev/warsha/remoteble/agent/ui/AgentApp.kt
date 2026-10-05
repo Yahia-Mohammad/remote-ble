@@ -105,9 +105,9 @@ fun AgentApp(
     // exactly when the user is about to press Start. Null on platforms that cannot report it.
     val radioState by remember { AgentRadio.source() ?: unobservableRadio }.collectAsState()
     var snapshot by remember { mutableStateOf<AgentMonitor.Snapshot?>(null) }
-    var token by remember { mutableStateOf<String?>(null) }
+    var token by remember { mutableStateOf(runner.config?.authToken) }
     var tokenEdited by remember { mutableStateOf(false) }
-    var operatorToken by remember { mutableStateOf<String?>(null) }
+    var operatorToken by remember { mutableStateOf(runner.config?.operatorToken) }
     var operatorTokenEdited by remember { mutableStateOf(false) }
     // Off by default, and deliberately not persisted: opening the high-privilege plane to the network
     // (in cleartext, when encryption is off) should be a decision made per run, not one inherited
@@ -122,7 +122,8 @@ fun AgentApp(
     // Loaded when encryption is switched on, so the fingerprint can be read before Start.
     val identities = remember(tls) { AgentIdentityLoader(tls) }
     // The scheme the running agent was started with, which a later toggle must not misreport.
-    var servingTls by remember { mutableStateOf(false) }
+    val runningConfig = if (running) runner.config else null
+    val servingTls = runningConfig?.tlsFront != null
 
     val loadIdentity: suspend (Boolean) -> AgentTls? = identities::load
     LaunchedEffect(encrypt) {
@@ -176,7 +177,6 @@ fun AgentApp(
             } else {
                 null
             }
-            servingTls = front != null
             startFailure = (
                 runner.start(
                     config.copy(
@@ -222,7 +222,7 @@ fun AgentApp(
                     AgentHeader(
                         running = running,
                         startEnabled = startEnabled && !token.isNullOrBlank(),
-                        address = if (running) addressLabel(config.port, if (servingTls) "wss" else "ws") else "Stopped",
+                        address = if (running) addressLabel(runningConfig?.port ?: config.port, if (servingTls) "wss" else "ws") else "Stopped",
                         // While stopped, what the next Start will serve; while running, what it does.
                         encrypted = if (running) servingTls else encrypt,
                         keepScreenOnNotice = keepScreenOnNotice,
@@ -252,7 +252,7 @@ fun AgentApp(
                                 encrypt = choice
                                 scope.launch { persistEncryptPreference(choice) }
                             },
-                            fingerprint = identities.identity?.fingerprint?.toString(),
+                            fingerprint = (if (running) runningConfig?.tlsFront?.fingerprint else identities.identity?.fingerprint)?.toString(),
                             certificateSha256 = identities.identity?.certificateSha256,
                             failure = identities.failure,
                             onReset = { scope.launch { loadIdentity(true) } },
@@ -263,18 +263,8 @@ fun AgentApp(
                 if (running) {
                     item {
                         val host = lanIPv4Address()
-                        val runningToken = token
                         PairingPanel(
-                            pairing = if (host != null && runningToken != null) {
-                                AgentPairing(
-                                    host = host,
-                                    port = config.port,
-                                    token = runningToken,
-                                    fingerprint = identities.identity?.fingerprint?.takeIf { servingTls },
-                                )
-                            } else {
-                                null
-                            },
+                            pairing = runningPairing(runningConfig, host),
                             unavailable = if (host == null) "No Wi-Fi or LAN address to pair over." else null,
                         )
                     }
@@ -699,3 +689,12 @@ private fun LazyListScope.sectionHeader(title: String) {
         HorizontalDivider()
     }
 }
+
+/** Use the retained runner's actual configuration, including after Activity recreation. */
+internal fun runningPairing(config: AgentConfig?, host: String?): AgentPairing? =
+    if (config == null || host == null) null else AgentPairing(
+        host = host,
+        port = config.port,
+        token = config.authToken?.takeIf { it.isNotBlank() },
+        fingerprint = config.tlsFront?.fingerprint,
+    )

@@ -113,7 +113,7 @@ class AgentPairing(
             if (halves.size > 2) return false
             val groups = halves.map { half -> if (half.isEmpty()) emptyList() else half.split(':') }.flatten()
             val ipv4 = groups.lastOrNull()?.takeIf { '.' in it }
-            if (ipv4 != null && !isIpv4(ipv4)) return false
+            if (ipv4 != null && (!host.endsWith(ipv4) || !isIpv4(ipv4))) return false
             val hexGroups = if (ipv4 != null) groups.dropLast(1) else groups
             if (!hexGroups.all { it.length in 1..4 && it.all(::isHex) }) return false
             val width = hexGroups.size + if (ipv4 != null) 2 else 0

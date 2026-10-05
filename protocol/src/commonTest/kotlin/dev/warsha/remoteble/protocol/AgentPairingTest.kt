@@ -128,6 +128,18 @@ class AgentPairingTest {
         assertFailsWith<IllegalArgumentException> { AgentPairing("10.0.0.2", 8080, "", null) }
     }
 
+    @Test
+    fun embeddedIpv4MustBeTheFinal32BitsOfIpv6() {
+        for (host in listOf("192.168.1.1::", "1:192.168.1.1::", "::192.168.1.1::", "192.168.1.1::1")) {
+            assertFailsWith<IllegalArgumentException>(host) { AgentPairing(host, 8080, "token", fp) }
+            assertFailsWith<IllegalArgumentException>(host) { AgentPairing.parse("remoteble://[$host]:8080?token=t") }
+        }
+        for (host in listOf("::ffff:192.168.1.1", "::192.168.1.1", "1:2:3:4:5:6:192.168.1.1")) {
+            val pairing = AgentPairing(host, 8080, "token", fp)
+            assertEquals(pairing, AgentPairing.parse(pairing.toUri()))
+        }
+    }
+
     private companion object {
         const val SHARED_EXAMPLE =
             "remoteble://192.168.1.20:8080?token=a%2Bb%26c%3Dd%25e%20f%2F%C3%A9" +

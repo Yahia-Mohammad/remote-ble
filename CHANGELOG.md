@@ -18,6 +18,10 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.
+
 ## [0.14.1] - 2026-10-04
 
 > **The 0.14 release on Maven Central.** 0.14.0 was tagged, and its GitHub Release and container

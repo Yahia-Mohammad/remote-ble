@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -102,7 +103,9 @@ class PeripheralSession(
     /** Writes [data], choosing the response mode the characteristic actually supports. */
     suspend fun write(characteristic: DiscoveredCharacteristic, data: ByteArray): Result<Unit> {
         val writeType = if (characteristic.properties.write) WriteType.WithResponse else WriteType.WithoutResponse
-        return runCatching { peripheral.write(characteristic, data, writeType) }
+        return withContext(scope.coroutineContext) {
+            runCatchingConnectionResult { peripheral.write(characteristic, data, writeType) }
+        }
     }
 
     /** Subscribes if not already subscribed, unsubscribes otherwise. */
@@ -159,6 +162,14 @@ class PeripheralSession(
 
     private fun store(characteristic: DiscoveredCharacteristic, bytes: ByteArray) {
         values.update { it + (characteristic.characteristicUuid to bytes) }
+    }
+
+    private inline fun <T> runCatchingConnectionResult(block: () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        Result.failure(t)
     }
 
     private inline fun runCatchingConnection(block: () -> Unit) {

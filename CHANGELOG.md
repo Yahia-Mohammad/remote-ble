@@ -18,6 +18,24 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Desktop agents reserve their actual listening socket before creating or resetting a TLS identity;
+  refused startup preserves existing client pins, including cleartext resets.
+- The mobile agent's pairing and encryption display use the retained running configuration after
+  Activity recreation, including the active port, bearer token, and TLS fingerprint.
+- Accepting a replacement pairing disconnects the old peripheral, clears discoveries, cancels pending
+  connections, and finishes old-session teardown before connecting to the replacement agent.
+- The macOS agent wrappers send `--print-pairing` output through a private pipe to the caller,
+  keeping credential-bearing pairing URIs out of `agent.log`.
+- Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.
+- Cancelling client connection replacement cannot interrupt old-session retirement or leave its
+  SDK child scope running; transport-close failures also finish session cleanup.
+- Client pairing credentials retain their exact contents, including leading and trailing spaces,
+  when passed to the transport and compared for session reuse.
+- Leaving the Android client closes its agent session. AndroidX cancels `viewModelScope` before
+  `onCleared`, so the teardown the client launched there never ran.
+
 ## [0.14.1] - 2026-10-04
 
 > **The 0.14 release on Maven Central.** 0.14.0 was tagged, and its GitHub Release and container

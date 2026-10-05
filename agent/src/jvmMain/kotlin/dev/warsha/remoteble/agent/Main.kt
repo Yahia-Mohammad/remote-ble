@@ -8,6 +8,7 @@ import dev.warsha.remoteble.log.PrintlnSink
 import dev.warsha.remoteble.protocol.DeviceHandle
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import kotlin.time.Duration.Companion.milliseconds
@@ -45,7 +46,7 @@ fun main(args: Array<String>) {
         allowInsecureLan = System.getenv("REMOTE_BLE_ALLOW_INSECURE_LAN")?.toBooleanStrictOrNull() == true,
     )
     validateCleartext(bindHost, tls = tlsRequested(cli), allowCleartextLan = strictFlag(System::getenv, "REMOTE_BLE_ALLOW_CLEARTEXT_LAN"))
-    // Only once both refusals have passed: a refused start must not have reset or created the identity.
+    // Prepare without touching persistence: config/graph validation and the real bind still follow.
     val tlsFront = tlsFrontFor(cli)
     val config = AgentConfig(
         bindHost = bindHost,
@@ -75,7 +76,7 @@ fun main(args: Array<String>) {
             ?: AgentConfig().failFastOnDegradedWrites,
         simulationProfile = simulationProfile,
         writePolicy = writePolicy,
-        tlsFront = tlsFront?.second,
+        tlsFront = tlsFront.front,
     )
     val app = startKoin { modules(agentModule(config)) }
     val server = app.koin.get<AgentWebSocketServer>()
@@ -86,18 +87,25 @@ fun main(args: Array<String>) {
     // and only then discovering, on a CIO worker, that it never bound.
     try {
         runBlocking { server.start() }
+        tlsFront.afterBind()
     } catch (bind: AgentBindException) {
+        server.stop()
+        app.close()
         Logger.error(LogTags.AGENT) { "Cannot start: ${bind.message}. Is another agent already running?" }
         exitProcess(1)
+    } catch (failure: Throwable) {
+        server.stop()
+        app.close()
+        throw failure
     }
     app.koin.get<ConnectionWatcher>().start()
 
     val auth = if (config.authToken != null || config.namedCredentials.isNotEmpty()) "bearer-token required" else "no auth"
     val host = System.getProperty("os.name") ?: "jvm"
     val radio = if (simulationProfile == null) "Kable engine on $host" else "simulation profile (${simulationProfile.peripherals.size} peripherals)"
-    val scheme = if (tlsFront != null) "wss" else "ws"
+    val scheme = if (tlsFront.front != null) "wss" else "ws"
     Logger.info(LogTags.AGENT) { "RemoteBLE agent listening on $scheme://${config.bindHost}:${server.resolvedPort}/agent ($auth, exclusive peripherals, $radio)" }
-    tlsFront?.first?.let { identity ->
+    tlsFront.front?.identity?.let { identity ->
         // The value a client pins. Printed rather than the pairing URI, so the token stays out of logs.
         Logger.info(LogTags.AGENT) { "Agent identity: ${identity.fingerprint}" }
         // What a browser's warning shows for the https:// dashboard, to compare before accepting.
@@ -117,15 +125,23 @@ fun main(args: Array<String>) {
         }
     }
     Logger.info(LogTags.AGENT) { "Log level: ${logLevel?.name?.lowercase() ?: "off"}" }
-    Logger.info(LogTags.AGENT) { "Status dashboard: ${if (tlsFront != null) "https" else "http"}://localhost:${server.resolvedPort}/" }
+    Logger.info(LogTags.AGENT) { "Status dashboard: ${if (tlsFront.front != null) "https" else "http"}://localhost:${server.resolvedPort}/" }
     if (cli.printPairing) {
-        // Standard output, not the logger: the URI carries the token, so it goes only where the
-        // operator who asked for it is looking, never into a log sink.
+        // The URI carries a token: the wrappers use a private output pipe to bypass their log.
         val host = pairingHost(config.bindHost) ?: "127.0.0.1".also {
             Logger.warn(LogTags.AGENT) { "No default route to name a LAN address in the pairing; pass --bind <address> for one" }
         }
-        app.koin.get<ClientCredentials>().pairings(host, server.resolvedPort, tlsFront?.first?.fingerprint)
-            .forEach { (principal, pairing) -> println("Pairing${principal?.let { " ($it)" }.orEmpty()}: ${pairing.toUri()}") }
+        try {
+            printPairings(
+                app.koin.get<ClientCredentials>().pairings(host, server.resolvedPort, tlsFront.front?.fingerprint)
+                    .map { (principal, pairing) -> "Pairing${principal?.let { " ($it)" }.orEmpty()}: ${pairing.toUri()}" },
+            )
+        } catch (failure: java.io.IOException) {
+            server.stop()
+            app.close()
+            Logger.error(LogTags.AGENT) { "Cannot print pairing to the requested output: ${failure.message}" }
+            exitProcess(1)
+        }
     }
 
     Runtime.getRuntime().addShutdownHook(
@@ -154,27 +170,32 @@ internal data class Cli(
 )
 
 /**
- * The agent's identity and the TLS front holding it, or `null` to serve cleartext. Opt-in
+ * Prepares the desktop TLS front without mutating the identity file. Opt-in
  * (`--tls` / `REMOTE_BLE_TLS=true`), because a loopback agent needs none; a LAN bind without it is
  * refused unless cleartext is chosen explicitly ([validateCleartext]). A reset applies whether or
  * not TLS is on, since an operator discarding a compromised key should not have to enable anything
- * to do it.
+ * to do it. The TLS loader runs after its public socket binds; cleartext resets run in [DesktopTls.afterBind].
  */
 internal fun tlsFrontFor(
     cli: Cli,
     env: (String) -> String? = System::getenv,
-): Pair<AgentTlsIdentity, TlsFront.Factory>? {
+): DesktopTls {
     val tls = tlsRequested(cli, env)
     val reset = cli.resetIdentity || strictFlag(env, "REMOTE_BLE_RESET_IDENTITY")
     val path = env("REMOTE_BLE_IDENTITY_FILE")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: AgentIdentityStore.defaultPath()
-    if (!tls) {
-        if (reset && Files.deleteIfExists(path)) Logger.info(LogTags.AGENT) { "agent identity reset: removed $path" }
-        return null
-    }
-    val identity = AgentIdentityStore.loadOrCreate(path, reset)
-    return identity to JsseTlsFront(identity)
+    return DesktopTls(
+        front = if (tls) JsseTlsFront.withIdentityAfterBind { AgentIdentityStore.loadOrCreate(path, reset) } else null,
+        afterBind = {
+            if (!tls && reset && Files.deleteIfExists(path)) {
+                Logger.info(LogTags.AGENT) { "agent identity reset: removed $path" }
+            }
+        },
+    )
 }
+
+/** Prepared startup work; neither constructor nor fingerprint access mutates persistence. */
+internal class DesktopTls(val front: JsseTlsFront?, val afterBind: () -> Unit)
 
 /** Whether this run serves `wss://`: `--tls` or `REMOTE_BLE_TLS=true`. */
 internal fun tlsRequested(cli: Cli, env: (String) -> String? = System::getenv): Boolean =
@@ -300,4 +321,13 @@ private fun parseLogLevel(raw: String?): LogLevel? = when (raw?.lowercase()) {
     "error" -> LogLevel.ERROR
     "off" -> null
     else -> LogLevel.INFO
+}
+
+/** The macOS wrappers supply a private FIFO so bearer URIs bypass their stdout log. */
+internal fun printPairings(lines: List<String>, output: String? = System.getenv("REMOTE_BLE_PAIRING_OUTPUT")) {
+    if (output == null) lines.forEach(::println)
+    // Never CREATE: if the wrapper has retired its FIFO, do not leave a regular secret file.
+    else Files.newBufferedWriter(Path.of(output), StandardOpenOption.WRITE).use { writer ->
+        lines.forEach { writer.write(it); writer.newLine() }
+    }
 }

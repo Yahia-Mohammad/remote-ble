@@ -62,28 +62,156 @@ class MainTest {
     }
 
     @Test
-    fun tlsFrontForCreatesTheIdentityOnlyWhenTlsIsOn() {
+    fun desktopIdentityIsTouchedOnlyAfterTheActualBind() = kotlinx.coroutines.runBlocking<Unit> {
         val dir = Files.createTempDirectory("remoteble-main-tls")
         val path = dir.resolve("id.pem")
         val env = mutableMapOf("REMOTE_BLE_IDENTITY_FILE" to path.toString())
         try {
-            assertEquals(null, tlsFrontFor(Cli(null, 8080, null), env::get))
-            assertFalse(Files.exists(path), "no identity is created while TLS is off")
-
-            env["REMOTE_BLE_TLS"] = "true"
-            val first = tlsFrontFor(Cli(null, 8080, null), env::get)!!.first
-            assertEquals(first.fingerprint, tlsFrontFor(Cli(null, 8080, null), env::get)!!.first.fingerprint)
-
-            // A reset discards the key even with TLS off, so an operator never has to enable it to do so.
-            env.remove("REMOTE_BLE_TLS")
-            assertEquals(null, tlsFrontFor(Cli(null, 8080, null, resetIdentity = true), env::get))
+            assertEquals(null, tlsFrontFor(Cli(null, 8080, null), env::get).front)
             assertFalse(Files.exists(path))
-
+            env["REMOTE_BLE_TLS"] = "true"
+            val prepared = tlsFrontFor(Cli(null, 8080, null), env::get)
+            assertFalse(Files.exists(path), "preparing the graph must not create an identity")
+            prepared.front!!.start("127.0.0.1", 0, 1) {}.stop()
+            val first = Files.readAllBytes(path)
+            java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1")).use { occupied ->
+                val reset = tlsFrontFor(Cli(null, occupied.localPort, null, resetIdentity = true), env::get)
+                assertFailsWith<AgentBindException> { reset.front!!.start("127.0.0.1", occupied.localPort, 1) {} }
+                assertTrue(first.contentEquals(Files.readAllBytes(path)), "a refused reset must preserve the pinned key")
+            }
+            val reset = tlsFrontFor(Cli(null, 8080, null, resetIdentity = true), env::get)
+            reset.front!!.start("127.0.0.1", 0, 1) {}.stop()
+            assertFalse(first.contentEquals(Files.readAllBytes(path)), "a bound reset changes the identity")
+            env.remove("REMOTE_BLE_TLS")
+            val cleartextReset = tlsFrontFor(Cli(null, 8080, null, resetIdentity = true), env::get)
+            assertTrue(Files.exists(path))
+            cleartextReset.afterBind()
+            assertFalse(Files.exists(path))
             env["REMOTE_BLE_TLS"] = "yes"
             assertFailsWith<IllegalStateException> { tlsFrontFor(Cli(null, 8080, null), env::get) }
         } finally {
             Files.deleteIfExists(path)
             Files.deleteIfExists(dir)
+        }
+    }
+
+    @Test
+    fun entrypointRefusalsPreserveIdentityBeforeConfigurationAndBindFailures() {
+        val dir = Files.createTempDirectory("remoteble-startup-regression")
+        val path = dir.resolve("id.pem")
+        val simulation = dir.resolve("simulation.json")
+        Files.writeString(simulation, """{"schemaVersion":1,"peripherals":[{"id":"test","advertisement":{},"services":[{"uuid":"180f","characteristics":[{"uuid":"2a19","properties":["read"],"read":{"static":"64"}}]}]}]}""")
+        readSimulationProfile(simulation.toString()) // Fail here if the fixture cannot reach startup.
+        AgentIdentityStore.loadOrCreate(path)
+        val original = Files.readAllBytes(path)
+        val classpath = checkNotNull(System.getProperty("remoteble.agent.testClasspath"))
+        try {
+            java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1")).use { occupied ->
+                for (extra in listOf(
+                    mapOf("REMOTE_BLE_SCAN_CONCURRENCY" to "invalid"),
+                    mapOf("REMOTE_BLE_WRITE_FAIL_FAST" to "invalid"),
+                    mapOf("REMOTE_BLE_TOKEN" to "client-secret", "REMOTE_BLE_OPERATOR_TOKEN" to "client-secret"),
+                    emptyMap(),
+                )) {
+                    for (tls in listOf(true, false)) {
+                        val args = mutableListOf(
+                            "${System.getProperty("java.home")}/bin/java", "-cp", classpath,
+                            "dev.warsha.remoteble.agent.MainKt", "--port", occupied.localPort.toString(),
+                            "--bind", "127.0.0.1", "--reset-identity", "--simulate", simulation.toString(),
+                        )
+                        if (tls) args += "--tls"
+                        val output = dir.resolve("startup.log").toFile()
+                        val process = ProcessBuilder(args).apply {
+                            environment().keys.removeIf { it.startsWith("REMOTE_BLE_") }
+                            environment()["REMOTE_BLE_IDENTITY_FILE"] = path.toString()
+                            environment().putAll(extra)
+                            redirectErrorStream(true)
+                            redirectOutput(output)
+                        }.start()
+                        try {
+                            assertTrue(process.waitFor(15, java.util.concurrent.TimeUnit.SECONDS), "refused startup hung")
+                            assertEquals(1, process.exitValue(), output.readText())
+                            val failure = output.readText()
+                            val expected = when {
+                                "REMOTE_BLE_SCAN_CONCURRENCY" in extra -> "invalid"
+                                "REMOTE_BLE_WRITE_FAIL_FAST" in extra -> "REMOTE_BLE_WRITE_FAIL_FAST must"
+                                "REMOTE_BLE_OPERATOR_TOKEN" in extra -> "operator token"
+                                else -> "Cannot start"
+                            }
+                            assertTrue(failure.lowercase().contains(expected.lowercase()), failure)
+                            assertTrue(original.contentEquals(Files.readAllBytes(path)), "startup refusal changed the pinned identity")
+                        } finally {
+                            process.destroyForcibly()
+                        }
+                    }
+                }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun realCliPairingOutputBypassesTheStdoutLog() {
+        val dir = Files.createTempDirectory("remoteble-pairing-regression")
+        val pairingFile = Files.createFile(dir.resolve("pairing-output"))
+        val logFile = dir.resolve("agent.log")
+        val identityFile = dir.resolve("identity.pem")
+        val simulation = dir.resolve("simulation.json")
+        Files.writeString(simulation, """{"schemaVersion":1,"peripherals":[{"id":"test","advertisement":{},"services":[{"uuid":"180f","characteristics":[{"uuid":"2a19","properties":["read"],"read":{"static":"64"}}]}]}]}""")
+        val port = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val process = ProcessBuilder(
+            "${System.getProperty("java.home")}/bin/java", "-cp", System.getProperty("remoteble.agent.testClasspath"),
+            "dev.warsha.remoteble.agent.MainKt", "--bind", "127.0.0.1", "--port", port.toString(),
+            "--tls", "--print-pairing", "--simulate", simulation.toString(),
+        ).apply {
+            environment().keys.removeIf { it.startsWith("REMOTE_BLE_") }
+            environment()["REMOTE_BLE_IDENTITY_FILE"] = identityFile.toString()
+            environment()["REMOTE_BLE_TOKEN"] = "pairing-only-secret"
+            environment()["REMOTE_BLE_PAIRING_OUTPUT"] = pairingFile.toString()
+            redirectErrorStream(true)
+            redirectOutput(logFile.toFile())
+        }.start()
+        try {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(15_000) {
+                    while (!Files.exists(pairingFile) || Files.readString(pairingFile).isBlank()) {
+                        assertTrue(process.isAlive, logFile.toFile().readText())
+                        kotlinx.coroutines.delay(25)
+                    }
+                }
+            }
+            val uri = Files.readString(pairingFile).trim().removePrefix("Pairing: ")
+            val pairing = dev.warsha.remoteble.protocol.AgentPairing.parse(uri)
+            assertEquals("pairing-only-secret", pairing.token)
+            assertEquals(port, pairing.port)
+            assertEquals(AgentIdentityStore.loadOrCreate(identityFile).fingerprint, pairing.fingerprint)
+            val log = Files.readString(logFile)
+            assertTrue(log.contains("RemoteBLE agent listening on wss://"), log)
+            assertFalse(log.contains("remoteble://"), "pairing URI leaked into agent.log")
+            assertFalse(log.contains("pairing-only-secret"), "bearer token leaked into agent.log")
+        } finally {
+            process.destroy()
+            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly().waitFor()
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun wrapperPairingOutputBypassesTheConfiguredLogger() {
+        val path = Files.createTempFile("remoteble-pairing-output", ".txt")
+        Logger.configure(level = LogLevel.INFO, sink = LogSink { _, _, message, _ -> logMessages += message })
+        try {
+            printPairings(listOf("Pairing: remoteble://127.0.0.1:8080?token=private"), path.toString())
+            assertTrue(Files.readString(path).contains("token=private"))
+            assertTrue(logMessages.isEmpty())
+            Files.delete(path)
+            assertFailsWith<java.nio.file.NoSuchFileException> {
+                printPairings(listOf("Pairing: remoteble://127.0.0.1:8080?token=private"), path.toString())
+            }
+            assertFalse(Files.exists(path), "a removed FIFO must never be recreated as a regular secret file")
+        } finally {
+            Files.deleteIfExists(path)
         }
     }
 

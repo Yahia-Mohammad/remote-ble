@@ -15,6 +15,9 @@ import dev.warsha.remoteble.protocol.DeviceHandle
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,6 +26,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -37,6 +43,14 @@ import kotlin.time.Duration.Companion.seconds
  * [close] plus the scope's own cancellation.
  */
 class AgentConnection(private val scope: CoroutineScope) {
+
+    private val lifecycle = Mutex()
+    private var sessionFactory: ((String, String, AgentFingerprint?) -> AgentSession)? = null
+
+    /** Test seam for a controllable transport without a real socket or HTTP client. */
+    internal constructor(scope: CoroutineScope, sessionFactory: (String, String, AgentFingerprint?) -> AgentSession) : this(scope) {
+        this.sessionFactory = sessionFactory
+    }
 
     private val session = MutableStateFlow<AgentSession?>(null)
     private var client: HttpClient? = null
@@ -62,7 +76,7 @@ class AgentConnection(private val scope: CoroutineScope) {
      */
     suspend fun connect(url: String, token: String, fingerprint: AgentFingerprint? = null): AgentSession {
         val target = url.trim()
-        val session = obtain(target, token.trim(), fingerprint)
+        val session = obtain(target, token, fingerprint)
         val reached = withTimeoutOrNull(CONNECT_TIMEOUT) {
             session.transportState.first { it == TransportState.CONNECTED || it in TERMINAL_STATES }
         }
@@ -96,35 +110,49 @@ class AgentConnection(private val scope: CoroutineScope) {
         RemotePeripheral(handle, session, name)
 
     /** Releases the socket and session. Safe to call when already idle. */
-    suspend fun close() {
+    suspend fun close() = lifecycle.withLock { closeLocked() }
+
+    private suspend fun closeLocked() = withContext(NonCancellable) {
+        // Ownership is cleared before suspension; finish retiring these resources even if
+        // the scan/connect job that requested replacement is cancelled meanwhile.
         val retiring = session.value
+        val retiringClient = client
         session.value = null
-        retiring?.close()
-        client?.close()
         client = null
         url = null
         token = null
         fingerprint = null
+        try {
+            retiring?.close()
+        } finally {
+            retiringClient?.close()
+        }
     }
 
-    private suspend fun obtain(url: String, token: String, fingerprint: AgentFingerprint?): AgentSession {
+    private suspend fun obtain(url: String, token: String, fingerprint: AgentFingerprint?): AgentSession = lifecycle.withLock {
         val current = session.value
         if (current != null && this.url == url && this.token == token && this.fingerprint == fingerprint &&
             current.transportState.value != TransportState.DISCONNECTED &&
             current.transportState.value !in TERMINAL_STATES
         ) {
-            return current
+            return@withLock current
         }
-        close()
-        val newClient = (fingerprint?.let(::pinnedWebSocketHttpClient) ?: defaultWebSocketHttpClient()).also { client = it }
+        closeLocked()
+        // Retirement must finish under cancellation, but a cancelled caller must not create
+        // or publish a replacement after the protected cleanup returns.
+        currentCoroutineContext().ensureActive()
+        val create = sessionFactory ?: { target: String, secret: String, pin: AgentFingerprint? ->
+            val newClient = (pin?.let(::pinnedWebSocketHttpClient) ?: defaultWebSocketHttpClient()).also { client = it }
+            DefaultAgentSession(
+                WebSocketAgentTransport(target, scope, newClient, authToken = { secret.ifBlank { null } }),
+                CborProtocolCodec(),
+                scope,
+            )
+        }
         // Blank token → no Authorization header (token-free agent); otherwise present it as the
         // bearer credential. Read via the provider lambda so a rotated value would be picked up on
         // reconnect (see WebSocketAgentTransport.authToken / F5).
-        return DefaultAgentSession(
-            WebSocketAgentTransport(url, scope, newClient, authToken = { token.ifBlank { null } }),
-            CborProtocolCodec(),
-            scope,
-        ).also {
+        create(url, token, fingerprint).also {
             session.value = it
             this.url = url
             this.token = token

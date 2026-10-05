@@ -208,6 +208,35 @@ class AgentRunnerTest {
         graph.dispose()
     }
 
+    @Test
+    fun recreatedUiGetsPairingFromTheRetainedRunningConfiguration() = runBlocking<Unit> {
+        val graph = TestGraph()
+        val runner = AgentRunner({ graph }, Unit)
+        val pin = dev.warsha.remoteble.protocol.AgentFingerprint.ofSpkiSha256(ByteArray(32) { 7 })
+        val front = object : TlsFront.Factory {
+            override val fingerprint = pin
+            override suspend fun start(host: String, port: Int, upstreamPort: Int, onFailure: (String) -> Unit): TlsFront = error("fake graph")
+        }
+        try {
+            for (tls in listOf(front, null)) {
+                runner.start(AgentConfig(port = 8443, authToken = "running-secret", tlsFront = tls))
+                // Each call represents a fresh composition; no UI remembered state is involved.
+                repeat(2) {
+                    val pairing = dev.warsha.remoteble.agent.ui.runningPairing(runner.config, "192.168.1.20")!!
+                    assertEquals(8443, pairing.port)
+                    assertEquals("running-secret", pairing.token)
+                    assertEquals(tls?.fingerprint, pairing.fingerprint)
+                    assertEquals(tls != null, pairing.encrypted)
+                }
+                runner.stop()
+                assertNull(dev.warsha.remoteble.agent.ui.runningPairing(runner.config, "192.168.1.20"))
+            }
+        } finally {
+            runner.stop()
+            graph.dispose()
+        }
+    }
+
     private class TestGraph(
         private val onStart: () -> Unit = {},
         private val onStopServer: () -> Unit = {},

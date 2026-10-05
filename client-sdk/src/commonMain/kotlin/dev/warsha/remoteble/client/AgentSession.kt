@@ -646,27 +646,29 @@ class DefaultAgentSession(
         drained.forEach { it.complete(failure) }
     }
 
-    override suspend fun close() {
-        val shouldClose = closeLock.withLock {
-            if (closed) false else {
-                closed = true
-                true
+    override suspend fun close() = withContext(NonCancellable) {
+        // Once closed is set, no later caller can resume interrupted cleanup. Protect the
+        // entire teardown and let concurrent close callers wait for its completion.
+        closeLock.withLock {
+            if (closed) return@withLock
+            closed = true
+            try {
+                _capabilities.value = null
+                _readiness.value = SessionReadiness.CLOSED
+                _reconciliationReport.value = null
+                failAllPending()
+                replayLock.withLock {
+                    activeConnections.clear()
+                    activeSubscriptions.clear()
+                    activeScans.clear()
+                    lastConnParams.clear()
+                }
+                transport.close()
+            } finally {
+                sessionJob.cancelAndJoin()
+                _readiness.value = SessionReadiness.CLOSED
             }
         }
-        if (!shouldClose) return
-
-        _capabilities.value = null
-        _readiness.value = SessionReadiness.CLOSED
-        _reconciliationReport.value = null
-        failAllPending()
-        replayLock.withLock {
-            activeConnections.clear()
-            activeSubscriptions.clear()
-            activeScans.clear()
-            lastConnParams.clear()
-        }
-        transport.close()
-        sessionJob.cancelAndJoin()
     }
 
     companion object {

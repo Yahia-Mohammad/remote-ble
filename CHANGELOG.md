@@ -21,6 +21,8 @@ protocol version: **1**.
 ### Fixed
 
 - Pairing validation rejects IPv6 literals with an embedded IPv4 address before trailing `::`.
+- Cancelling client connection replacement cannot interrupt old-session retirement or leave its
+  SDK child scope running; transport-close failures also finish session cleanup.
 
 ## [0.14.1] - 2026-10-04
 

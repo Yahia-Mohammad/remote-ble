@@ -1,11 +1,10 @@
 # Release-candidate inventory and release evidence
 
-The **currently released line is 0.13.0** (2026-09-29), with **0.14.2 prepared and awaiting its
-tag**. `v0.14.0` and `v0.14.1` were tagged, and their GitHub Releases and GHCR images published,
-but each was withdrawn before Maven Central when a final review found fixes; 0.14.2 replaces both. The inventory and
-checklist below were
-written for 0.10.0 and remain the procedure of record for every release since. Every version source
-a release touches is checked by
+The **currently released line is 0.14.2** (2026-10-05). `v0.14.0` and `v0.14.1` were tagged, and
+their GitHub Releases and GHCR images published, but each was withdrawn before Maven Central when a
+final review found fixes; 0.14.2 replaces both, and is the only 0.14 version on Central. The
+inventory and checklist below were written for 0.10.0 and remain the procedure of record for every
+release since. Every version source a release touches is checked by
 [`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
 tag before any release workflow dispatch:
 
@@ -15,6 +14,77 @@ bash scripts/check-release-version.sh v0.14.2
 
 Substitute the tag being cut. The published evidence for each release is recorded under
 [Release evidence](#release-evidence--published-2026-08-04) below, 0.11.0's alongside 0.10.0's.
+
+## Release evidence — published 2026-10-05 (0.14.2)
+
+Tag `v0.14.2` is annotated object `8f8afe1`, on commit `bdb60e7` (the merge of #65). Every hash
+below is the published artifact's own, read back from the release and the registry rather than
+from a local build.
+
+**One departure from the procedure:** GitHub never started the push workflows for `bdb60e7`. The
+commit has no check suites at all, though GitHub reported no incident and the commit carries no skip
+directive. Build and Rust agent cannot be dispatched, so the tag was cut on content evidence
+instead: `bdb60e7`'s tree (`8f660b2`) is identical to that of `7b42ab2`, the #65 head on which all
+18 checks passed, and Release gates was dispatched on `main` at `bdb60e7` (run `37345442901`): every
+gate passed. Only the non-gating rapid-session-churn harness failed, as it has on every scheduled
+run since 2026-08-24, including on `7662eb8` the same morning (4 of 10 iterations reproduced; 1 of
+10 here).
+
+### GitHub Release assets
+
+GitHub's server-side digest for each asset matches its published `.sha256` sidecar
+(`agent-artifacts.yml` run `37345435153`).
+
+| Asset | SHA-256 |
+|---|---|
+| `remoteble-agent-0.14.2-all.jar` | `ae0811ab99c1d1d86143cf940320099d134b678130a03754f47ed9b623285f0c` |
+| `remoteble-agent-rs-linux-x86_64` | `d5ede7208d0e76e14c008af6abceae4cba2238b18d8a58074e8c7b2ab28675c9` |
+| `remoteble-agent-rs-linux-aarch64` | `f5b6696421a2e2648c8ee83a00b3dc9b641baffcbab0615c954b767dbeca41c0` |
+| `remoteble-agent-rs-windows-x86_64.exe` | `c5324840da2572f6f4e1cc6de1c3fac96eee6cb26a7a2f07047081bdfaf6c19b` |
+| `remoteble-agent-rs-macos-universal.app.zip` | `46d03aa876cf844060f84736a9f43e214a8e304ee76159035115bcf90077d3dc` |
+
+### Rust OCI image
+
+`ghcr.io/yahia-mohammad/remoteble-agent-rs`, tags `0.14.2`, `0.14`, `0`, `latest` and `sha-bdb60e7`;
+`0.14.2` and `latest` resolve to the same index (`agent-container.yml` run `37345435162`). The `0.14`,
+`0` and `latest` tags moved off the 0.14.1 image, which keeps `0.14.1` and `sha-7662eb8`.
+
+| | Digest |
+|---|---|
+| **Manifest list (OCI index)** | `sha256:92e20f6b6051eecbd29724d1fad534fed35bda98e7b375762d4f6533f81bf7ee` |
+| `linux/amd64` | `sha256:ccec24236e1ec1d1b7aef939c73f4308dc07a43137a3c7bb451bdc1418800134` |
+| `linux/arm64` | `sha256:595f81911554386733f3560d166682621b0eade71775855b84249d88bfa4a3ab` (plus the two Buildx attestation manifests) |
+
+### Maven Central
+
+Published by [`release.yml`](../.github/workflows/release.yml) (run `37348578953`, dispatched by
+the maintainer; it finished at 17:31:36 UTC), preceded by
+[`release-preflight.yml`](../.github/workflows/release-preflight.yml) (run `37345438805`): all 18
+coordinates built, **102 detached signatures** with every POM signed, and the Portal credential
+check returning HTTP 200 with `{"published":false}`. A poll of `repo1.maven.org` saw all 18 POMs
+six minutes after the run finished; the `client-sdk` POM reports `Last-Modified: 17:36:49 GMT`.
+
+Neither 0.14.0 nor 0.14.1 was ever uploaded, so 0.13.0 → 0.14.2 is the whole 0.14 step on Central.
+
+### Post-publish consumer resolution — 0.14.2
+
+Run 2026-10-05 against the **released** coordinates, all three pass:
+
+| Fixture | Task | Result |
+|---|---|---|
+| `consumer-tests/jvm` | `clean check` | ✅ |
+| `consumer-tests/android` | `clean checkDebugAarMetadata compileDebugKotlin`, at `compileSdk 36` | ✅ |
+| `consumer-tests/kmp` | `clean compileKotlinIosArm64`, `…SimulatorArm64`, `…MacosArm64` | ✅ |
+
+`mavenLocal()` was neutralized with `-Dmaven.repo.local` on an empty directory plus
+`--refresh-dependencies`, and the directory held **0 files** afterwards, so every artifact came from
+Central. The JVM closure resolves `client-sdk:0.14.2` → `client-sdk-jvm` → `protocol`/`protocol-jvm`
++ `log`/`log-jvm`, all at `0.14.2`, and brings `ktor-client-okhttp` 3.5.1 (OkHttp 5.3.2), not CIO:
+the engine change 0.14.1 made reaches Central consumers here. The released `client-sdk-android`,
+`protocol-android` and `log-android` AARs each declare `minCompileSdk=36`, read from the files
+downloaded from Central.
+
+---
 
 ## Release evidence — published 2026-09-29 (0.13.0)
 

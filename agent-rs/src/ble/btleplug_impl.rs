@@ -76,6 +76,9 @@ impl ScanIdentityCache {
 /// every subsequent write-with-response still costs a full [GATT_OP_TIMEOUT] before failing; this
 /// records the state so [DegradedWrites::rejection] can answer immediately instead.
 ///
+/// That was btleplug 0.11 on CoreBluetooth; 0.12 fixed it, and on 0.13 the error arrives and the
+/// next write completes (2026-10-06). The tracking stays as a guard for any backend that stalls.
+///
 /// Only ever applies to write-**with-response**: `WriteWithoutResponse` has no ATT response to
 /// await in the first place (btleplug hands it to the local controller and returns), so it can't
 /// be affected by this wedge and must not be short-circuited by it — see [DegradedWrites::rejection].
@@ -233,7 +236,7 @@ const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// reported as [ErrorKind::Timeout].
 ///
 /// btleplug can fail to *complete* a transaction rather than completing it with an error: on
-/// macOS a write-with-response that the peripheral answers with an ATT error never resolves and
+/// macOS (btleplug 0.11; fixed in 0.12) a write-with-response that the peripheral answers with an ATT error never resolves and
 /// never yields an `Err`, so an unbounded await parks the command task forever. That is not just
 /// slow reporting — the transport chains same-device writes, and a write task that never finishes
 /// never drops its completion sender, so every later write to that device blocks behind it. It

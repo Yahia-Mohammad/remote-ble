@@ -888,7 +888,9 @@ hold for **both** unless noted.
   latency, not semantics. Set it to `false` to run without the workaround (the state is still
   tracked and logged, writes just go to the radio and wait as before). It is stated in the startup
   log so the running behaviour is visible, and it becomes moot once the backend delivers ATT errors
-  properly, since the degraded state can then never be entered.
+  properly, since the degraded state can then never be entered. That is now the case for `agent-rs` on
+  macOS (btleplug 0.13, since 0.15.0) and for both agents on Linux; the macOS Kotlin JVM agent still
+  needs it.
 - *Lease grace timers.* Both registries schedule a per-lease release on "owner gone" and cancel
   it on "owner back". On expiry the lease is freed **and** the warm radio link is torn down via
   an injected teardown (KMP `onRelease`, Rust `set_teardown` → `BleBackend::disconnect`). This is

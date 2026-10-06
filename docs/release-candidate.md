@@ -1,13 +1,11 @@
 # Release-candidate inventory and release evidence
 
-The **currently released line is 0.14.2** (2026-10-05), with **0.15.0 prepared and awaiting its
-tag**. `v0.14.0` and `v0.14.1` were tagged, and their GitHub Releases and GHCR images published, but
-each was withdrawn before Maven Central when a final review found fixes; 0.14.2 replaces both, and is
-the only 0.14 version on Central. The
-inventory and checklist below were written for 0.10.0 and remain the procedure of record for every
-release since. Every version source a release touches is checked by
-[`check-release-version.sh`](../scripts/check-release-version.sh) — run the guard with the intended
-tag before any release workflow dispatch:
+The **currently released line is 0.15.0** (2026-10-06). `v0.14.0` and `v0.14.1` were tagged, and
+their GitHub Releases and GHCR images published, but each was withdrawn before Maven Central when a
+final review found fixes; 0.14.2 replaced both. The inventory and checklist below were written for
+0.10.0 and remain the procedure of record for every release since. Every version source a release
+touches is checked by [`check-release-version.sh`](../scripts/check-release-version.sh) — run the
+guard with the intended tag before any release workflow dispatch:
 
 ```sh
 bash scripts/check-release-version.sh v0.15.0
@@ -15,6 +13,71 @@ bash scripts/check-release-version.sh v0.15.0
 
 Substitute the tag being cut. The published evidence for each release is recorded under
 [Release evidence](#release-evidence--published-2026-08-04) below, 0.11.0's alongside 0.10.0's.
+
+## Release evidence — published 2026-10-06 (0.15.0)
+
+Tag `v0.15.0` is annotated object `8a6bd5a`, on commit `3be9fcc` (the merge of #70), cut after all
+five workflows passed on that commit. Every hash below is the published artifact's own, read back
+from the release and the registry rather than from a local build.
+
+The tag followed a pre-tag review of `v0.14.2..main`, which found the Rust agent never reporting Tx
+power on macOS: btleplug 0.11.8 hard-codes it to `None` on CoreBluetooth. #70 moved `agent-rs` to
+btleplug 0.13.4 and corrected the coverage docs. On a Mac with a Pixel 8 running the test
+peripheral, `agent-rs` then passed the live E2E 14 of 14, with write errors delivered as
+`WRITE_FAILED` for the first time on macOS, and reported Tx power for 9 and 7 devices in two scans
+where it had reported none.
+
+### GitHub Release assets
+
+GitHub's server-side digest for each asset matches its published `.sha256` sidecar
+(`agent-artifacts.yml` run `37449110216`).
+
+| Asset | SHA-256 |
+|---|---|
+| `remoteble-agent-0.15.0-all.jar` | `ded8980a8fd9138b60828db25a3a21ad5d9a1544517f4fc649499f4e8f7ff05a` |
+| `remoteble-agent-rs-linux-x86_64` | `042a604b7e196c6a8c3093b23b718fe90d450c15593c4034bdf114d6afe8a213` |
+| `remoteble-agent-rs-linux-aarch64` | `a6387a42128af36b0a446f23e58177027cfa9dda4fc6853ad2854e45b2fc2ae3` |
+| `remoteble-agent-rs-windows-x86_64.exe` | `4be0e277692a466dc509873d5e11e1ec968f764a1ac3a6880c840349821901e9` |
+| `remoteble-agent-rs-macos-universal.app.zip` | `8872c140246b89f88e0d7b1df62efa38eff3fd96972042eb21c6a26d2c32abb7` |
+
+### Rust OCI image
+
+`ghcr.io/yahia-mohammad/remoteble-agent-rs`, tags `0.15.0`, `0.15`, `0`, `latest` and `sha-3be9fcc`;
+`0.15.0` and `latest` resolve to the same index (`agent-container.yml` run `37449110146`).
+
+| | Digest |
+|---|---|
+| **Manifest list (OCI index)** | `sha256:8f88558c9e7ff3e12553dce855930a77cb611c804b17b808c497b541e367f399` |
+| `linux/amd64` | `sha256:aa43bf38b04ad8d0501bc7b7fe85e572bc544b55b250e45e621706110af8142f` |
+| `linux/arm64` | `sha256:0e96019782032ed74b76c52916ddce21eca3a5dd10b7241e838c04ceb1b845e1` (plus the two Buildx attestation manifests) |
+
+### Maven Central
+
+Published by [`release.yml`](../.github/workflows/release.yml) (run `37452817666`, dispatched by
+the maintainer; it finished at 10:56:34 UTC), preceded by
+[`release-preflight.yml`](../.github/workflows/release-preflight.yml) (run `37449112587`): all 18
+coordinates built, **102 detached signatures** with every POM signed, and the Portal credential
+check returning HTTP 200 with `{"published":false}`. A poll of `repo1.maven.org` saw all 18 POMs
+12 minutes after the run finished; the `client-sdk` POM reports `Last-Modified: 11:01:28 GMT`.
+
+### Post-publish consumer resolution — 0.15.0
+
+Run 2026-10-06 against the **released** coordinates, all three pass:
+
+| Fixture | Task | Result |
+|---|---|---|
+| `consumer-tests/jvm` | `clean check` | ✅ |
+| `consumer-tests/android` | `clean checkDebugAarMetadata compileDebugKotlin`, at `compileSdk 36` | ✅ |
+| `consumer-tests/kmp` | `clean compileKotlinIosArm64`, `…SimulatorArm64`, `…MacosArm64` | ✅ |
+
+`mavenLocal()` was neutralized with `-Dmaven.repo.local` on an empty directory plus
+`--refresh-dependencies`, and the directory held **0 files** afterwards, so every artifact came from
+Central. The JVM closure resolves `client-sdk:0.15.0` → `client-sdk-jvm` → `protocol`/`protocol-jvm`
++ `log`/`log-jvm`, all at `0.15.0`, on `ktor-client-okhttp` 3.5.1. The released
+`client-sdk-android`, `protocol-android` and `log-android` AARs each declare `minCompileSdk=36`, read
+from the files downloaded from Central.
+
+---
 
 ## Release evidence — published 2026-10-05 (0.14.2)
 

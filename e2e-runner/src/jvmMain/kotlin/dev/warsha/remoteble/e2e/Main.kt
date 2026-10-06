@@ -4,6 +4,7 @@ package dev.warsha.remoteble.e2e
 
 import dev.warsha.remoteble.client.BleMode
 import dev.warsha.remoteble.client.DefaultAgentSession
+import dev.warsha.remoteble.client.agentStatus
 import dev.warsha.remoteble.client.RemoteScanner
 import dev.warsha.remoteble.client.TransportState
 import dev.warsha.remoteble.client.WebSocketAgentTransport
@@ -77,8 +78,10 @@ private const val BTLEPLUG_WRITE_POISONING =
         "after an ATT error; only reconnecting recovers (BlueZ recovers on its own — Rig D, 2026-08-03)"
 
 /**
- * Whether the agent under test is btleplug **on CoreBluetooth** — the only configuration in which
- * the two ATT-error gates above hold.
+ * Whether the agent under test runs on macOS, where the Kotlin JVM agent is btleplug **on
+ * CoreBluetooth** through Kable — the only configuration in which the two ATT-error gates above
+ * still hold. `agent-rs` on macOS is told apart by its agent info once connected (see
+ * [RUST_AGENT_INFO_PREFIX]).
  *
  * Operator-declared, because the wire protocol carries no agent/platform identity and the runner is
  * already pointed at a chosen agent by hand. The default reads the *runner's* host as a hint, which
@@ -93,7 +96,15 @@ private const val BTLEPLUG_WRITE_POISONING =
  */
 private const val ENV_HOST = "REMOTE_BLE_E2E_AGENT_HOST"
 
-private val btleplugOnCoreBluetoothAgent: Boolean =
+/**
+ * How `agent-rs` names itself in `agent.status`. It moved to btleplug 0.13, whose CoreBluetooth
+ * backend delivers ATT errors and keeps write completions flowing: both gated steps passed against
+ * it on macOS in two runs (2026-10-06), while the Kotlin JVM agent, on the btleplug Kable bundles,
+ * still lost them. So the gate follows the agent as well as the host.
+ */
+private const val RUST_AGENT_INFO_PREFIX = "RemoteBle-Agent-RS"
+
+private val agentOnMacos: Boolean =
     when (val declared = System.getenv(ENV_HOST)?.lowercase()) {
         null -> System.getProperty("os.name").orEmpty().startsWith("Mac")
         // macOS hosts the two btleplug agents (Kotlin JVM and agent-rs), so it is the gated case.
@@ -125,11 +136,6 @@ fun main(args: Array<String>): Unit = runBlocking {
     // State the gate configuration rather than leaving it to be inferred from what was typed: a
     // defaulted host silently gating (or not gating) the two ATT-error steps is exactly the kind of
     // unstated configuration that has produced wrong readings on this project before.
-    println(
-        "gates : ATT-error steps ${if (btleplugOnCoreBluetoothAgent) "GATED (XFAIL)" else "ungated"}" +
-            " — agent host ${System.getenv(ENV_HOST) ?: "defaulted from this runner's OS; set $ENV_HOST if the agent is remote"}",
-    )
-    println()
 
     val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val http = defaultWebSocketHttpClient()
@@ -146,6 +152,16 @@ fun main(args: Array<String>): Unit = runBlocking {
             withTimeout(15.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
             "CONNECTED"
         }
+        val agentInfo = runCatching { session.agentStatus()?.agentInfo }.getOrNull()
+        val attErrorGap = agentOnMacos && agentInfo?.startsWith(RUST_AGENT_INFO_PREFIX) != true
+        // State the gate configuration rather than leaving it to be inferred from what was typed: a
+        // defaulted host silently gating (or not gating) the two ATT-error steps is exactly the kind
+        // of unstated configuration that has produced wrong readings on this project before.
+        println(
+            "gates : ATT-error steps ${if (attErrorGap) "GATED (XFAIL)" else "ungated"}" +
+                " — agent ${agentInfo ?: "unidentified"}, host " +
+                (System.getenv(ENV_HOST) ?: "defaulted from this runner's OS; set $ENV_HOST if the agent is remote"),
+        )
 
         // Match on the TestProfile service UUID, not the advertised name. The name is not a
         // reliable discriminator through every agent: on Apple hosts Kable never surfaces a local
@@ -219,7 +235,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         readlnOrNull()
         report.knownFailing(
             "Write-with-response error surfaces WRITE_FAILED (F)",
-            expectedToFail = btleplugOnCoreBluetoothAgent,
+            expectedToFail = attErrorGap,
             reason = BTLEPLUG_ATT_ERROR_GAP,
         ) {
             val failure = runCatching {
@@ -242,11 +258,21 @@ fun main(args: Array<String>): Unit = runBlocking {
         readlnOrNull()
         report.knownFailing(
             "Write-with-response succeeds again — a failed write never poisons the session",
-            expectedToFail = btleplugOnCoreBluetoothAgent,
+            expectedToFail = attErrorGap,
             reason = BTLEPLUG_WRITE_POISONING,
         ) {
             peripheral.write(writable, byteArrayOf(0x01, 0x02), WriteType.WithResponse)
             null
+        }
+
+        if (attErrorGap) {
+            // A poisoned connection cannot complete the CCCD write a subscription needs, so the
+            // next step would measure the gap again rather than notifications.
+            report.step("Reconnect (the only recovery from write poisoning on this agent)") {
+                peripheral.disconnect()
+                peripheral.connect()
+                null
+            }
         }
 
         println()

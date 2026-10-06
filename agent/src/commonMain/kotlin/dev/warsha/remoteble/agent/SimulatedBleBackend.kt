@@ -40,7 +40,7 @@ class SimulatedBleBackend(
 
     // Simulated connected RSSI is derived from the declared advertisement, so it is truthful to
     // advertise. Other optional operations remain unsupported unless a profile model is added.
-    override val capabilities: Set<String> = setOf(Capabilities.RSSI)
+    override val capabilities: Set<String> = setOf(Capabilities.RSSI, Capabilities.SCAN_FIELDS)
 
     // Handles here are the profile's declared `id` strings ([A-Za-z0-9._-], deliberately readable
     // like "sim-hrm-1"), not host radio ids — so this is STRING on every host, exactly like Android.
@@ -62,6 +62,13 @@ class SimulatedBleBackend(
                             name = peripheral.advertisement.name,
                             rssi = peripheral.advertisement.rssi + jitter,
                             serviceUuids = peripheral.advertisement.serviceUuids,
+                            manufacturerData = peripheral.advertisement.manufacturerData
+                                .mapValues { (company, hex) -> hex.decodeHex("manufacturer data for company $company") },
+                            serviceData = peripheral.advertisement.serviceData.entries.associate { (uuid, hex) ->
+                                uuid.canonicalUuid("service data") to hex.decodeHex("service data for '$uuid'")
+                            },
+                            txPower = peripheral.advertisement.txPower,
+                            isConnectable = peripheral.advertisement.connectable,
                         ),
                     )
                 }
@@ -73,6 +80,9 @@ class SimulatedBleBackend(
 
     override suspend fun connect(device: DeviceHandle) {
         val peripheral = peripheral(device)
+        if (!peripheral.advertisement.connectable) {
+            bleError(ErrorKind.CONNECTION_FAILED, message = "simulated device '${device.value}' does not accept connections")
+        }
         val attempt = synchronized(lock) { (attempts[device] ?: 0) + 1 }.also { synchronized(lock) { attempts[device] = it } }
         delay(peripheral.connect.latencyMs.milliseconds)
         if (attempt <= peripheral.connect.failFirst) {

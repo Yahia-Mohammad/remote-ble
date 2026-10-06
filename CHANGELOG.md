@@ -18,8 +18,22 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Added
+
+- **`scan.fields`: service data, Tx power, connectability and the platform's name in scan results.**
+  A backend-level capability carrying four new `AdvertisementDto` fields, gated like `lease.holder`
+  so a client that does not negotiate it receives the v1 advertisement unchanged. Every SDK session
+  offers it, and `RemoteAdvertisement` maps the fields onto Kable's `serviceData(uuid)`, `txPower`,
+  `isConnectable` and `peripheralName`. Both agents advertise it; what each platform reports is in
+  [`docs/agent-conformance-spec.md`](docs/agent-conformance-spec.md) §5.6. Simulation profiles take
+  `serviceData`, `manufacturerData`, `txPower` and `connectable`. Closes #63.
+
 ### Fixed
 
+- The Kotlin agent sends manufacturer data. The field has been in the protocol since 0.8.x and
+  `agent-rs` filled it, but the Kotlin backend left it empty; Android now reads every entry from the
+  raw advertising record.
+- `RemoteAdvertisement.manufacturerData` returns the first entry the agent sent instead of `null`.
 - The Android agent opens as a single screen. An intent that did not match the task's root, such as
   an explicit launch from a shortcut, Android Studio or `adb`, stacked a second screen that showed
   "Stopped" while the first one's agent kept serving.

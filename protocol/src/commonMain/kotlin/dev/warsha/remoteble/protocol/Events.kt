@@ -108,6 +108,14 @@ enum class BleRadioState {
 @Serializable
 enum class BleBondState { NONE, BONDING, BONDED }
 
+/**
+ * One advertisement as the agent's radio received it.
+ *
+ * [serviceData], [txPower], [isConnectable] and [peripheralName] are sent only to a client that
+ * negotiated [Capabilities.SCAN_FIELDS]; every other client gets them at their defaults, which the
+ * codec leaves off the wire. Even when negotiated, each is what the agent's platform reports: absent
+ * where the platform doesn't (btleplug has no connectable flag, for instance).
+ */
 @Serializable
 class AdvertisementDto(
     val device: DeviceHandle, // the handle to use for Connect()
@@ -115,7 +123,38 @@ class AdvertisementDto(
     val rssi: Int,
     val serviceUuids: List<String> = emptyList(),
     val manufacturerData: Map<Int, ByteArray> = emptyMap(),
+    /** Service data, keyed by the full 128-bit service UUID as [serviceUuids] writes it. */
+    val serviceData: Map<String, ByteArray> = emptyMap(),
+    /** The advertised Tx power level, in dBm. */
+    val txPower: Int? = null,
+    /** Whether the advertisement invites a connection. */
+    val isConnectable: Boolean? = null,
+    /** The name the agent's platform remembers for the device, which can differ from the advertised [name]. */
+    val peripheralName: String? = null,
 ) {
+    /** This advertisement with the given fields replaced; the rest, scan fields included, carry over. */
+    fun copy(
+        device: DeviceHandle = this.device,
+        name: String? = this.name,
+        rssi: Int = this.rssi,
+        serviceUuids: List<String> = this.serviceUuids,
+        manufacturerData: Map<Int, ByteArray> = this.manufacturerData,
+        serviceData: Map<String, ByteArray> = this.serviceData,
+        txPower: Int? = this.txPower,
+        isConnectable: Boolean? = this.isConnectable,
+        peripheralName: String? = this.peripheralName,
+    ): AdvertisementDto = AdvertisementDto(
+        device, name, rssi, serviceUuids, manufacturerData, serviceData, txPower, isConnectable, peripheralName,
+    )
+
+    /** This advertisement as a client without [Capabilities.SCAN_FIELDS] receives it. */
+    fun withoutScanFields(): AdvertisementDto =
+        if (serviceData.isEmpty() && txPower == null && isConnectable == null && peripheralName == null) {
+            this
+        } else {
+            copy(serviceData = emptyMap(), txPower = null, isConnectable = null, peripheralName = null)
+        }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is AdvertisementDto) return false
@@ -123,8 +162,11 @@ class AdvertisementDto(
             name == other.name &&
             rssi == other.rssi &&
             serviceUuids == other.serviceUuids &&
-            manufacturerData.keys == other.manufacturerData.keys &&
-            manufacturerData.all { (k, v) -> v.contentEquals(other.manufacturerData[k]) }
+            sameBytes(manufacturerData, other.manufacturerData) &&
+            sameBytes(serviceData, other.serviceData) &&
+            txPower == other.txPower &&
+            isConnectable == other.isConnectable &&
+            peripheralName == other.peripheralName
     }
 
     override fun hashCode(): Int {
@@ -133,10 +175,19 @@ class AdvertisementDto(
         result = 31 * result + rssi
         result = 31 * result + serviceUuids.hashCode()
         result = 31 * result + manufacturerData.entries.sumOf { (k, v) -> k * 31 + v.contentHashCode() }
+        result = 31 * result + serviceData.entries.sumOf { (k, v) -> k.hashCode() * 31 + v.contentHashCode() }
+        result = 31 * result + (txPower ?: 0)
+        result = 31 * result + (isConnectable?.hashCode() ?: 0)
+        result = 31 * result + (peripheralName?.hashCode() ?: 0)
         return result
     }
 
     override fun toString(): String =
         "AdvertisementDto(device=$device, name=$name, rssi=$rssi, " +
-            "serviceUuids=$serviceUuids, manufacturerData=${manufacturerData.keys})"
+            "serviceUuids=$serviceUuids, manufacturerData=${manufacturerData.keys}, " +
+            "serviceData=${serviceData.keys}, txPower=$txPower, isConnectable=$isConnectable, " +
+            "peripheralName=$peripheralName)"
 }
+
+private fun <K> sameBytes(a: Map<K, ByteArray>, b: Map<K, ByteArray>): Boolean =
+    a.keys == b.keys && a.all { (k, v) -> v.contentEquals(b[k]) }

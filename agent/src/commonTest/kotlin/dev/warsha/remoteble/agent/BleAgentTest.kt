@@ -826,6 +826,66 @@ class BleAgentTest {
             .filterIsInstance<AgentEvent.ScanResult>()
             .first { it.scanId == scanId }
 
+    // ---- Scan fields (capability `scan.fields`) ----
+
+    private val fieldsAdvertisement = AdvertisementDto(
+        device = DeviceHandle("FA:KE:0A"),
+        name = "Beacon",
+        rssi = -60,
+        manufacturerData = mapOf(0x004C to byteArrayOf(0x02, 0x15)),
+        serviceData = mapOf("0000feaa-0000-1000-8000-00805f9b34fb" to byteArrayOf(0x10, -0x0c)),
+        txPower = -8,
+        isConnectable = false,
+        peripheralName = "Cached",
+    )
+
+    @Test
+    fun scanFieldsReachOnlyAClientThatNegotiatedThem() = runTest {
+        val backend = FakeBleBackend(advertisements = listOf(fieldsAdvertisement))
+
+        // The v1 baseline: a client that did not ask for them gets the advertisement without them,
+        // since its decoder rejects the whole frame over an unknown key. Manufacturer data is v1.
+        val plain = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.SCAN_FIELDS))
+        plain.sendHello(wanted = emptySet())
+        plain.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(plain.frames.reply(1))
+        assertEquals(fieldsAdvertisement.withoutScanFields(), plain.frames.firstScanResult(7).advertisement)
+
+        val gated = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.SCAN_FIELDS))
+        gated.sendHello(wanted = setOf(Capabilities.SCAN_FIELDS))
+        gated.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(gated.frames.reply(1))
+        assertEquals(fieldsAdvertisement, gated.frames.firstScanResult(7).advertisement)
+    }
+
+    @Test
+    fun batchedScansStripScanFieldsForAClientWithoutThem() = runTest {
+        val backend = FakeBleBackend(advertisements = listOf(fieldsAdvertisement))
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.SCAN_BATCH, Capabilities.SCAN_FIELDS))
+        h.sendHello(wanted = setOf(Capabilities.SCAN_BATCH))
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        val batch = h.frames.filterIsInstance<Event>().map { it.event }
+            .filterIsInstance<AgentEvent.ScanResultBatch>()
+            .first { it.scanId == 7L }
+        assertTrue(batch.advertisements.isNotEmpty())
+        batch.advertisements.forEach { assertEquals(fieldsAdvertisement.withoutScanFields(), it) }
+    }
+
+    @Test
+    fun handleTranslationKeepsTheScanFields() = runTest {
+        val backend = FakeBleBackend(advertisements = listOf(fieldsAdvertisement))
+        val h = Harness(backgroundScope, backend, capabilities = setOf(Capabilities.IDENTIFIER_TRANSLATION, Capabilities.SCAN_FIELDS))
+        h.sendHello(wanted = setOf(Capabilities.IDENTIFIER_TRANSLATION, Capabilities.SCAN_FIELDS), identifierFormat = IdentifierFormat.UUID)
+        h.send(1, Op.ScanStart(scanId = 7))
+        assertIs<OpResult.Ok>(h.frames.reply(1))
+
+        val translated = h.frames.firstScanResult(7).advertisement
+        assertNotEquals(fieldsAdvertisement.device, translated.device, "the handle is rewritten for a UUID client")
+        assertEquals(fieldsAdvertisement.copy(device = translated.device), translated)
+    }
+
     @Test
     fun identifierTranslation_rewritesScanHandleAndRoutesOpsBack() = runTest {
         // A UUID-format client against an agent whose radio mints non-UUID (bluez) handles.

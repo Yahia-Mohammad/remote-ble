@@ -24,6 +24,9 @@ pub mod capabilities {
     pub const AGENT_STATUS: &str = "agent.status";
     pub const WRITE_POLICY: &str = "write.policy";
     pub const LEASE_HOLDER: &str = "lease.holder";
+    /// Backend-level: the advertisement fields beyond the v1 baseline (`serviceData`, `txPower`,
+    /// `isConnectable`, `peripheralName`). Stripped for a client that did not negotiate it.
+    pub const SCAN_FIELDS: &str = "scan.fields";
     pub const SCAN_CONCURRENCY_MULTIPLEXED: &str = "scan.concurrency.multiplexed";
     pub const SCAN_CONCURRENCY_SINGLE: &str = "scan.concurrency.single";
     pub const SCAN_CONCURRENCY_UNCONTROLLED: &str = "scan.concurrency.uncontrolled";

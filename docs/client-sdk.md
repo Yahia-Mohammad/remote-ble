@@ -668,8 +668,23 @@ class RemoteAdvertisement internal constructor(dto: AdvertisementDto) : Advertis
 
 `RemoteScanner.advertisements` is `RemoteScanSource(session).advertisements(filters)`
 mapped into `RemoteAdvertisement`. The crucial field is `handle` — it carries the
-agent-scoped token forward so the scanned device can be connected. Fields the wire
-doesn't model (`txPower`, `isConnectable`, aggregate `manufacturerData`) are `null`.
+agent-scoped token forward so the scanned device can be connected.
+
+Which of Kable's `Advertisement` members carry something:
+
+| Member | Populated |
+|---|---|
+| `name`, `rssi`, `uuids`, `identifier` | always |
+| `manufacturerData(code)` | always, from every entry the agent sent |
+| `manufacturerData` (one company) | the first entry the agent sent, or `null` |
+| `serviceData(uuid)`, `txPower`, `isConnectable` | with `scan.fields`, where the agent's platform reports them; `null` otherwise |
+| `peripheralName` | with `scan.fields`, the platform's remembered name; otherwise, and when it has none, `name` |
+
+Every session offers `scan.fields` (it is in `ALWAYS_OFFERED_CAPABILITIES`), so these arrive from any
+agent whose backend advertises it, with nothing for the caller to opt into. An absent value means
+the agent's platform did not report it, not that the advertisement lacked it; see the
+[conformance spec, §5.6](agent-conformance-spec.md#56-scan-fields-capability-scanfields) for which
+backend reports what.
 
 #### `identifier` across platforms — `deviceHandleToIdentifier`
 

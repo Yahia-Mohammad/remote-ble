@@ -8,6 +8,7 @@ import dev.warsha.remoteble.agent.SimulatedBleBackend
 import dev.warsha.remoteble.agent.SimulationProfile
 import dev.warsha.remoteble.protocol.AdvertisementDto
 import dev.warsha.remoteble.protocol.AgentStatusDto
+import dev.warsha.remoteble.protocol.Capabilities
 import dev.warsha.remoteble.protocol.CborProtocolCodec
 import dev.warsha.remoteble.protocol.CharNode
 import dev.warsha.remoteble.protocol.CharRef
@@ -21,6 +22,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -115,6 +118,43 @@ class BleAgentOverWebSocketTest {
             assertEquals(listOf(listOf<Byte>(0, 60), listOf<Byte>(0, 61)),
                 withTimeout(10.seconds) { peripheral.observe(heartRate).take(2).toList() }.map { it.toList() })
             peripheral.disconnect()
+        } finally {
+            server.stop()
+        }
+        Unit
+    }
+
+    /**
+     * `scan.fields` end to end: an ordinary session (no capabilities listed by the caller) offers it,
+     * the simulated agent fills the fields, and [RemoteAdvertisement] hands them out through Kable's
+     * members.
+     */
+    @OptIn(ExperimentalUuidApi::class)
+    @Test
+    fun scanFieldsReachTheOrdinaryClientThroughKablesAdvertisement() = runBlocking {
+        val profile = SIMULATED_PROFILE.replace(
+            "\"rssi\": -50, \"intervalMs\": 50 }",
+            "\"rssi\": -50, \"intervalMs\": 50, \"serviceData\": { \"feaa\": \"10f4\" }, " +
+                "\"manufacturerData\": { \"76\": \"0215\" }, \"txPower\": -8 }",
+        )
+        val server = AgentWebSocketServer(port = 0, backend = BleAgentBackend(SimulatedBleBackend(SimulationProfile.decode(profile))))
+            .also { it.startAndAwaitReady() }
+        try {
+            val session = DefaultAgentSession(
+                WebSocketAgentTransport("ws://localhost:${server.resolvedPort}/agent", scope, httpClient),
+                CborProtocolCodec(),
+                scope,
+            )
+            withTimeout(10.seconds) { session.transportState.first { it == TransportState.CONNECTED } }
+            assertTrue(Capabilities.SCAN_FIELDS in withTimeout(10.seconds) { session.capabilities.first { it != null } }.orEmpty())
+
+            val advertisement = RemoteAdvertisement(withTimeout(10.seconds) { RemoteScanSource(session).advertisements().first() })
+            assertEquals(listOf<Byte>(0x10, -0x0c), advertisement.serviceData(Uuid.parse("0000feaa-0000-1000-8000-00805f9b34fb"))?.toList())
+            assertEquals(-8, advertisement.txPower)
+            assertEquals(true, advertisement.isConnectable)
+            assertEquals(76, advertisement.manufacturerData?.code)
+            assertEquals(listOf<Byte>(0x02, 0x15), advertisement.manufacturerData(76)?.toList())
+            assertEquals("Sim HRM", advertisement.peripheralName, "the advertised name stands in when the agent has no other")
         } finally {
             server.stop()
         }

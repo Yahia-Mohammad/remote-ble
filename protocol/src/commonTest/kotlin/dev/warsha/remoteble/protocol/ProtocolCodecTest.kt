@@ -341,6 +341,88 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun event_scanResult_withScanFields() {
+        val eddystone = "0000feaa-0000-1000-8000-00805f9b34fb"
+        assertRoundTrips(
+            Event(
+                AgentEvent.ScanResult(
+                    scanId = 7,
+                    advertisement = AdvertisementDto(
+                        device = dev,
+                        rssi = -70,
+                        serviceData = mapOf(eddystone to byteArrayOf(0x10, -0x0c, 0x00), "0000fe2c-0000-1000-8000-00805f9b34fb" to byteArrayOf()),
+                        txPower = -12,
+                        isConnectable = false,
+                        peripheralName = "Cached name",
+                    ),
+                ),
+            ),
+        )
+        // Each field on its own, so an absent neighbour cannot hide a field that fails to round-trip.
+        assertRoundTrips(Event(AgentEvent.ScanResult(7, AdvertisementDto(device = dev, rssi = -70, isConnectable = true))))
+        assertRoundTrips(Event(AgentEvent.ScanResult(7, AdvertisementDto(device = dev, rssi = -70, txPower = 0))))
+        assertRoundTrips(Event(AgentEvent.ScanResultBatch(7, listOf(AdvertisementDto(device = dev, rssi = -70, peripheralName = "N")))))
+    }
+
+    @Test
+    fun copyCarriesTheScanFieldsAndStrippingRemovesOnlyThem() {
+        val full = AdvertisementDto(
+            device = dev,
+            name = "A",
+            rssi = -50,
+            serviceUuids = listOf("180d"),
+            manufacturerData = mapOf(0x004C to byteArrayOf(1)),
+            serviceData = mapOf("0000180d-0000-1000-8000-00805f9b34fb" to byteArrayOf(2)),
+            txPower = 4,
+            isConnectable = true,
+            peripheralName = "B",
+        )
+        val moved = full.copy(device = DeviceHandle("11:22"))
+        assertEquals(full.serviceData.keys, moved.serviceData.keys)
+        assertEquals(listOf<Any?>(4, true, "B"), listOf(moved.txPower, moved.isConnectable, moved.peripheralName))
+
+        assertEquals(
+            AdvertisementDto(device = dev, name = "A", rssi = -50, serviceUuids = listOf("180d"), manufacturerData = mapOf(0x004C to byteArrayOf(1))),
+            full.withoutScanFields(),
+        )
+        val plain = AdvertisementDto(device = dev, rssi = -50)
+        assertTrue(plain.withoutScanFields() === plain, "nothing to strip, nothing copied")
+    }
+
+    /**
+     * Pins the reason [Capabilities.SCAN_FIELDS] is capability-gated, as [anUngatedHolderFieldBreaksAV1Decode]
+     * does for `lease.holder`: a v1 client meeting any scan field fails to decode the whole scan event.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @Test
+    fun ungatedScanFieldsBreakAV1Decode() {
+        val withFields = listOf(
+            AdvertisementDto(device = dev, rssi = -60, serviceData = mapOf("0000feaa-0000-1000-8000-00805f9b34fb" to byteArrayOf(1))),
+            AdvertisementDto(device = dev, rssi = -60, txPower = -4),
+            AdvertisementDto(device = dev, rssi = -60, isConnectable = true),
+            AdvertisementDto(device = dev, rssi = -60, peripheralName = "N"),
+        )
+        for (ad in withFields) {
+            val bytes = Cbor.Default.encodeToByteArray(AdvertisementDto.serializer(), ad)
+            assertFailsWith<SerializationException>("$ad") { Cbor.Default.decodeFromByteArray(V1AdvertisementDto.serializer(), bytes) }
+            // ...and the stripped shape a v1 client actually receives decodes cleanly.
+            val gated = Cbor.Default.encodeToByteArray(AdvertisementDto.serializer(), ad.withoutScanFields())
+            assertEquals(-60, Cbor.Default.decodeFromByteArray(V1AdvertisementDto.serializer(), gated).rssi)
+        }
+    }
+
+    /** `AdvertisementDto` as it stood before `scan.fields`: a stand-in for a 0.14 client's decoder. */
+    @Serializable
+    @SerialName("AdvertisementDto")
+    private class V1AdvertisementDto(
+        val device: DeviceHandle,
+        val name: String? = null,
+        val rssi: Int,
+        val serviceUuids: List<String> = emptyList(),
+        val manufacturerData: Map<Int, ByteArray> = emptyMap(),
+    )
+
+    @Test
     fun event_notification_emptyAndNonEmpty() {
         assertRoundTrips(Event(AgentEvent.Notification(subId = 42, value = byteArrayOf())))
         assertRoundTrips(

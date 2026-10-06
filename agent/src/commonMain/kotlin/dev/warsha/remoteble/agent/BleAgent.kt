@@ -840,12 +840,9 @@ class BleAgent(
             val key = ad.device.value
             ad.name?.let { lastName[key] = it }
             if (ad.serviceUuids.isNotEmpty()) lastUuids[key] = ad.serviceUuids
-            AdvertisementDto(
-                device = ad.device,
+            ad.copy(
                 name = ad.name ?: lastName[key],
-                rssi = ad.rssi,
                 serviceUuids = ad.serviceUuids.ifEmpty { lastUuids[key].orEmpty() },
-                manufacturerData = ad.manufacturerData,
             )
         }
     }
@@ -1188,7 +1185,19 @@ class BleAgent(
 
     // Forward-translate any real handle the event carries into the client's declared format before
     // it goes on the wire (identity when translation isn't active).
-    private suspend fun emit(event: AgentEvent) = outgoing(codec.encode(Event(translator.outgoing(event))))
+    private suspend fun emit(event: AgentEvent) = outgoing(codec.encode(Event(translator.outgoing(withNegotiatedScanFields(event)))))
+
+    /**
+     * [event] as this client may receive it: the `scan.fields` fields stay only if it negotiated
+     * [Capabilities.SCAN_FIELDS], because a v1 decoder rejects the whole frame over an unknown key.
+     * Every scan event, coordinated or not, reaches the client through [emit], so this is the one gate.
+     */
+    private fun withNegotiatedScanFields(event: AgentEvent): AgentEvent = when {
+        Capabilities.SCAN_FIELDS in negotiated -> event
+        event is AgentEvent.ScanResult -> event.copy(advertisement = event.advertisement.withoutScanFields())
+        event is AgentEvent.ScanResultBatch -> event.copy(advertisements = event.advertisements.map { it.withoutScanFields() })
+        else -> event
+    }
 
     private class NotificationOverflowException : Exception()
 

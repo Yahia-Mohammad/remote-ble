@@ -80,6 +80,7 @@ JVM Kotlin agent does not advertise either.
 | `conn.priority` | backend | ✅ | ❌ | ❌ | Match on JVM: Android's `requestConnectionPriority` has no equivalent |
 | `conn.params` | backend | ✅ | ❌ | ❌ | Match on JVM: no interval control |
 | `pairing` | backend | ❌ | ❌ | ❌ | Match — neither advertises |
+| `scan.fields` | backend | ✅ | ✅ | ✅ | **Match** since 0.15.0 — gated identically. Known gap on JVM: the Kotlin agent sends service data only for advertised service UUIDs (Kable offers a lookup, not the map) where the Rust agent sends every entry; neither reports `isConnectable` on btleplug |
 | `radio.state` | backend | ✅ | ❌ | ❌ | Match on JVM: neither observes adapter state there |
 
 See the conformance spec, §5.3, for what "agent" and "backend" level oblige. Agent-level

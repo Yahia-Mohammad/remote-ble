@@ -14,11 +14,12 @@
 //! and mask it back into a `u8`, so we round-trip with the Kotlin client and
 //! tolerate an unsigned peer too.
 
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::{self, DeserializeOwned, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 
 /// `#[serde(with = "signed_bytes")]` for a `Vec<u8>` field.
 pub mod signed_bytes {
@@ -37,13 +38,13 @@ pub mod signed_bytes {
     }
 }
 
-/// `#[serde(with = "signed_bytes_map")]` for a `BTreeMap<i32, Vec<u8>>` field
-/// (e.g. advertisement manufacturer data: integer company id -> bytes).
+/// `#[serde(with = "signed_bytes_map")]` for a `BTreeMap<K, Vec<u8>>` field: advertisement
+/// manufacturer data (integer company id -> bytes) and service data (UUID string -> bytes).
 pub mod signed_bytes_map {
     use super::*;
 
-    pub fn serialize<S: Serializer>(
-        map: &BTreeMap<i32, Vec<u8>>,
+    pub fn serialize<K: Serialize, S: Serializer>(
+        map: &BTreeMap<K, Vec<u8>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let mut m = serializer.serialize_map(Some(map.len()))?;
@@ -53,10 +54,10 @@ pub mod signed_bytes_map {
         m.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub fn deserialize<'de, K: Ord + DeserializeOwned, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<i32, Vec<u8>>, D::Error> {
-        deserializer.deserialize_map(ByteMapVisitor)
+    ) -> Result<BTreeMap<K, Vec<u8>>, D::Error> {
+        deserializer.deserialize_map(ByteMapVisitor(PhantomData))
     }
 }
 
@@ -105,18 +106,18 @@ impl<'de> Visitor<'de> for ByteSeqVisitor {
     }
 }
 
-struct ByteMapVisitor;
+struct ByteMapVisitor<K>(PhantomData<K>);
 
-impl<'de> Visitor<'de> for ByteMapVisitor {
-    type Value = BTreeMap<i32, Vec<u8>>;
+impl<'de, K: Ord + DeserializeOwned> Visitor<'de> for ByteMapVisitor<K> {
+    type Value = BTreeMap<K, Vec<u8>>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a map of integer keys to byte arrays")
+        f.write_str("a map of keys to byte arrays")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut out = BTreeMap::new();
-        while let Some((k, v)) = map.next_entry::<i32, SignedBytesBuf>()? {
+        while let Some((k, v)) = map.next_entry::<K, SignedBytesBuf>()? {
             out.insert(k, v.0);
         }
         Ok(out)

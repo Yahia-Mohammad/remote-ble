@@ -29,6 +29,69 @@ pub struct AdvertisementDto {
         with = "crate::protocol::bytes::signed_bytes_map"
     )]
     pub manufacturer_data: BTreeMap<i32, Vec<u8>>,
+    // The `scan.fields` capability's fields. Each is left off the wire when empty, and the server
+    // empties all four for a client that did not negotiate the capability
+    // (`AdvertisementDto::without_scan_fields`): the Kotlin decoder rejects an unknown key, so a v1
+    // client meeting any of them, even empty, would fail the whole frame.
+    #[serde(
+        default,
+        rename = "serviceData",
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "crate::protocol::bytes::signed_bytes_map"
+    )]
+    pub service_data: BTreeMap<String, Vec<u8>>,
+    #[serde(default, rename = "txPower", skip_serializing_if = "Option::is_none")]
+    pub tx_power: Option<i32>,
+    #[serde(
+        default,
+        rename = "isConnectable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub is_connectable: Option<bool>,
+    #[serde(
+        default,
+        rename = "peripheralName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peripheral_name: Option<String>,
+}
+
+impl AgentEvent {
+    /// This event as a client without the `scan.fields` capability receives it: scan events lose
+    /// those fields, everything else passes through.
+    pub fn without_scan_fields(self) -> Self {
+        match self {
+            AgentEvent::ScanResult {
+                scan_id,
+                advertisement,
+            } => AgentEvent::ScanResult {
+                scan_id,
+                advertisement: advertisement.without_scan_fields(),
+            },
+            AgentEvent::ScanResultBatch {
+                scan_id,
+                advertisements,
+            } => AgentEvent::ScanResultBatch {
+                scan_id,
+                advertisements: advertisements
+                    .into_iter()
+                    .map(AdvertisementDto::without_scan_fields)
+                    .collect(),
+            },
+            other => other,
+        }
+    }
+}
+
+impl AdvertisementDto {
+    /// This advertisement as a client without the `scan.fields` capability receives it.
+    pub fn without_scan_fields(mut self) -> Self {
+        self.service_data.clear();
+        self.tx_power = None;
+        self.is_connectable = None;
+        self.peripheral_name = None;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

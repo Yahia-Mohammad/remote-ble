@@ -213,7 +213,7 @@ impl ScanCoordinator {
             .map(|entry| entry.advertisement.clone())
             .collect();
         for advertisement in replay {
-            if delivery.try_send(advertisement).is_err() {
+            if !delivery.try_send(advertisement) {
                 // A fresh mailbox has capacity for every retained entry. A failure can therefore
                 // only mean its connection is retiring; restore the old logical delivery rather
                 // than publishing a partial replacement.
@@ -416,20 +416,21 @@ fn merge_identity(state: &mut State, raw: AdvertisementDto) -> AdvertisementDto 
         .cache
         .get(&raw.device.value)
         .map(|entry| &entry.advertisement);
+    let name = raw
+        .name
+        .clone()
+        .or_else(|| previous.and_then(|entry| entry.name.clone()));
+    let service_uuids = if raw.service_uuids.is_empty() {
+        previous
+            .map(|entry| entry.service_uuids.clone())
+            .unwrap_or_default()
+    } else {
+        raw.service_uuids.clone()
+    };
     AdvertisementDto {
-        device: raw.device,
-        name: raw
-            .name
-            .or_else(|| previous.and_then(|entry| entry.name.clone())),
-        rssi: raw.rssi,
-        service_uuids: if raw.service_uuids.is_empty() {
-            previous
-                .map(|entry| entry.service_uuids.clone())
-                .unwrap_or_default()
-        } else {
-            raw.service_uuids
-        },
-        manufacturer_data: raw.manufacturer_data,
+        name,
+        service_uuids,
+        ..raw
     }
 }
 
@@ -473,15 +474,14 @@ pub struct ScanDelivery {
 }
 
 impl ScanDelivery {
-    fn try_send(
-        &self,
-        advertisement: AdvertisementDto,
-    ) -> Result<(), mpsc::error::TrySendError<AdvertisementDto>> {
-        let result = self.tx.try_send(advertisement);
-        if result.is_ok() {
+    /// Whether [advertisement] reached the mailbox. A bool rather than tokio's error, which would
+    /// hand the whole advertisement back to callers that only ever ask whether it got there.
+    fn try_send(&self, advertisement: AdvertisementDto) -> bool {
+        let delivered = self.tx.try_send(advertisement).is_ok();
+        if delivered {
             self.wake.notify_one();
         }
-        result
+        delivered
     }
 }
 
@@ -812,6 +812,10 @@ mod tests {
             rssi: -50,
             service_uuids: vec![],
             manufacturer_data: Default::default(),
+            service_data: Default::default(),
+            tx_power: None,
+            is_connectable: None,
+            peripheral_name: None,
         }
     }
     #[test]
@@ -822,6 +826,10 @@ mod tests {
             rssi: -55,
             service_uuids: vec!["180d".into()],
             manufacturer_data: Default::default(),
+            service_data: Default::default(),
+            tx_power: None,
+            is_connectable: None,
+            peripheral_name: None,
         };
         assert!(matches_filters(
             &[
@@ -925,7 +933,7 @@ mod tests {
         let arbiter = ScanArbiter::new(events);
         let (delivery, handle) = arbiter.register_parked(1);
 
-        delivery.try_send(advertisement("replayed")).unwrap();
+        assert!(delivery.try_send(advertisement("replayed")));
         // Give the worker every chance to drain it; a parked mailbox must decline its turn.
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1012,10 +1020,10 @@ mod tests {
         let (first, first_handle) = arbiter.register(1);
         let (second, second_handle) = arbiter.register(2);
         for value in ["a", "b"] {
-            first.try_send(advertisement(value)).unwrap();
+            assert!(first.try_send(advertisement(value)));
         }
         for value in ["c", "d"] {
-            second.try_send(advertisement(value)).unwrap();
+            assert!(second.try_send(advertisement(value)));
         }
         let mut ids = Vec::new();
         for _ in 0..4 {
@@ -1026,7 +1034,7 @@ mod tests {
         }
         assert_eq!(ids, vec![1, 2, 1, 2]);
 
-        first.try_send(advertisement("stale")).unwrap();
+        assert!(first.try_send(advertisement("stale")));
         first_handle.close();
         assert!(
             tokio::time::timeout(Duration::from_millis(20), event_rx.recv())

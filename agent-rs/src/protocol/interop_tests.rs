@@ -325,10 +325,68 @@ fn event_scan_result_manufacturer_data_signed() {
                     rssi: -1,
                     service_uuids: vec![],
                     manufacturer_data: mfg,
+                    service_data: Default::default(),
+                    tx_power: None,
+                    is_connectable: None,
+                    peripheral_name: None,
                 },
             },
         },
     );
+}
+
+/// The `scan.fields` fields as the Kotlin agent emits them: string-keyed service data with a high
+/// (signed) byte, a negative Tx power, a `false` connectable flag and a platform name.
+fn scan_fields_frame() -> Frame {
+    let mut service_data = BTreeMap::new();
+    service_data.insert(
+        "0000feaa-0000-1000-8000-00805f9b34fb".to_string(),
+        vec![0x10, 0xf4],
+    );
+    Frame::Event {
+        event: AgentEvent::ScanResult {
+            scan_id: 7,
+            advertisement: AdvertisementDto {
+                device: dev(),
+                name: None,
+                rssi: -60,
+                service_uuids: vec![],
+                manufacturer_data: BTreeMap::new(),
+                service_data,
+                tx_power: Some(-8),
+                is_connectable: Some(false),
+                peripheral_name: Some("Cached".into()),
+            },
+        },
+    }
+}
+
+#[test]
+fn event_scan_result_carries_the_scan_fields() {
+    assert_kotlin_decodes_to(
+        "9f656576656e74bf656576656e749f6b7363616e2e726573756c74bf667363616e4964076d6164766572746973656d656e74bf66646576696365bf6576616c75657141413a42423a43433a44443a45453a4646ff6472737369383b6b7365727669636544617461bf782430303030666561612d303030302d313030302d383030302d3030383035663962333466629f102bffff677478506f776572276d6973436f6e6e65637461626c65f46e7065726970686572616c4e616d6566436163686564ffffffffff",
+        scan_fields_frame(),
+    );
+}
+
+#[test]
+fn an_advertisement_without_scan_fields_puts_none_of_their_keys_on_the_wire() {
+    // A v1 Kotlin client rejects the whole frame over an unknown key, even an empty one, so a
+    // stripped advertisement must encode exactly as it did before the fields existed.
+    let Frame::Event { event } = scan_fields_frame() else {
+        unreachable!()
+    };
+    let stripped = encode_cbor(&Frame::Event {
+        event: event.without_scan_fields(),
+    })
+    .expect("Rust must encode");
+    let text = String::from_utf8_lossy(&stripped);
+    for key in ["serviceData", "txPower", "isConnectable", "peripheralName"] {
+        assert!(
+            !text.contains(key),
+            "{key} must not reach a client without scan.fields"
+        );
+    }
 }
 
 #[test]

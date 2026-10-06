@@ -102,6 +102,9 @@ class EngineBleBackend(
             add(Capabilities.CONN_PARAMS)
             add(Capabilities.CONN_PRIORITY)
         }
+        // Every Kable platform reports Tx power, a platform name and service data, though not
+        // equally completely: see [advertisementPayload]. Connectability is absent on btleplug.
+        add(Capabilities.SCAN_FIELDS)
     }
 
     // Plain map guarded by a multiplatform lock (kotlinx-atomicfu — java.util.concurrent has no
@@ -175,6 +178,7 @@ class EngineBleBackend(
         // `send` (not `trySend`) applies backpressure so advertisements aren't dropped; the
         // collect ends when this channelFlow's scope is cancelled, which stops the scan.
         scanner.advertisements.collect { advertisement ->
+            val payload = advertisementPayload(advertisement)
             send(
                 AdvertisementDto(
                     device = DeviceHandle(advertisement.identifier.toString()),
@@ -194,6 +198,16 @@ class EngineBleBackend(
                     // but this backend never did, so every Kotlin-agent client saw an empty
                     // service-UUID list and could not filter or identify by service.
                     serviceUuids = advertisement.uuids.map { it.toString() },
+                    // Carried since 0.8.x and populated by `agent-rs`; this backend left it empty.
+                    manufacturerData = payload.manufacturerData,
+                    // The `scan.fields` capability's fields, removed again for a client that did not
+                    // negotiate it (see BleAgent.emit). The platform's cached name goes in its own
+                    // field, never in [name], for the reason above.
+                    serviceData = payload.serviceData,
+                    // Android reports a missing Tx power as Int.MIN_VALUE rather than null.
+                    txPower = advertisement.txPower?.takeIf { it in TX_POWER_RANGE },
+                    isConnectable = advertisement.isConnectable,
+                    peripheralName = advertisement.peripheralName,
                 ),
             )
         }
@@ -629,4 +643,7 @@ class EngineBleBackend(
         /** Client Characteristic Configuration Descriptor UUID — the [checkLiveness] probe of last resort. */
         val CCCD_UUID = Uuid.parse("00002902-0000-1000-8000-00805f9b34fb")
     }
+
+/** Tx power levels an advertisement can carry, in dBm (Core Specification Supplement, Part A, §1.5). */
+private val TX_POWER_RANGE = -127..127
 }

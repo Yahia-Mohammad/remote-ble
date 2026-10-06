@@ -58,7 +58,9 @@ The Rust agent moved from btleplug 0.11.8 to 0.13.4. On macOS it now reports Tx 
 btleplug 0.11 never read from CoreBluetooth, and a device's `name` is its advertised name, or the
 name macOS remembers when it advertises none, rather than both joined as `Cached [Advertised]`.
 The upgrade also brings btleplug's fixes for CoreBluetooth operations that could hang or panic:
-failed discovery, refused subscriptions, concurrent connects, and services that change.
+failed discovery, refused subscriptions, concurrent connects, and services that change. A write
+the device rejects now fails with `WRITE_FAILED` on macOS instead of `TIMEOUT`, and later writes
+on the same connection keep completing; the Kotlin JVM agent still times out there.
 
 ## Simulation profiles
 

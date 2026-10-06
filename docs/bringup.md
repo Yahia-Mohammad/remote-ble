@@ -125,7 +125,7 @@ When prompted: change the readable value, toggle the write-error control on then
 Kable's `Peripheral` ran unchanged against a remote agent — **and** that read/write-with-response
 completion is exact while WWR/notify remain best-effort by BLE design, not by implementation gap.
 
-### The write-error step is a known failure on macOS-hosted btleplug agents
+### The write-error step is a known failure on the macOS Kotlin JVM agent
 
 Confirmed on hardware (Rig A, 2026-07-27) against both desktop agents: btleplug on macOS never
 delivers the completion for a write-with-response that the peripheral answers with an ATT error —
@@ -141,11 +141,20 @@ could reach. Rig D then XPASSed both steps on **Linux/BlueZ** across two runs: `
 delivered correctly and the following write succeeds without a reconnect. So a Linux-hosted
 `agent-rs` or JVM agent was being excused from an expectation it actually meets.
 
+**Narrowed again 2026-10-06: btleplug 0.12 fixed it on CoreBluetooth.** `agent-rs` moved to
+btleplug 0.13.4 for 0.15.0 and passed both steps on macOS in two runs: `WRITE_FAILED` arrives and
+the next write completes without a reconnect. The Kotlin JVM agent still fails them, because it
+runs on the btleplug that Kable bundles. The runner now reads the agent's `agentInfo` from
+`agent.status` and gates only that agent on macOS; after its two expected failures it reconnects
+before observing notifications, since a poisoned connection cannot complete the subscription's
+descriptor write.
+
 Where each backend stands:
 
 | Agent host | Backend | ATT errors | Gate |
 |---|---|---|---|
-| macOS | btleplug / CoreBluetooth | not delivered; poisons the connection | **XFAIL** |
+| macOS, Kotlin JVM agent | Kable's btleplug / CoreBluetooth | not delivered; poisons the connection | **XFAIL** |
+| macOS, `agent-rs` | btleplug 0.13 / CoreBluetooth | delivered; no poisoning (2026-10-06) | ungated |
 | Linux | btleplug / BlueZ | delivered; no poisoning (Rig D, 2026-08-03) | ungated |
 | iOS | Kable native / CoreBluetooth | delivered; no poisoning (Rig B, 2026-07-29) | ungated |
 | Android | Kable native | **unverified** | ungated |

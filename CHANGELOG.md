@@ -41,7 +41,9 @@ protocol version: **1**.
   never read from CoreBluetooth, and names a device by its advertised name, or the remembered name
   when it advertises none, instead of joining both as `Cached [Advertised]`. It also takes btleplug's
   fixes for CoreBluetooth operations that could hang or panic: failed discovery, refused
-  subscriptions, concurrent connects, and services that change.
+  subscriptions, concurrent connects, and services that change. A write the device rejects now
+  fails with `WRITE_FAILED` on macOS instead of timing out, and no longer stops later writes on
+  the connection completing.
 
 ### Fixed
 

@@ -35,6 +35,14 @@ protocol version: **1**.
   [`docs/agent-conformance-spec.md`](docs/agent-conformance-spec.md) §5.6. Simulation profiles take
   `serviceData`, `manufacturerData`, `txPower` and `connectable`. Closes #63.
 
+### Changed
+
+- **`agent-rs` uses btleplug 0.13.4** (from 0.11.8). On macOS it now reports Tx power, which 0.11
+  never read from CoreBluetooth, and names a device by its advertised name, or the remembered name
+  when it advertises none, instead of joining both as `Cached [Advertised]`. It also takes btleplug's
+  fixes for CoreBluetooth operations that could hang or panic: failed discovery, refused
+  subscriptions, concurrent connects, and services that change.
+
 ### Fixed
 
 - The Kotlin agent sends manufacturer data. The field has been in the protocol since 0.8.x and

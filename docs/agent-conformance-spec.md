@@ -357,12 +357,15 @@ absent field as "not reported", never as "false" or "none". Coverage today:
 |---|---|---|---|---|
 | Kotlin, Android | every entry (from the raw record) | ✅ | ✅ | ✅ |
 | Kotlin, iOS and JVM | entries for advertised service UUIDs only | ✅ | iOS ✅, JVM absent | ✅ |
-| Rust (btleplug) | every entry | ✅ | absent | absent |
+| Rust (btleplug) | every entry | ✅ (macOS since btleplug 0.12) | absent | absent |
 | Simulation | as the profile declares | as declared | as declared | absent |
 
 Kable exposes service data on Apple and through btleplug only as a lookup by UUID, so the Kotlin
 agent cannot list entries for UUIDs it was not told about; the Rust agent reads btleplug's map
-directly. Manufacturer data is part of the v1 baseline and is not gated.
+directly. Manufacturer data is part of the v1 baseline and is not gated; the same lookup limit means
+the Kotlin JVM agent sends only the first manufacturer entry (Kable keeps btleplug's map private),
+where Android and the Rust agent send every entry. CoreBluetooth reports a single manufacturer
+entry, so the iOS agent sends all there is.
 
 ## 6. Identifiers
 

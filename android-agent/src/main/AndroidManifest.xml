@@ -36,9 +36,13 @@
         android:allowBackup="false"
         android:label="RemoteBLE Agent"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <!-- singleTask: the running agent belongs to this Activity's AgentViewModel, so a second copy
+             (opened by an explicit or shortcut intent that does not match the task's root) would show
+             "Stopped" beside an agent that is still serving. One instance takes every launch. -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

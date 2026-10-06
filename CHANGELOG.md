@@ -34,6 +34,9 @@ protocol version: **1**.
   `agent-rs` filled it, but the Kotlin backend left it empty; Android now reads every entry from the
   raw advertising record.
 - `RemoteAdvertisement.manufacturerData` returns the first entry the agent sent instead of `null`.
+- The Android agent opens as a single screen. An intent that did not match the task's root, such as
+  an explicit launch from a shortcut, Android Studio or `adb`, stacked a second screen that showed
+  "Stopped" while the first one's agent kept serving.
 
 ## [0.14.2] - 2026-10-05
 

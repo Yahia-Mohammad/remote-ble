@@ -18,6 +18,13 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-06
+
+> Scan results carry more of what the agent's radio received, through one new backend-level
+> capability, `scan.fields`, gated so 0.14 clients and 0.15 agents work together in both directions.
+> The wire protocol version is unchanged at **1**. See
+> [`docs/migrate-to-0.15.0.md`](docs/migrate-to-0.15.0.md).
+
 ### Added
 
 - **`scan.fields`: service data, Tx power, connectability and the platform's name in scan results.**
@@ -950,6 +957,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.15.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.15.0
 [0.14.2]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.2
 [0.14.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.1
 [0.14.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.0

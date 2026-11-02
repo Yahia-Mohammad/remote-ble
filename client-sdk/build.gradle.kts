@@ -117,12 +117,12 @@ kotlin {
     }
 }
 
-// The rapid-session-churn harness is a *reproduction* for an unfixed intermittent defect
-// (issue #12), not a regression test: when it fails it is reporting that the bug it hunts appeared,
-// which is indistinguishable — to anyone reading a red build — from something in this change having
-// regressed. It has its own CI job (`Rapid session churn`, dispatch/schedule only), and gating that
-// job alone proved insufficient: `conformanceTest` depends on `:client-sdk:jvmTest`, so the harness
-// still ran on every push and duly failed a release candidate on 2026-08-18.
+// The rapid-session-churn harness reproduces an intermittent race (issue #12, fixed 2026-11-02 by
+// the duplicate-session handover grace) that only a loaded two-core runner hits, so one pass in a
+// push build proves little and a failure there would be read as this change's fault. It has its
+// own CI job (`Rapid session churn`, dispatch/schedule only, looped), and gating that job alone
+// proved insufficient: `conformanceTest` depends on `:client-sdk:jvmTest`, so the harness still ran
+// on every push and duly failed a release candidate on 2026-08-18.
 //
 // Opt in with `-Premoteble.churnHarness=true`, which is what that job passes.
 tasks.named<Test>("jvmTest") {

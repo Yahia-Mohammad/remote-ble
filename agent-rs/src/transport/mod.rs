@@ -3,3 +3,4 @@ pub mod negotiation;
 pub mod pairing;
 pub mod scan_coordinator;
 pub mod server;
+mod upgrade_request;

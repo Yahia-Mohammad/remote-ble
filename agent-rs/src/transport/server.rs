@@ -32,6 +32,7 @@ use crate::transport::negotiation::{
     HelloRequest, Negotiation, ProtocolVersionSelection, select_protocol_version,
 };
 use crate::transport::scan_coordinator::{ScanAdmission, ScanArbiter, ScanCoordinator};
+use crate::transport::upgrade_request;
 
 pub use crate::transport::scan_coordinator::ScanConcurrencyMode;
 
@@ -472,34 +473,91 @@ fn supported_capabilities(
     backend_capabilities
 }
 
+/// An authenticated upgrade request, before the duplicate-session gate.
+struct Admission {
+    session_key: String,
+    operator_scope: bool,
+}
+
+/// How long a new upgrade waits for the incumbent session of the same identity to release before
+/// it is refused as a duplicate. Matches the JVM agent's `LiveSessionRegistry.HANDOVER_GRACE`.
+const HANDOVER_GRACE: Duration = Duration::from_secs(2);
+
 /// Allows exactly one live WebSocket generation for each authenticated stable client identity.
 /// The generation token makes release safe even if a future policy replaces an active socket.
+///
+/// [Self::acquire] waits up to [HANDOVER_GRACE] for an incumbent to release before refusing. A
+/// client that closes one session and opens the next is not a duplicate, but its new upgrade can
+/// reach the gate before the agent has retired the old socket, and an immediate refusal turned
+/// that ordinary reconnect into `REMOTE_BLE_DUPLICATE_SESSION` (#12). A socket that is genuinely
+/// still live never releases, so it is still refused, just [HANDOVER_GRACE] later.
 #[derive(Default)]
 struct LiveSessionRegistry {
-    generations: parking_lot::Mutex<HashMap<String, u64>>,
+    sessions: parking_lot::Mutex<HashMap<String, LiveSession>>,
+}
+
+struct LiveSession {
+    generation: u64,
+    /// Never sent on. Dropping it on release wakes every upgrade waiting for this identity.
+    released: tokio::sync::watch::Sender<()>,
 }
 
 impl LiveSessionRegistry {
-    fn try_acquire(&self, client_id: &str, generation: u64) -> bool {
-        let mut generations = self.generations.lock();
-        if generations.contains_key(client_id) {
-            return false;
+    async fn acquire(&self, client_id: &str, generation: u64, grace: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + grace;
+        while let Some(mut incumbent) = self.claim_or_incumbent(client_id, generation) {
+            // Closed means released. Another upgrade for the same identity may claim it first,
+            // so loop and try again rather than assume the slot is ours.
+            if tokio::time::timeout_at(deadline, incumbent.changed())
+                .await
+                .is_err()
+            {
+                return false;
+            }
         }
-        generations.insert(client_id.to_string(), generation);
         true
     }
 
+    #[cfg(test)]
+    fn try_acquire(&self, client_id: &str, generation: u64) -> bool {
+        self.claim_or_incumbent(client_id, generation).is_none()
+    }
+
+    /// Claims `client_id` for `generation` and returns `None`, or returns a receiver that closes
+    /// when the incumbent releases. Subscribing under the lock means no release can be missed.
+    fn claim_or_incumbent(
+        &self,
+        client_id: &str,
+        generation: u64,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        let mut sessions = self.sessions.lock();
+        if let Some(incumbent) = sessions.get(client_id) {
+            return Some(incumbent.released.subscribe());
+        }
+        sessions.insert(
+            client_id.to_string(),
+            LiveSession {
+                generation,
+                released: tokio::sync::watch::Sender::new(()),
+            },
+        );
+        None
+    }
+
     fn release(&self, client_id: &str, generation: u64) {
-        let mut generations = self.generations.lock();
-        if generations.get(client_id) == Some(&generation) {
-            generations.remove(client_id);
+        let mut sessions = self.sessions.lock();
+        if sessions
+            .get(client_id)
+            .is_some_and(|session| session.generation == generation)
+        {
+            sessions.remove(client_id);
         }
     }
 
     /// How many client sessions are live right now, across every principal — what `agent.status`
     /// reports. One entry per admitted identity, which is exactly one live socket each.
     fn len(&self) -> usize {
-        self.generations.lock().len()
+        self.sessions.lock().len()
     }
 }
 
@@ -871,109 +929,65 @@ impl AgentServer {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let mut client_id = format!("anon-{}", peer_addr);
-        let mut principal = None;
         let mut session_generation = None;
         let mut operator_scope = false;
 
-        let callback = |req: &Request,
-                        response: Response|
-         -> Result<Response, http::Response<Option<String>>> {
-            principal = authenticate(
-                credentials.as_ref(),
-                revoked_principals.as_ref(),
-                req.headers()
-                    .get("Authorization")
-                    .and_then(|header| header.to_str().ok()),
-            );
-
-            // Optional second credential, widening only what `agent.status` discloses. A missing
-            // or wrong value is deliberately NOT a rejection: the session proceeds at normal scope
-            // and says so in its status reply, so a client that asked for operator-only fields
-            // without the secret can tell that apart from an unreachable agent. A *wrong* value is
-            // still a guess at the operator secret, so it is rate-limited like any other.
-            if let Some(expected) = operator_token.as_deref() {
-                let offered = req
-                    .headers()
-                    .get(OPERATOR_HEADER)
-                    .and_then(|header| header.to_str().ok())
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .filter(|value| !value.is_empty());
-                if let Some(offered) = offered {
-                    operator_scope = constant_time_eq(expected, offered);
-                    if !operator_scope {
-                        let decision = failed_auth_limiter.record_failure(peer_addr.ip());
-                        if decision.should_log {
-                            tracing::warn!(
-                                "operator scope refused for {}: bad credential",
-                                peer_addr
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Some(cid_hdr) = req.headers().get("X-RemoteBle-Client")
-                && let Ok(str_val) = cid_hdr.to_str()
-            {
-                client_id = str_val.to_string();
-            }
-
-            let Some(principal) = principal.as_deref() else {
-                let decision = failed_auth_limiter.record_failure(peer_addr.ip());
-                if decision.should_log {
-                    tracing::warn!(
-                        "client rejected from {}: {}",
+        // Admission runs before the handshake instead of in tungstenite's callback: the
+        // duplicate-session gate may have to wait for an incumbent to finish retiring, and the
+        // callback cannot await. The deadline covers that wait as well as the request itself.
+        let upgrade = tokio::time::timeout(UPGRADE_TIMEOUT, async {
+            let (stream, request) = upgrade_request::read_upgrade_request(stream).await?;
+            let mut verdict = None;
+            if let Some(request) = request {
+                verdict = Some(
+                    match Self::admit(
+                        &request,
                         peer_addr,
-                        if decision.allowed {
-                            "unauthorized"
-                        } else {
-                            "authentication rate limited"
+                        &credentials,
+                        &revoked_principals,
+                        operator_token.as_deref(),
+                        &failed_auth_limiter,
+                    ) {
+                        Err(rejected) => Err(rejected),
+                        Ok(admitted) => {
+                            client_id = admitted.session_key;
+                            operator_scope = admitted.operator_scope;
+                            let generation =
+                                NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed);
+                            if live_sessions
+                                .acquire(&client_id, generation, HANDOVER_GRACE)
+                                .await
+                            {
+                                session_generation = Some(generation);
+                                Ok(())
+                            } else {
+                                tracing::warn!(
+                                    "client rejected from {}: duplicate live session",
+                                    peer_addr
+                                );
+                                Err(http::Response::builder()
+                                    .status(409)
+                                    .body(Some(DUPLICATE_SESSION_CLOSE_REASON.to_string()))
+                                    .unwrap())
+                            }
                         }
-                    );
-                }
-                let rejected = http::Response::builder()
-                    .status(if decision.allowed { 401 } else { 429 })
-                    .body(Some(
-                        if decision.allowed {
-                            "Unauthorized"
-                        } else {
-                            "Too Many Requests"
-                        }
-                        .to_string(),
-                    ))
-                    .unwrap();
-                return Err(rejected);
+                    },
+                );
+            }
+            // tungstenite parses the bytes just read again, so it calls back only with the request
+            // admitted above; without one it fails the handshake before reaching the callback.
+            let callback = move |_: &Request, response: Response| match verdict {
+                Some(Ok(())) => Ok(response),
+                Some(Err(rejected)) => Err(rejected),
+                None => Err(http::Response::builder().status(400).body(None).unwrap()),
             };
-            if client_id.trim().is_empty() || client_id.len() > 128 || client_id.contains('\0') {
-                let rejected = http::Response::builder()
-                    .status(400)
-                    .body(Some("Invalid X-RemoteBle-Client".to_string()))
-                    .unwrap();
-                return Err(rejected);
-            }
-            client_id = session_key(principal, &client_id);
-            let generation = NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed);
-            if !live_sessions.try_acquire(&client_id, generation) {
-                tracing::warn!("client rejected from {}: duplicate live session", peer_addr);
-                let rejected = http::Response::builder()
-                    .status(409)
-                    .body(Some(DUPLICATE_SESSION_CLOSE_REASON.to_string()))
-                    .unwrap();
-                return Err(rejected);
-            }
-            session_generation = Some(generation);
-
-            Ok(response)
-        };
-
-        let upgrade = tokio::time::timeout(
-            UPGRADE_TIMEOUT,
             tokio_tungstenite::accept_hdr_async_with_config(
                 stream,
                 callback,
                 Some(websocket_config()),
-            ),
-        )
+            )
+            .await
+        })
         .await;
         match upgrade {
             Ok(Ok(ws_stream)) => {
@@ -1013,6 +1027,95 @@ impl AgentServer {
                 tracing::debug!("upgrade request from {} timed out", peer_addr);
             }
         }
+    }
+
+    /// Decides everything about an upgrade request that the request alone settles: who the
+    /// caller is, whether operator scope applies, and the session key it would hold. Only the
+    /// duplicate-session gate, which may have to wait, is left to the caller.
+    #[allow(clippy::result_large_err)]
+    fn admit(
+        req: &Request,
+        peer_addr: SocketAddr,
+        credentials: &HashMap<String, String>,
+        revoked_principals: &parking_lot::Mutex<HashSet<String>>,
+        operator_token: Option<&str>,
+        failed_auth_limiter: &AuthFailureLimiter,
+    ) -> Result<Admission, http::Response<Option<String>>> {
+        let principal = authenticate(
+            credentials,
+            revoked_principals,
+            req.headers()
+                .get("Authorization")
+                .and_then(|header| header.to_str().ok()),
+        );
+
+        // Optional second credential, widening only what `agent.status` discloses. A missing
+        // or wrong value is deliberately NOT a rejection: the session proceeds at normal scope
+        // and says so in its status reply, so a client that asked for operator-only fields
+        // without the secret can tell that apart from an unreachable agent. A *wrong* value is
+        // still a guess at the operator secret, so it is rate-limited like any other.
+        let mut operator_scope = false;
+        if let Some(expected) = operator_token {
+            let offered = req
+                .headers()
+                .get(OPERATOR_HEADER)
+                .and_then(|header| header.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .filter(|value| !value.is_empty());
+            if let Some(offered) = offered {
+                operator_scope = constant_time_eq(expected, offered);
+                if !operator_scope {
+                    let decision = failed_auth_limiter.record_failure(peer_addr.ip());
+                    if decision.should_log {
+                        tracing::warn!("operator scope refused for {}: bad credential", peer_addr);
+                    }
+                }
+            }
+        }
+
+        let client_id = req
+            .headers()
+            .get("X-RemoteBle-Client")
+            .and_then(|header| header.to_str().ok())
+            .map_or_else(|| format!("anon-{}", peer_addr), str::to_string);
+
+        let Some(principal) = principal.as_deref() else {
+            let decision = failed_auth_limiter.record_failure(peer_addr.ip());
+            if decision.should_log {
+                tracing::warn!(
+                    "client rejected from {}: {}",
+                    peer_addr,
+                    if decision.allowed {
+                        "unauthorized"
+                    } else {
+                        "authentication rate limited"
+                    }
+                );
+            }
+            let rejected = http::Response::builder()
+                .status(if decision.allowed { 401 } else { 429 })
+                .body(Some(
+                    if decision.allowed {
+                        "Unauthorized"
+                    } else {
+                        "Too Many Requests"
+                    }
+                    .to_string(),
+                ))
+                .unwrap();
+            return Err(rejected);
+        };
+        if client_id.trim().is_empty() || client_id.len() > 128 || client_id.contains('\0') {
+            let rejected = http::Response::builder()
+                .status(400)
+                .body(Some("Invalid X-RemoteBle-Client".to_string()))
+                .unwrap();
+            return Err(rejected);
+        }
+        Ok(Admission {
+            session_key: session_key(principal, &client_id),
+            operator_scope,
+        })
     }
 
     #[allow(dead_code)]
@@ -2087,6 +2190,53 @@ mod tests {
         assert!(sessions.try_acquire(&client, 3));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn acquire_waits_for_a_releasing_incumbent_and_refuses_a_live_one() {
+        let sessions = Arc::new(LiveSessionRegistry::default());
+        let client = session_key("alpha", "same-client");
+        assert!(sessions.acquire(&client, 1, HANDOVER_GRACE).await);
+
+        let releasing = sessions.clone();
+        let handover_client = client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(HANDOVER_GRACE / 2).await;
+            releasing.release(&handover_client, 1);
+        });
+        let started = tokio::time::Instant::now();
+        assert!(sessions.acquire(&client, 2, HANDOVER_GRACE).await);
+        assert_eq!(started.elapsed(), HANDOVER_GRACE / 2);
+
+        let started = tokio::time::Instant::now();
+        assert!(!sessions.acquire(&client, 3, HANDOVER_GRACE).await);
+        assert_eq!(started.elapsed(), HANDOVER_GRACE);
+        // The refused attempt left the incumbent in place.
+        assert!(!sessions.try_acquire(&client, 4));
+        sessions.release(&client, 2);
+        assert!(sessions.try_acquire(&client, 4));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_reconnects_waiting_on_one_release_admit_exactly_one() {
+        let sessions = Arc::new(LiveSessionRegistry::default());
+        let client = session_key("alpha", "same-client");
+        assert!(sessions.try_acquire(&client, 1));
+
+        let waiters = [2, 3].map(|generation| {
+            let sessions = sessions.clone();
+            let client = client.clone();
+            tokio::spawn(async move { sessions.acquire(&client, generation, HANDOVER_GRACE).await })
+        });
+        tokio::time::sleep(HANDOVER_GRACE / 4).await;
+        sessions.release(&client, 1);
+
+        let mut admitted = 0;
+        for waiter in waiters {
+            admitted += usize::from(waiter.await.unwrap());
+        }
+        assert_eq!(admitted, 1);
+        assert_eq!(sessions.len(), 1);
+    }
+
     #[test]
     fn stream_reservations_cap_new_ids_and_allow_replacement() {
         let streams = StreamReservations::default();
@@ -2202,8 +2352,8 @@ mod tests {
     }
 
     /// LEASE-DUPLICATE-01 (operational): a second live generation for the same
-    /// `(principal, stable client id)` is refused pre-upgrade with HTTP 409, and the incumbent's
-    /// generation is left untouched. Drives `AgentServer::accept_connection` — the exact
+    /// `(principal, stable client id)` is refused pre-upgrade with HTTP 409 once the incumbent has
+    /// failed to release within [HANDOVER_GRACE], and the incumbent's generation is left untouched. Drives `AgentServer::accept_connection` — the exact
     /// handshake path `run()` uses for every accepted socket — over two in-memory duplex pairs so
     /// no real TCP port is required. See docs/conformance/0.9.1-scenarios.md for the Kotlin
     /// counterpart (`WebSocketEndToEndTest.rejectsASecondLiveSocketForTheSameStableClientIdentity`),
@@ -2288,6 +2438,69 @@ mod tests {
         second_accept
             .await
             .expect("second connection task must not panic");
+    }
+
+    /// A client that closes one session and opens the next under the same stable identity is not
+    /// a duplicate, even when the new upgrade reaches the gate before the agent has finished
+    /// retiring the old socket. Without a handover wait this refused the reconnect with 409, the
+    /// Rust side of #12, which the JVM agent's `RapidSessionChurnTest` reproduces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_right_after_close_is_not_a_duplicate_session() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        const CHURN_ROUNDS: usize = 25;
+        let backend: Arc<dyn BleBackend> = Arc::new(FakeBackend::default());
+        let registry = PeripheralRegistry::new(LeaseConfig::default());
+        let credentials = Arc::new(HashMap::from([(
+            "alpha".to_string(),
+            "secret-a".to_string(),
+        )]));
+        let strict = Arc::new(AtomicBool::new(false));
+        let live_sessions = Arc::new(LiveSessionRegistry::default());
+        let failed_auth_limiter = Arc::new(AuthFailureLimiter::default());
+        let revoked_principals = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+        let request = || {
+            let mut request = "ws://localhost/agent".into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Authorization", "Bearer secret-a".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("X-RemoteBle-Client", "device-1".parse().unwrap());
+            request
+        };
+
+        let mut accepts = Vec::new();
+        for round in 0..CHURN_ROUNDS {
+            let (server_io, client_io) = tokio::io::duplex(4096);
+            let peer: SocketAddr = format!("127.0.0.1:{}", round + 1).parse().unwrap();
+            accepts.push(tokio::spawn(AgentServer::accept_connection(
+                server_io,
+                peer,
+                backend.clone(),
+                registry.clone(),
+                credentials.clone(),
+                strict.clone(),
+                live_sessions.clone(),
+                failed_auth_limiter.clone(),
+                revoked_principals.clone(),
+                None,
+            )));
+            let (mut client, _) = tokio_tungstenite::client_async(request(), client_io)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("round {round}: a reconnect after close was refused: {error:?}")
+                });
+            // Close and go straight on to the next upgrade, as a churning client does, without
+            // waiting for the agent to retire this socket.
+            client.close(None).await.expect("close frame must send");
+        }
+
+        for accept in accepts {
+            accept.await.expect("connection task must not panic");
+        }
+        assert_eq!(live_sessions.len(), 0);
     }
 
     async fn send_command<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>, cid: i64, op: Op)

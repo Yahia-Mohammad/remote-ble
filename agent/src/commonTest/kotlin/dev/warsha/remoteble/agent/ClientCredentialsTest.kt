@@ -6,6 +6,12 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 
 class ClientCredentialsTest {
     @Test
@@ -42,16 +48,48 @@ class ClientCredentialsTest {
     }
 
     @Test
-    fun liveSessionReleaseCannotRetireANewerGeneration() {
+    fun liveSessionReleaseCannotRetireANewerGeneration() = runTest {
         val sessions = LiveSessionRegistry()
         val key = ClientCredentials.sessionKey("alpha", "same-client")
 
-        assertTrue(sessions.tryAcquire(key, generation = 1))
-        assertFalse(sessions.tryAcquire(key, generation = 2))
+        assertTrue(sessions.acquire(key, generation = 1))
+        assertFalse(sessions.acquire(key, generation = 2))
         sessions.release(key, generation = 2)
-        assertFalse(sessions.tryAcquire(key, generation = 3))
+        assertFalse(sessions.acquire(key, generation = 3))
         sessions.release(key, generation = 1)
-        assertTrue(sessions.tryAcquire(key, generation = 3))
+        assertTrue(sessions.acquire(key, generation = 3))
+    }
+
+    @Test
+    fun aReconnectWaitsForThePreviousGenerationToRelease() = runTest {
+        val sessions = LiveSessionRegistry(handoverGrace = 2.seconds)
+        val key = ClientCredentials.sessionKey("alpha", "same-client")
+        assertTrue(sessions.acquire(key, generation = 1))
+
+        // The new upgrade arrives before the agent has processed the old session's close.
+        val reconnect = async { sessions.acquire(key, generation = 2) }
+        advanceTimeBy(500.milliseconds)
+        assertFalse(reconnect.isCompleted)
+        sessions.release(key, generation = 1)
+
+        assertTrue(reconnect.await())
+        assertEquals(500, testScheduler.currentTime, "admitted on release, not at the end of the grace")
+        assertFalse(sessions.acquire(key, generation = 3), "generation 2 now holds the identity")
+        assertEquals(2_500, testScheduler.currentTime, "a live incumbent is refused after the full grace")
+    }
+
+    @Test
+    fun onlyOneOfTwoWaitingReconnectsTakesTheReleasedIdentity() = runTest {
+        val sessions = LiveSessionRegistry(handoverGrace = 2.seconds)
+        val key = ClientCredentials.sessionKey("alpha", "same-client")
+        assertTrue(sessions.acquire(key, generation = 1))
+
+        val second = async { sessions.acquire(key, generation = 2) }
+        val third = async { sessions.acquire(key, generation = 3) }
+        runCurrent()
+        sessions.release(key, generation = 1)
+
+        assertEquals(listOf(true, false), listOf(second.await(), third.await()))
     }
 
     @Test

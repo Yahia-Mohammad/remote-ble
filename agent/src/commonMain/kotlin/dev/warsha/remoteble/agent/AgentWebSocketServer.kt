@@ -262,7 +262,7 @@ class AgentWebSocketServer(
                             }
                             accepted
                         } ?: false
-                    if (!liveSessions.tryAcquire(clientKey, clientId)) {
+                    if (!liveSessions.acquire(clientKey, clientId)) {
                         Logger.warn(LogTags.SERVER) { "client rejected: duplicate live session [c=$clientId]" }
                         close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, DUPLICATE_SESSION_CLOSE_REASON))
                         return@webSocket
@@ -498,19 +498,53 @@ internal fun Throwable.rootCause(): Throwable {
 
 private const val MAX_CAUSE_DEPTH = 16
 
-/** Tracks the one live WebSocket generation permitted for each stable client identity. */
-internal class LiveSessionRegistry {
+/**
+ * Tracks the one live WebSocket generation permitted for each stable client identity.
+ *
+ * [acquire] waits up to [handoverGrace] for an incumbent to release before refusing. A client that
+ * closes one session and opens the next is not a duplicate, but its new upgrade can reach the route
+ * before the agent has processed the old close, and an immediate refusal turned that ordinary
+ * reconnect into `REMOTE_BLE_DUPLICATE_SESSION` (#12, reproduced by `RapidSessionChurnTest` on two
+ * cores). A socket that is genuinely still live never releases, so it is still refused, just
+ * [handoverGrace] later.
+ */
+internal class LiveSessionRegistry(private val handoverGrace: Duration = HANDOVER_GRACE) {
     private val lock = SynchronizedObject()
-    private val generations = mutableMapOf<String, Long>()
+    private val holders = mutableMapOf<String, Holder>()
 
-    fun tryAcquire(clientKey: String, generation: Long): Boolean = synchronized(lock) {
-        if (clientKey in generations) return false
-        generations[clientKey] = generation
-        true
+    private class Holder(val generation: Long) {
+        val released = CompletableDeferred<Unit>()
+    }
+
+    suspend fun acquire(clientKey: String, generation: Long): Boolean {
+        var incumbent = claimOrIncumbent(clientKey, generation) ?: return true
+        return withTimeoutOrNull(handoverGrace) {
+            while (true) {
+                incumbent.released.await()
+                // Another waiter for the same identity may have claimed it first.
+                incumbent = claimOrIncumbent(clientKey, generation) ?: break
+            }
+            true
+        } ?: false
     }
 
     fun release(clientKey: String, generation: Long): Unit = synchronized(lock) {
-        if (generations[clientKey] == generation) generations.remove(clientKey)
+        val holder = holders[clientKey]
+        if (holder?.generation == generation) {
+            holders.remove(clientKey)
+            holder.released.complete(Unit)
+        }
+    }
+
+    /** Claims [clientKey] for [generation] and returns null, or returns whoever holds it. */
+    private fun claimOrIncumbent(clientKey: String, generation: Long): Holder? = synchronized(lock) {
+        val holder = holders[clientKey]
+        if (holder == null) holders[clientKey] = Holder(generation)
+        holder
+    }
+
+    companion object {
+        val HANDOVER_GRACE: Duration = 2.seconds
     }
 }
 

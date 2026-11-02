@@ -173,10 +173,10 @@ suites execute natively on an Apple target on every push.
 
 ## The test suite
 
-**Counts as of 2026-10-06 (0.15.0):** `:protocol` 68 (run on the JVM, the iOS simulator and
-macOS), `:log` 14, `:agent` 246 on the JVM and 198 as Android host tests (largely the same
+**Counts as of 2026-11-02 (0.15.1):** `:protocol` 68 (run on the JVM, the iOS simulator and
+macOS), `:log` 14, `:agent` 248 on the JVM and 200 as Android host tests (largely the same
 `commonTest`), `:client-sdk` 124 on the JVM, 8 Android host and 6 on Apple, `:client-ui` 34 Android
-host; `agent-rs` 213. The tables name the main suites; the end-to-end tests stand up a real agent
+host; `agent-rs` 219. The tables name the main suites; the end-to-end tests stand up a real agent
 via the test-only `:client-sdk → :agent` dependency.
 
 | Module | Suite | Tests | What it proves |

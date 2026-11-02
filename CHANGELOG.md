@@ -18,6 +18,13 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-02
+
+> A patch release for both agents: a quick reconnect is no longer refused as a duplicate session,
+> and the Rust agent picks up TLS and runtime security fixes. The client SDK, its API and the wire
+> protocol (version **1**) are unchanged; Maven Central gets 0.15.1 so the SDK and agents keep one
+> version.
+
 ### Fixed
 
 - **A quick reconnect is no longer refused as a duplicate session (#12).** A client that closed one
@@ -986,6 +993,7 @@ protocol version: **1**.
 - A normative, language-agnostic conformance spec
   ([docs/agent-conformance-spec.md](docs/agent-conformance-spec.md)).
 
+[0.15.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.15.1
 [0.15.0]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.15.0
 [0.14.2]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.2
 [0.14.1]: https://github.com/Yahia-Mohammad/remote-ble/releases/tag/v0.14.1

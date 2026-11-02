@@ -12,7 +12,8 @@ use Kable.
 For quickstart/build commands see [`../README.md`](../README.md).
 
 Release scope is tracked separately from this implementation reference. The current release is
-**0.15.0** — see [`migrate-to-0.15.0.md`](migrate-to-0.15.0.md) for what it adds;
+**0.15.1**, a patch release of agent fixes with nothing to migrate (see the
+[changelog](../CHANGELOG.md)); [`migrate-to-0.15.0.md`](migrate-to-0.15.0.md) covers what 0.15 adds;
 [`migrate-to-0.14.0.md`](migrate-to-0.14.0.md) covers the 0.14 line (0.14.0 and 0.14.1 were never
 published to Maven Central, so 0.14.2 is its release), and
 [`migrate-to-0.13.0.md`](migrate-to-0.13.0.md) for the line before it;

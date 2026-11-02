@@ -113,7 +113,7 @@ The client SDK is published to **Maven Central** as `dev.warsha.remoteble:client
 ```kotlin
 // build.gradle.kts — commonMain for a KMP app, or a JVM/Android source set
 dependencies {
-    implementation("dev.warsha.remoteble:client-sdk:0.15.0")
+    implementation("dev.warsha.remoteble:client-sdk:0.15.1")
 }
 ```
 
@@ -427,7 +427,7 @@ The full op-set live runner is `:e2e-runner:jvmRun` (needs a phone peripheral).
 ## Status
 
 0.10.0 shipped on 2026-08-04, 0.11.0 on 2026-08-10, 0.12.0 on 2026-08-18 and 0.13.0 on 2026-09-29,
-each with a tag, GitHub Release, GHCR image and Maven Central. **0.15.0 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
+each with a tag, GitHub Release, GHCR image and Maven Central. **0.15.1 is the current line.** App logic written purely against Kable's `Peripheral`/`Scanner` API runs
 unchanged against a `RemotePeripheral` talking to an agent over WebSocket — connect, discover,
 read, write, observe (notify), scan, and reconnect. (The radio-less simulated agent proves the
 complete socket path in automated tests; capabilities are listed under [Features](#features) above.)
@@ -437,6 +437,10 @@ TLS reverse proxy, and a Linux container host. Per-case results, including the d
 found, are in [`docs/`](docs/). One boundary is worth stating plainly rather than leaving to the
 detail: the container was validated on **one amd64 Linux host**, so arm64, AppArmor,
 SELinux-enforcing and rootless Podman are *not* covered, and the image is labelled accordingly.
+
+0.15.1 fixes a quick reconnect being refused as a duplicate session, in both agents, and updates
+the Rust agent's TLS and runtime dependencies for security advisories. Nothing else changes; see
+the [changelog](CHANGELOG.md).
 
 0.15.0 forwards more of each advertisement: service data, Tx power, connectability and the
 platform's remembered name reach a client through the new `scan.fields` capability, and Kotlin

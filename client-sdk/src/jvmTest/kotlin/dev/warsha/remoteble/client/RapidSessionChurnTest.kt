@@ -44,10 +44,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * It is deliberately not asserting timing. It asserts that every session completes its handshake;
  * a failure prints which iteration dropped and how many preceded it.
  *
+ * Cause, found 2026-11-02 in a two-CPU container (2 of 10 runs): the agent refused session N+1 as
+ * `REMOTE_BLE_DUPLICATE_SESSION` because session N's close had not been processed yet, so the
+ * stable identity was still held. That rejection logs at warn, unlike the INFO-only acceptance logs
+ * described above. `LiveSessionRegistry` now waits for the incumbent to release; 20 runs on the same
+ * two CPUs passed after the fix.
+ *
  * NOTE: this passes on an unloaded developer machine -- 80 sessions in about a second -- and
- * saturating every core does not change that, so the scheduler alone is not the trigger. It needs
- * the two-core CI runner to be useful, which is why it belongs in a job there rather than in a
- * local-only investigation.
+ * saturating every core does not change that, so the scheduler alone is not the trigger. To run it
+ * locally, cap the JVM at two CPUs (a container with `--cpus=2` reproduced it).
  */
 class RapidSessionChurnTest {
 

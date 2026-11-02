@@ -184,14 +184,15 @@ jobs:
 
   session-churn:
     name: Rapid session churn (repro harness)
-    # Deliberately not a pull-request gate. This harness reproduces an *unfixed* intermittent
-    # defect — short-lived sessions whose handshake never completes — so wiring it into every PR
-    # would block unrelated work precisely when it succeeds. It runs on demand and weekly instead.
+    # Guards the fix for #12: a reconnect that reached the duplicate-session gate before the agent
+    # had processed its predecessor's close was refused as REMOTE_BLE_DUPLICATE_SESSION. The
+    # registry now waits for the incumbent to release, so a red run here is a regression. It stays
+    # off pull requests because a single pass proves little against an intermittent race; it runs
+    # on demand and weekly instead.
     #
-    # It also has to run here rather than locally: 80 sessions pass in about a second on an
-    # unloaded developer machine, and saturating every core does not change that. The two-core
-    # hosted runner is the only place it has ever been informative, which is the whole reason this
-    # job exists rather than a note telling someone to try it by hand.
+    # It also has to run here rather than on a developer machine: 80 sessions pass in about a second
+    # on an unloaded one, and saturating every core does not change that. Only two CPUs reproduce
+    # it, as on this hosted runner or in a container started with `--cpus=2`.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -209,21 +210,24 @@ jobs:
           ITERATIONS: ${{ github.event.inputs.churnIterations || '10' }}
         run: |
           reproduced=0
+          mkdir -p churn-failures
           for i in $(seq 1 "$ITERATIONS"); do
             if ./gradlew :client-sdk:jvmTest -Premoteble.churnHarness=true --tests '*RapidSessionChurnTest' --rerun-tasks --console=plain; then
               echo "iteration $i: all sessions completed their handshake"
             else
               reproduced=$((reproduced + 1))
               echo "::warning::iteration $i reproduced the dropped handshake"
+              # Each iteration overwrites the test report, so keep this one's diagnosis. Gradle's
+              # console shows only the exception class, which is all the 2026-11-02 run kept.
+              report=client-sdk/build/test-results/jvmTest/TEST-dev.warsha.remoteble.client.RapidSessionChurnTest.xml
+              cp "$report" "churn-failures/iteration-$i.xml" || true
+              sed -n '/<failure/,/<\/failure>/p' "$report" | head -20 || true
             fi
           done
           {
             echo "### Rapid session churn"
             echo ""
             echo "Reproduced in **$reproduced of $ITERATIONS** iterations."
-            echo ""
-            echo "A red job here means the harness *worked*: it caught the defect it exists to"
-            echo "catch. It does not mean the release gates are broken."
           } >> "$GITHUB_STEP_SUMMARY"
           test "$reproduced" -eq 0
       - name: Archive Kotlin test reports
@@ -232,6 +236,7 @@ jobs:
         with:
           name: session-churn-test-reports
           path: |
+            churn-failures/**
             **/build/reports/tests/**
             **/build/test-results/**
           if-no-files-found: ignore

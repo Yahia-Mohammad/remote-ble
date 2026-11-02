@@ -18,6 +18,20 @@ protocol version: **1**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quick reconnect is no longer refused as a duplicate session (#12).** A client that closed one
+  session and opened the next with the same stable client ID could reach the JVM agent's
+  duplicate-session check before the agent had processed the old close, and was refused with
+  `REMOTE_BLE_DUPLICATE_SESSION`. On a loaded two-core host this showed up as a handshake that never
+  completed (`TRANSPORT_LOST` in `remote-ble-tools`). The agent now waits up to two seconds for the
+  previous session to end; a socket that stays live is still refused.
+
+### Security
+
+- **Rust agent: rustls 0.23.46, rustls-webpki 0.103.16 and tokio 1.54.1** for RUSTSEC-2026-0346,
+  -0347, -0348, -0349, -0382 and -0386.
+
 ## [0.15.0] - 2026-10-06
 
 > Scan results carry more of what the agent's radio received, through one new backend-level

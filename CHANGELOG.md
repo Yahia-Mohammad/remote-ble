@@ -26,6 +26,11 @@ protocol version: **1**.
   `REMOTE_BLE_DUPLICATE_SESSION`. On a loaded two-core host this showed up as a handshake that never
   completed (`TRANSPORT_LOST` in `remote-ble-tools`). The agent now waits up to two seconds for the
   previous session to end; a socket that stays live is still refused.
+- **The Rust agent had the same race and now has the same fix.** It refused the quick reconnect
+  with HTTP `409 REMOTE_BLE_DUPLICATE_SESSION` during the handshake, every time in an in-memory
+  test, because it releases a session only after tearing the old socket down. It now reads the
+  upgrade request before the handshake, waits up to two seconds for the previous session to end,
+  and only then answers it, over TLS too. A socket that stays live is still refused with `409`.
 
 ### Security
 

@@ -184,7 +184,8 @@ Repeated failed upgrades are bounded by a fixed-memory `FailedAuthLimiter` (per-
 ceilings with least-recently-seen eviction, so spoofed source addresses can't grow an unbounded
 map); a peer past its ceiling gets `429 Too Many Requests`, with rate-limited denial logs. Only one
 live WebSocket generation is permitted per `(principal, stable client id)` — a duplicate is refused
-(conformance `LEASE-DUPLICATE-01`).
+(conformance `LEASE-DUPLICATE-01`). A reconnect waits up to two seconds for the previous session to
+end before it counts as a duplicate, so a client that closes and immediately reopens is not refused.
 
 Desktop/headless agents **bind loopback by default**; a non-loopback bind requires at least one
 credential (or the explicit `REMOTE_BLE_ALLOW_INSECURE_LAN` development override, which logs a
